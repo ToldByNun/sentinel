@@ -36,7 +36,13 @@
     <ClCompile Include="NeuralNet\Optimizers\SGD.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
-    <ClCompile Include="NeuralNet\main.cpp">
+    <ClCompile Include="main.cpp">
+      <Filter>Quelldateien</Filter>
+    </ClCompile>
+    <ClCompile Include="NeuralNet\Tokenizer\BPETokenizer.cpp">
+      <Filter>Quelldateien</Filter>
+    </ClCompile>
+    <ClCompile Include="NeuralNet\Layers\Embedding.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
   </ItemGroup>
@@ -63,6 +69,12 @@
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Optimizers\SGD.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Tokenizer\BPETokenizer.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Layers\Embedding.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
   </ItemGroup>

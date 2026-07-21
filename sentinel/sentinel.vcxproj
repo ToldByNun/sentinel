@@ -22,21 +22,25 @@
     <ClCompile Include="NeuralNet\Activations\ReLU.cpp" />
     <ClCompile Include="NeuralNet\Layers\Dense.cpp" />
     <ClCompile Include="NeuralNet\Layers\Dropout.cpp" />
+    <ClCompile Include="NeuralNet\Layers\Embedding.cpp" />
     <ClCompile Include="NeuralNet\Losses\MSE.cpp" />
-    <ClCompile Include="NeuralNet\main.cpp" />
+    <ClCompile Include="main.cpp" />
     <ClCompile Include="NeuralNet\Math\Matrix.cpp" />
     <ClCompile Include="NeuralNet\Network\Sequential.cpp" />
     <ClCompile Include="NeuralNet\Optimizers\SGD.cpp" />
+    <ClCompile Include="NeuralNet\Tokenizer\BPETokenizer.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="NeuralNet\Activations\ReLU.hpp" />
     <ClInclude Include="NeuralNet\Layers\Dense.hpp" />
     <ClInclude Include="NeuralNet\Layers\Dropout.hpp" />
+    <ClInclude Include="NeuralNet\Layers\Embedding.hpp" />
     <ClInclude Include="NeuralNet\Layers\Layer.hpp" />
     <ClInclude Include="NeuralNet\Losses\MSE.hpp" />
     <ClInclude Include="NeuralNet\Math\Matrix.hpp" />
     <ClInclude Include="NeuralNet\Network\Sequential.hpp" />
     <ClInclude Include="NeuralNet\Optimizers\SGD.hpp" />
+    <ClInclude Include="NeuralNet\Tokenizer\BPETokenizer.hpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>18.0</VCProjectVersion>

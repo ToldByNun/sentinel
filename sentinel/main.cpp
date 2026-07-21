@@ -1,7 +1,7 @@
-#include "Math/Matrix.hpp"
-#include "Layers/Dense.hpp"
-#include "Network/Sequential.hpp"
-#include "Optimizers/SGD.hpp"
+#include "NeuralNet/Math/Matrix.hpp"
+#include "NeuralNet/Layers/Dense.hpp"
+#include "NeuralNet/Network/Sequential.hpp"
+#include "NeuralNet/Optimizers/SGD.hpp"
 
 #include <utility>
 
