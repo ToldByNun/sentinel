@@ -3,6 +3,7 @@
 
 #include "../Data/ClassificationDataset.hpp"
 #include "../Layers/Dense.hpp"
+#include "../Layers/Dropout.hpp"
 #include "../Layers/Embedding.hpp"
 #include "../Layers/MeanPool.hpp"
 #include "../Math/Matrix.hpp"
@@ -11,20 +12,21 @@
 #include <vector>
 
 /// <summary>
-/// text path: Embedding -> MeanPool -> Dense -> Softmax
+/// text path: Embedding -> MeanPool -> Dense -> ReLU -> Dropout -> Dense -> Softmax
 /// </summary>
 class Sequential {
 public:
     Dense layer1;
     Dense layer2;
+    Dropout dropout;
     SGD optimizer;
 
-    Sequential(Dense layer1, Dense layer2, SGD optimizer);
+    Sequential(Dense layer1, Dense layer2, SGD optimizer, float dropRate = 0.3f);
 
-    /// <summary>forward from a feature vector returns class probs</summary>
+    /// <summary>forward from a feature vector returns class probs (eval mode)</summary>
     Matrix forward(const Matrix& input);
 
-    /// <summary>forward from token ids (embed + pool + mlp)</summary>
+    /// <summary>forward from token ids (embed + pool + mlp) (eval mode)</summary>
     Matrix forward(Embedding& embedding, MeanPool& meanPool, const std::vector<int>& tokenIds);
 
     /// <summary>train on one matrix example (no embedding)</summary>
@@ -77,4 +79,3 @@ private:
 };
 
 #endif // SEQUENTIAL_HPP
-

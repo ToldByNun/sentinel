@@ -94,7 +94,8 @@ int main() {
     Sequential model(
         Dense(std::move(weight1), std::move(bias1)),
         Dense(std::move(weight2), std::move(bias2)),
-        SGD(0.05f)
+        SGD(0.05f),
+        0.3f
     );
 
     model.train(embedding, meanPool, trainDataset, testDataset, 2000, 500, 3, 16);

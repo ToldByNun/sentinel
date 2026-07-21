@@ -7,8 +7,8 @@
 #include "../Activations/Softmax.hpp"
 #include "../Losses/CrossEntropy.hpp"
 
-Sequential::Sequential(Dense layer1, Dense layer2, SGD optimizer)
-    : layer1(std::move(layer1)), layer2(std::move(layer2)), optimizer(optimizer) {}
+Sequential::Sequential(Dense layer1, Dense layer2, SGD optimizer, float dropRate)
+    : layer1(std::move(layer1)), layer2(std::move(layer2)), dropout(dropRate), optimizer(optimizer) {}
 
 Matrix Sequential::zerosLike(const Matrix& matrix) {
     Matrix result = matrix;
@@ -47,8 +47,10 @@ void Sequential::accumulateGradient(Matrix& total, const Matrix& gradient) {
 }
 
 Matrix Sequential::forward(const Matrix& input) {
+    this->dropout.training = false;
     Matrix hidden = ReLU::apply(this->layer1.forward(input));
-    Matrix logits = this->layer2.forward(hidden);
+    Matrix dropped = this->dropout.forward(hidden);
+    Matrix logits = this->layer2.forward(dropped);
     return Softmax::apply(logits);
 }
 
@@ -59,9 +61,12 @@ Matrix Sequential::forward(Embedding& embedding, MeanPool& meanPool, const std::
 }
 
 void Sequential::train(const Matrix& input, const Matrix& target, int epochs) {
+    this->dropout.training = true;
+
     for (int epoch = 0; epoch < epochs; ++epoch) {
         Matrix hidden = ReLU::apply(this->layer1.forward(input));
-        Matrix logits = this->layer2.forward(hidden);
+        Matrix dropped = this->dropout.forward(hidden);
+        Matrix logits = this->layer2.forward(dropped);
         Matrix probabilities = Softmax::apply(logits);
 
         Matrix layer2Gradient = CrossEntropy::gradient(probabilities, target);
@@ -74,8 +79,9 @@ void Sequential::train(const Matrix& input, const Matrix& target, int epochs) {
             Matrix::transpose(this->layer2.weight),
             layer2Gradient
         );
+        Matrix hiddenGradient = this->dropout.backward(inputGradient2);
         Matrix layer1Gradient = Matrix::multiplyElementwise(
-            inputGradient2,
+            hiddenGradient,
             ReLU::derivative(this->layer1.lastZ)
         );
         Matrix weightGradient1 = Matrix::multiply(
@@ -94,6 +100,8 @@ void Sequential::train(const Matrix& input, const Matrix& target, int epochs) {
             std::cout << "Epoch " << epoch << " | loss: " << loss << '\n';
         }
     }
+
+    this->dropout.training = false;
 }
 
 void Sequential::train(Embedding& embedding, MeanPool& meanPool, const std::vector<int>& tokenIds, const Matrix& target, int epochs) {
@@ -140,6 +148,7 @@ void Sequential::train(
     for (int epoch = 0; epoch < epochs; ++epoch) {
         float epochLoss = 0.0f;
         int correct = 0;
+        this->dropout.training = true;
 
         const std::vector<size_t> order = Sequential::shuffledOrder(exampleCount, shuffleSeed);
 
@@ -161,7 +170,8 @@ void Sequential::train(
                 Matrix pooled = meanPool.forward(embedded);
 
                 Matrix hidden = ReLU::apply(this->layer1.forward(pooled));
-                Matrix logits = this->layer2.forward(hidden);
+                Matrix dropped = this->dropout.forward(hidden);
+                Matrix logits = this->layer2.forward(dropped);
                 Matrix probabilities = Softmax::apply(logits);
 
                 epochLoss += CrossEntropy::loss(probabilities, example.target);
@@ -185,8 +195,9 @@ void Sequential::train(
                     Matrix::transpose(this->layer2.weight),
                     layer2Gradient
                 );
+                Matrix hiddenGradient = this->dropout.backward(inputGradient2);
                 Matrix layer1Gradient = Matrix::multiplyElementwise(
-                    inputGradient2,
+                    hiddenGradient,
                     ReLU::derivative(this->layer1.lastZ)
                 );
                 Matrix weightGradient1 = Matrix::multiply(
@@ -218,6 +229,8 @@ void Sequential::train(
         }
 
         if (epoch % logEveryEpochs != 0) continue;
+
+        this->dropout.training = false;
 
         const float averageLoss = epochLoss / static_cast<float>(trainDataset.size());
         const float trainAccuracy = static_cast<float>(correct) / static_cast<float>(trainDataset.size());
@@ -257,9 +270,11 @@ void Sequential::train(
         std::cout << "early stop at epoch " << epoch
                   << " | bestTestAccuracy: " << bestTestAccuracy
                   << '\n';
+        this->dropout.training = false;
         return;
     }
 
+    this->dropout.training = false;
     if (!useEarlyStopping) return;
 
     this->layer1.weight = bestLayer1Weight;
