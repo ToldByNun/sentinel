@@ -22,6 +22,13 @@ public:
         unsigned seed
     );
 
+    /// <summary>textonly shuffle split for language modeling (labels stay empty)</summary>
+    static DatasetSplit partitionTexts(
+        const std::vector<std::string>& texts,
+        float trainRatio,
+        unsigned seed
+    );
+
     int trainSize() const;
     int testSize() const;
 

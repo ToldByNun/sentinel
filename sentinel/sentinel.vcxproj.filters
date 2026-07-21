@@ -66,6 +66,9 @@
     <ClCompile Include="NeuralNet\Data\JsonlLoader.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
+    <ClCompile Include="NeuralNet\Data\LanguageModelDataset.cpp">
+      <Filter>Quelldateien</Filter>
+    </ClCompile>
     <ClCompile Include="NeuralNet\Initializers\UniformInit.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
@@ -123,6 +126,9 @@
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Data\JsonlLoader.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Data\LanguageModelDataset.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Initializers\UniformInit.hpp">

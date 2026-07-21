@@ -1,14 +1,8 @@
 #include "NeuralNet/Tokenizer/BPETokenizer.hpp"
-#include "NeuralNet/Layers/Embedding.hpp"
-#include "NeuralNet/Layers/Dense.hpp"
-#include "NeuralNet/Layers/MeanPool.hpp"
-#include "NeuralNet/Network/Sequential.hpp"
-#include "NeuralNet/Optimizers/Adam.hpp"
-#include "NeuralNet/Math/Matrix.hpp"
-#include "NeuralNet/Data/ClassificationDataset.hpp"
 #include "NeuralNet/Data/DatasetSplit.hpp"
 #include "NeuralNet/Data/JsonlLoader.hpp"
-#include "NeuralNet/Initializers/UniformInit.hpp"
+#include "NeuralNet/Data/LanguageModelDataset.hpp"
+#include "NeuralNet/Losses/CrossEntropy.hpp"
 #include "NeuralNet/Utils/TextUtil.hpp"
 
 #include <iostream>
@@ -16,34 +10,21 @@
 #include <vector>
 
 /// <summary>
-/// demo: classify SERA rows (T1 vs T2) with a real train/test split
-/// tokenizer is fit on train texts only (no test leakage)
+/// demo: build next-token (shifted) language-model examples from SERA text
+/// no sequence model yet — only dataset + CrossEntropy shape check
 /// </summary>
 int main() {
     const std::string samplePath = "../SERA-Data/sera_sample.jsonl";
-    const int classCount = 2;
     const size_t maximumTextCharacters = 400;
+    const size_t maximumTokenCount = 64;
     const float trainRatio = 0.8f;
 
     std::vector<JsonlRow> rows = JsonlLoader::load(samplePath, 500);
 
     std::vector<std::string> texts;
-    std::vector<int> labels;
-    int countClassT1 = 0;
-    int countClassT2 = 0;
-
     for (const JsonlRow& row : rows) {
-        const int label = JsonlLoader::sourceToLabel(row.source);
-        if (label < 0) continue;
-
+        if (row.text.empty()) continue;
         texts.push_back(TextUtil::truncate(row.text, maximumTextCharacters));
-        labels.push_back(label);
-        if (label == 0) {
-            ++countClassT1;
-        }
-        else {
-            ++countClassT2;
-        }
     }
 
     if (texts.empty()) {
@@ -51,72 +32,53 @@ int main() {
         return 1;
     }
 
-    DatasetSplit split = DatasetSplit::partition(texts, labels, trainRatio, 42u);
+    DatasetSplit split = DatasetSplit::partitionTexts(texts, trainRatio, 42u);
 
-    // fit BPE only on train test stays unseen for vocab merges too
     BPETokenizer tokenizer;
     tokenizer.train(split.trainTexts, 300);
 
-    ClassificationDataset trainDataset = ClassificationDataset::buildLabeled(
+    LanguageModelDataset trainDataset = LanguageModelDataset::build(
         split.trainTexts,
-        split.trainLabels,
         tokenizer,
-        classCount
+        maximumTokenCount,
+        true
     );
-    ClassificationDataset testDataset = ClassificationDataset::buildLabeled(
+    LanguageModelDataset testDataset = LanguageModelDataset::build(
         split.testTexts,
-        split.testLabels,
         tokenizer,
-        classCount
+        maximumTokenCount,
+        true
     );
 
-    const int majorityCount = (countClassT1 > countClassT2) ? countClassT1 : countClassT2;
-
-    std::cout << "rows: " << texts.size()
-              << " (T1=" << countClassT1 << ", T2=" << countClassT2 << ")\n";
-    std::cout << "train: " << split.trainSize() << " | test: " << split.testSize() << '\n';
+    std::cout << "texts: " << texts.size() << '\n';
+    std::cout << "train texts: " << split.trainSize() << " | test texts: " << split.testSize() << '\n';
     std::cout << "vocab size: " << tokenizer.vocabSize() << '\n';
-    std::cout << "majority baseline: "
-              << (static_cast<float>(majorityCount) / static_cast<float>(texts.size()))
-              << '\n';
+    std::cout << "train examples: " << trainDataset.size()
+              << " | next-token positions: " << trainDataset.totalPredictionCount() << '\n';
+    std::cout << "test examples: " << testDataset.size()
+              << " | next-token positions: " << testDataset.totalPredictionCount() << '\n';
 
-    const int embeddingDim = 32;
-    const int hidden = 32;
+    if (trainDataset.examples.empty()) {
+        std::cout << "no language-model examples (need sequences with >= 2 tokens)\n";
+        return 1;
+    }
 
-    Matrix weight1 = UniformInit::matrix(hidden, embeddingDim, 0.1f, 1u);
-    Matrix bias1 = UniformInit::matrix(hidden, 1, 0.01f, 2u);
-    Matrix weight2 = UniformInit::matrix(classCount, hidden, 0.1f, 3u);
-    Matrix bias2 = UniformInit::matrix(classCount, 1, 0.01f, 4u);
+    const LanguageModelExample& sample = trainDataset.examples[0];
+    const size_t previewCount = (sample.inputTokenIds.size() < 8) ? sample.inputTokenIds.size() : 8;
 
-    Embedding embedding(tokenizer.vocabSize(), embeddingDim);
-    MeanPool meanPool;
-
-    Sequential model(
-        Dense(std::move(weight1), std::move(bias1)),
-        Dense(std::move(weight2), std::move(bias2)),
-        Adam(0.001f),
-        0.3f
-    );
-
-    model.train(embedding, meanPool, trainDataset, testDataset, 2000, 500, 3, 16);
-
-    const float trainAccuracy = model.accuracy(embedding, meanPool, trainDataset);
-    const float testAccuracy = model.accuracy(embedding, meanPool, testDataset);
-
-    std::cout << "train accuracy: " << trainAccuracy << '\n';
-    std::cout << "test accuracy:  " << testAccuracy << '\n';
-
-    const char* classNames[] = { "T1", "T2" };
-    std::cout << "--- test predictions ---\n";
-    for (size_t index = 0; index < testDataset.examples.size(); ++index) {
-        const ClassificationExample& example = testDataset.examples[index];
-        const int predicted = model.predictClass(embedding, meanPool, example.tokenIds);
-
-        std::cout << "test " << index
-                  << " | true: " << classNames[example.label]
-                  << " | pred: " << classNames[predicted]
+    std::cout << "--- shift preview (first train example, first " << previewCount << " positions) ---\n";
+    for (size_t position = 0; position < previewCount; ++position) {
+        const int inputId = sample.inputTokenIds[position];
+        const int targetId = sample.targetTokenIds[position];
+        std::cout << "pos " << position
+                  << " | in:  [" << inputId << "] \"" << tokenizer.idToToken(inputId) << "\""
+                  << " | out: [" << targetId << "] \"" << tokenizer.idToToken(targetId) << "\""
                   << '\n';
     }
+
+    // smoke test: identical probability/target matrices -> loss near 0
+    const float perfectLoss = CrossEntropy::loss(sample.targetOneHot, sample.targetOneHot);
+    std::cout << "perfect-prediction CE (should be ~0): " << perfectLoss << '\n';
 
     return 0;
 }

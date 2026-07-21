@@ -51,6 +51,14 @@ DatasetSplit DatasetSplit::partition(const std::vector<std::string>& texts, cons
     return split;
 }
 
+DatasetSplit DatasetSplit::partitionTexts(const std::vector<std::string>& texts, float trainRatio, unsigned seed) {
+    std::vector<int> dummyLabels(texts.size(), 0);
+    DatasetSplit split = DatasetSplit::partition(texts, dummyLabels, trainRatio, seed);
+    split.trainLabels.clear();
+    split.testLabels.clear();
+    return split;
+}
+
 int DatasetSplit::trainSize() const {
     return static_cast<int>(this->trainTexts.size());
 }
