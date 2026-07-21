@@ -30,7 +30,7 @@ public:
     /// <summary>heuristic label from text content</summary>
     static int inferLabel(const std::string& text);
 
-    /// <summary>encode corpus + attach labels. tokenizer must already be trained</summary>
+    /// <summary>encode corpus + attach labels tokenizer must already be trained</summary>
     static ClassificationDataset build(
         const std::vector<std::string>& corpus,
         const BPETokenizer& tokenizer

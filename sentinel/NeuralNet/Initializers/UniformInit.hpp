@@ -3,7 +3,7 @@
 
 #include "../Math/Matrix.hpp"
 
-/// <summary>fills matrices with small unique values in [-scale, scale]. breaks weight symmetry</summary>
+/// <summary>fills matrices with small unique values in [-scale, scale] breaks weight symmetry</summary>
 class UniformInit {
 public:
     /// <summary>create rows x columns matrix with pseudo random values</summary>

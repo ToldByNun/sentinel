@@ -11,7 +11,7 @@
 #include <vector>
 
 /// <summary>
-/// text path: Embedding -> MeanPool -> Dense -> Softmax.
+/// text path: Embedding -> MeanPool -> Dense -> Softmax
 /// </summary>
 class Sequential {
 public:
@@ -31,18 +31,30 @@ public:
     void train(const Matrix& input, const Matrix& target, int epochs);
 
     /// <summary>train on one tokenized example</summary>
-    void train(Embedding& embedding, MeanPool& meanPool, const std::vector<int>& tokenIds, const Matrix& target,int epochs);
+    void train(Embedding& embedding, MeanPool& meanPool, const std::vector<int>& tokenIds, const Matrix& target, int epochs);
 
     /// <summary>
-    /// train on the full dataset.
-    /// backprop goes through dense and into embedding weights.
+    /// train on the full dataset
+    /// backprop goes through Dense and into Embedding weights
     /// </summary>
     void train(Embedding& embedding, MeanPool& meanPool, const ClassificationDataset& dataset, int epochs);
+
+    /// <summary>
+    /// train on trainDataset every logEveryEpochs also reports testAccuracy (no test grad updates)
+    /// </summary>
+    void train(
+        Embedding& embedding,
+        MeanPool& meanPool,
+        const ClassificationDataset& trainDataset,
+        const ClassificationDataset& testDataset,
+        int epochs,
+        int logEveryEpochs = 500
+    );
 
     /// <summary>argmax class for token ids</summary>
     int predictClass(Embedding& embedding, MeanPool& meanPool, const std::vector<int>& tokenIds);
 
-    /// <summary>Fraction of correctly classified examples (no training).</summary>
+    /// <summary>fraction of correctly classified examples (no training)</summary>
     float accuracy(Embedding& embedding, MeanPool& meanPool, const ClassificationDataset& dataset);
 };
 

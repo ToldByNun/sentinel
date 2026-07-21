@@ -11,7 +11,7 @@ public:
     std::string source; // e.g. Sera-4.6-Lite-T1 / T2
 };
 
-/// <summary>tiny JSONL reader. no real JSON parser just pulls string fields</summary>
+/// <summary>tiny JSONL reader no real JSON parser just pulls string fields</summary>
 class JsonlLoader {
 public:
     /// <summary>load up to maximumRows lines from a .jsonl file</summary>

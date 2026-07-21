@@ -70,13 +70,26 @@ void Sequential::train(Embedding& embedding, MeanPool& meanPool, const std::vect
 }
 
 void Sequential::train(Embedding& embedding, MeanPool& meanPool, const ClassificationDataset& dataset, int epochs) {
-    if (dataset.examples.empty()) return;
+    ClassificationDataset emptyTest;
+    this->train(embedding, meanPool, dataset, emptyTest, epochs, 500);
+}
+
+void Sequential::train(
+    Embedding& embedding,
+    MeanPool& meanPool,
+    const ClassificationDataset& trainDataset,
+    const ClassificationDataset& testDataset,
+    int epochs,
+    int logEveryEpochs
+) {
+    if (trainDataset.examples.empty()) return;
+    if (logEveryEpochs <= 0) logEveryEpochs = 500;
 
     for (int epoch = 0; epoch < epochs; ++epoch) {
         float epochLoss = 0.0f;
         int correct = 0;
 
-        for (const ClassificationExample& example : dataset.examples) {
+        for (const ClassificationExample& example : trainDataset.examples) {
             Matrix embedded = embedding.forward(example.tokenIds);
             Matrix pooled = meanPool.forward(embedded);
 
@@ -131,14 +144,21 @@ void Sequential::train(Embedding& embedding, MeanPool& meanPool, const Classific
             this->optimizer.update(embedding.weight, embeddingWeightGradient);
         }
 
-        if (epoch % 500 == 0) {
-            const float averageLoss = epochLoss / static_cast<float>(dataset.size());
-            const float accuracy = static_cast<float>(correct) / static_cast<float>(dataset.size());
-            std::cout << "Epoch " << epoch
-                      << " | loss: " << averageLoss
-                      << " | accuracy: " << accuracy
-                      << '\n';
+        if (epoch % logEveryEpochs != 0) continue;
+
+        const float averageLoss = epochLoss / static_cast<float>(trainDataset.size());
+        const float trainAccuracy = static_cast<float>(correct) / static_cast<float>(trainDataset.size());
+
+        std::cout << "Epoch " << epoch
+                  << " | loss: " << averageLoss
+                  << " | trainAccuracy: " << trainAccuracy;
+
+        if (!testDataset.examples.empty()) {
+            const float testAccuracy = this->accuracy(embedding, meanPool, testDataset);
+            std::cout << " | testAccuracy: " << testAccuracy;
         }
+
+        std::cout << '\n';
     }
 }
 

@@ -17,16 +17,16 @@ public:
     /// <summary>swap rows/cols</summary>
     static Matrix transpose(const Matrix& matrix);
 
-    /// <summary>element-wise add. same shape required</summary>
+    /// <summary>element wise add same shape required</summary>
     static Matrix add(const Matrix& left, const Matrix& right);
 
-    /// <summary>element wise subtract. same shape required</summary>
+    /// <summary>element wise subtract same shape required</summary>
     static Matrix subtract(const Matrix& left, const Matrix& right);
 
     /// <summary>multiply every element by scalar</summary>
     static Matrix scale(const Matrix& matrix, float scalar);
 
-    /// <summary>element wise multiply. same shape required</summary>
+    /// <summary>element wise multiply same shape required</summary>
     static Matrix multiplyElementwise(const Matrix& left, const Matrix& right);
 };
 

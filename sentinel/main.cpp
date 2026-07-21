@@ -16,8 +16,8 @@
 #include <vector>
 
 /// <summary>
-/// Demo: classify SERA rows (T1 vs T2) with a real train/test split.
-/// Tokenizer is fit on train texts only (no test leakage).
+/// demo: classify SERA rows (T1 vs T2) with a real train/test split
+/// tokenizer is fit on train texts only (no test leakage)
 /// </summary>
 int main() {
     const std::string samplePath = "../SERA-Data/sera_sample.jsonl";
@@ -97,7 +97,7 @@ int main() {
         SGD(0.05f)
     );
 
-    model.train(embedding, meanPool, trainDataset, 2000);
+    model.train(embedding, meanPool, trainDataset, testDataset, 2000, 500);
 
     const float trainAccuracy = model.accuracy(embedding, meanPool, trainDataset);
     const float testAccuracy = model.accuracy(embedding, meanPool, testDataset);

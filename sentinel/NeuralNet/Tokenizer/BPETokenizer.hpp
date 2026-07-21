@@ -6,7 +6,7 @@
 #include <utility>
 #include <vector>
 
-/// <summary>BPE tokenizer. Call train() before encode/decode. Unknown pieces map to unk.</summary>
+/// <summary>BPE tokenizer call train() before encode/decode unknown pieces map to unk</summary>
 class BPETokenizer {
 public:
     static constexpr const char* UnknownToken = "<unk>";
@@ -20,7 +20,7 @@ public:
     /// <param name="vocabSize">target vocab size (must be bigger than #unique chars + unk)</param>
     void train(const std::vector<std::string>& corpus, int vocabSize);
 
-    /// <summary>text -> token ids. Unknown tokens become unk</summary>
+    /// <summary>text -> token ids unknown tokens become unk</summary>
     std::vector<int> encode(const std::string& text) const;
 
     /// <summary>token ids -> text (concat)</summary>
