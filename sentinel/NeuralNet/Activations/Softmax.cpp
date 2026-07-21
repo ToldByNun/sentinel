@@ -19,21 +19,19 @@ Matrix Softmax::apply(const Matrix& logits) {
     for (size_t column = 0; column < columnCount; ++column) {
         float maxLogit = logits.data[0][column];
         for (size_t classIndex = 1; classIndex < classCount; ++classIndex) {
-            if (logits.data[classIndex][column] > maxLogit) {
+            if (logits.data[classIndex][column] > maxLogit)
                 maxLogit = logits.data[classIndex][column];
-            }
         }
 
-        float sumExps = 0.0f;
+        float exponentialSum = 0.0f;
         for (size_t classIndex = 0; classIndex < classCount; ++classIndex) {
             const float value = std::exp(logits.data[classIndex][column] - maxLogit);
             probabilities.data[classIndex][column] = value;
-            sumExps += value;
+            exponentialSum += value;
         }
 
-        for (size_t classIndex = 0; classIndex < classCount; ++classIndex) {
-            probabilities.data[classIndex][column] /= sumExps;
-        }
+        for (size_t classIndex = 0; classIndex < classCount; ++classIndex)
+            probabilities.data[classIndex][column] /= exponentialSum;
     }
 
     return probabilities;

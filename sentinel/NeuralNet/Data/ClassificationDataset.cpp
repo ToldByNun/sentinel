@@ -16,9 +16,7 @@ Matrix ClassificationDataset::makeOneHot(int label, int classCount) {
 
 int ClassificationDataset::inferLabel(const std::string& text) {
     if (text.find('{') != std::string::npos && text.find('"') != std::string::npos) return ClassJson;
-    
     if (text.find("import ") != std::string::npos || text.find("def ") != std::string::npos) return ClassPython;
-    
     return ClassCpp;
 }
 
@@ -30,12 +28,32 @@ ClassificationDataset ClassificationDataset::build(
 
     for (const std::string& text : corpus) {
         ClassificationExample example;
-        example.label = inferLabel(text);
+        example.label = ClassificationDataset::inferLabel(text);
         example.tokenIds = tokenizer.encode(text);
-        example.target = makeOneHot(example.label, ClassCount);
+        example.target = ClassificationDataset::makeOneHot(example.label, ClassificationDataset::ClassCount);
         dataset.examples.push_back(std::move(example));
     }
 
+    return dataset;
+}
+
+ClassificationDataset ClassificationDataset::buildLabeled(
+    const std::vector<std::string>& texts,
+    const std::vector<int>& labels,
+    const BPETokenizer& tokenizer,
+    int classCount
+) {
+    if (texts.size() != labels.size())
+        throw std::invalid_argument("ClassificationDataset::buildLabeled size mismatch");
+
+    ClassificationDataset dataset;
+    for (size_t index = 0; index < texts.size(); ++index) {
+        ClassificationExample example;
+        example.label = labels[index];
+        example.tokenIds = tokenizer.encode(texts[index]);
+        example.target = ClassificationDataset::makeOneHot(example.label, classCount);
+        dataset.examples.push_back(std::move(example));
+    }
     return dataset;
 }
 

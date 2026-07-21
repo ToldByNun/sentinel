@@ -3,7 +3,7 @@
 
 #include "../Math/Matrix.hpp"
 
-/// <summary>SGD: param -= lr * grad</summary>
+/// <summary>SGD: parameter -= learningRate * gradient</summary>
 class SGD {
 public:
     float learningRate;

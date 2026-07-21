@@ -3,13 +3,13 @@
 
 #include "../Math/Matrix.hpp"
 
-/// <summary>classification loss. pair with softmax</summary>
+/// <summary>Classification loss. Pair with Softmax.</summary>
 class CrossEntropy {
 public:
-    /// <summary>-sum(target * log(probs)) averaged over columns</summary>
+    /// <summary>-sum(target * log(probabilities)), averaged over columns.</summary>
     static float loss(const Matrix& probabilities, const Matrix& target);
 
-    /// <summary>grad w.r.t. logits for Softmax+CE: probs - target</summary>
+    /// <summary>Gradient w.r.t. logits for Softmax+CrossEntropy: probabilities - target.</summary>
     static Matrix gradient(const Matrix& probabilities, const Matrix& target);
 };
 

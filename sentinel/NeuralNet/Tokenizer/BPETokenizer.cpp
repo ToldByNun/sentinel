@@ -1,7 +1,5 @@
 #include "BPETokenizer.hpp"
 
-#include <algorithm>
-#include <limits>
 #include <sstream>
 #include <stdexcept>
 
@@ -27,26 +25,25 @@ void BPETokenizer::train(const std::vector<std::string>& corpus, int vocabSize) 
 }
 
 std::vector<int> BPETokenizer::encode(const std::string& text) const {
-    std::vector<int> ids;
+    std::vector<int> tokenIds;
     std::vector<std::string> words = this->preTokenize(text);
 
     for (const std::string& word : words) {
         std::vector<std::string> tokens;
         tokens.reserve(word.size());
-        for (char character : word) {
+        for (char character : word)
             tokens.emplace_back(1, character);
-        }
 
         tokens = this->applyMerges(tokens);
 
         for (const std::string& token : tokens) {
-            auto it = this->tokenToId_.find(token);
-            if (it == this->tokenToId_.end()) throw std::runtime_error("unknown token during encode: " + token);
-            ids.push_back(it->second);
+            auto found = this->tokenToId_.find(token);
+            if (found == this->tokenToId_.end()) throw std::runtime_error("unknown token during encode: " + token);
+            tokenIds.push_back(found->second);
         }
     }
 
-    return ids;
+    return tokenIds;
 }
 
 std::string BPETokenizer::decode(const std::vector<int>& tokenIds) const {
@@ -54,9 +51,8 @@ std::string BPETokenizer::decode(const std::vector<int>& tokenIds) const {
     result.reserve(tokenIds.size());
 
     for (int tokenId : tokenIds) {
-        if (tokenId < 0 || tokenId >= static_cast<int>(this->idToToken_.size())) {
+        if (tokenId < 0 || tokenId >= static_cast<int>(this->idToToken_.size()))
             throw std::out_of_range("token id out of range");
-        }
         result += this->idToToken_[tokenId];
     }
 
@@ -68,24 +64,24 @@ int BPETokenizer::vocabSize() const {
 }
 
 int BPETokenizer::tokenToId(const std::string& token) const {
-    auto it = this->tokenToId_.find(token);
-    if (it == this->tokenToId_.end()) throw std::runtime_error("unknown token: " + token);
-    return it->second;
+    auto found = this->tokenToId_.find(token);
+    if (found == this->tokenToId_.end()) throw std::runtime_error("unknown token: " + token);
+    return found->second;
 }
 
-const std::string& BPETokenizer::idToToken(int id) const {
-    if (id < 0 || id >= static_cast<int>(this->idToToken_.size())) throw std::out_of_range("token id out of range");
-    return this->idToToken_[id];
+const std::string& BPETokenizer::idToToken(int tokenId) const {
+    if (tokenId < 0 || tokenId >= static_cast<int>(this->idToToken_.size()))
+        throw std::out_of_range("token id out of range");
+    return this->idToToken_[tokenId];
 }
 
 void BPETokenizer::buildBaseVocabulary(const std::vector<std::string>& corpus) {
     for (const std::string& text : corpus) {
         for (char character : text) {
             std::string token(1, character);
-            if (this->tokenToId_.find(token) == this->tokenToId_.end()) {
-                this->tokenToId_[token] = static_cast<int>(this->idToToken_.size());
-                this->idToToken_.push_back(token);
-            }
+            if (this->tokenToId_.find(token) != this->tokenToId_.end()) continue;
+            this->tokenToId_[token] = static_cast<int>(this->idToToken_.size());
+            this->idToToken_.push_back(token);
         }
     }
 }
@@ -98,9 +94,8 @@ void BPETokenizer::learnMerges(const std::vector<std::string>& corpus, int vocab
             std::vector<std::string> tokens;
             tokens.reserve(word.size());
 
-            for (char character : word) {
+            for (char character : word)
                 tokens.emplace_back(1, character);
-            }
 
             if (!tokens.empty()) words.push_back(std::move(tokens));
         }
@@ -110,20 +105,16 @@ void BPETokenizer::learnMerges(const std::vector<std::string>& corpus, int vocab
         std::unordered_map<Pair, int, PairHash> pairCounts;
 
         for (const auto& tokens : words) {
-            for (size_t tokenIndex = 0; tokenIndex + 1 < tokens.size(); ++tokenIndex) {
+            for (size_t tokenIndex = 0; tokenIndex + 1 < tokens.size(); ++tokenIndex)
                 pairCounts[{tokens[tokenIndex], tokens[tokenIndex + 1]}]++;
-            }
         }
 
         if (pairCounts.empty()) break;
 
-        auto best = std::max_element(
-            pairCounts.begin(),
-            pairCounts.end(),
-            [](const auto& left, const auto& right) {
-                return left.second < right.second;
-            }
-        );
+        auto best = pairCounts.begin();
+        for (auto entry = pairCounts.begin(); entry != pairCounts.end(); ++entry) {
+            if (entry->second > best->second) best = entry;
+        }
 
         const Pair& bestPair = best->first;
         const std::string merged = bestPair.first + bestPair.second;
@@ -142,10 +133,11 @@ void BPETokenizer::learnMerges(const std::vector<std::string>& corpus, int vocab
                     && tokens[tokenIndex + 1] == bestPair.second) {
                     updated.push_back(merged);
                     tokenIndex += 2;
-                } else {
-                    updated.push_back(tokens[tokenIndex]);
-                    ++tokenIndex;
+                    continue;
                 }
+
+                updated.push_back(tokens[tokenIndex]);
+                ++tokenIndex;
             }
 
             tokens = std::move(updated);
@@ -158,9 +150,8 @@ std::vector<std::string> BPETokenizer::preTokenize(const std::string& text) cons
     std::istringstream stream(text);
     std::string word;
 
-    while (stream >> word) {
+    while (stream >> word)
         words.push_back(word);
-    }
 
     return words;
 }
@@ -179,10 +170,11 @@ std::vector<std::string> BPETokenizer::applyMerges(const std::vector<std::string
                 && result[tokenIndex + 1] == merge.second) {
                 updated.push_back(merged);
                 tokenIndex += 2;
-            } else {
-                updated.push_back(result[tokenIndex]);
-                ++tokenIndex;
+                continue;
             }
+
+            updated.push_back(result[tokenIndex]);
+            ++tokenIndex;
         }
 
         result = std::move(updated);

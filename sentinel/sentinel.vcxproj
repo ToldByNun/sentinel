@@ -22,6 +22,9 @@
     <ClCompile Include="NeuralNet\Activations\ReLU.cpp" />
     <ClCompile Include="NeuralNet\Activations\Softmax.cpp" />
     <ClCompile Include="NeuralNet\Data\ClassificationDataset.cpp" />
+    <ClCompile Include="NeuralNet\Data\JsonlLoader.cpp" />
+    <ClCompile Include="NeuralNet\Initializers\UniformInit.cpp" />
+    <ClCompile Include="NeuralNet\Utils\TextUtil.cpp" />
     <ClCompile Include="NeuralNet\Layers\Dense.cpp" />
     <ClCompile Include="NeuralNet\Layers\Dropout.cpp" />
     <ClCompile Include="NeuralNet\Layers\Embedding.cpp" />
@@ -38,6 +41,9 @@
     <ClInclude Include="NeuralNet\Activations\ReLU.hpp" />
     <ClInclude Include="NeuralNet\Activations\Softmax.hpp" />
     <ClInclude Include="NeuralNet\Data\ClassificationDataset.hpp" />
+    <ClInclude Include="NeuralNet\Data\JsonlLoader.hpp" />
+    <ClInclude Include="NeuralNet\Initializers\UniformInit.hpp" />
+    <ClInclude Include="NeuralNet\Utils\TextUtil.hpp" />
     <ClInclude Include="NeuralNet\Layers\Dense.hpp" />
     <ClInclude Include="NeuralNet\Layers\Dropout.hpp" />
     <ClInclude Include="NeuralNet\Layers\Embedding.hpp" />

@@ -57,6 +57,15 @@
     <ClCompile Include="NeuralNet\Data\ClassificationDataset.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
+    <ClCompile Include="NeuralNet\Data\JsonlLoader.cpp">
+      <Filter>Quelldateien</Filter>
+    </ClCompile>
+    <ClCompile Include="NeuralNet\Initializers\UniformInit.cpp">
+      <Filter>Quelldateien</Filter>
+    </ClCompile>
+    <ClCompile Include="NeuralNet\Utils\TextUtil.cpp">
+      <Filter>Quelldateien</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="NeuralNet\Activations\ReLU.hpp">
@@ -99,6 +108,15 @@
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Data\ClassificationDataset.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Data\JsonlLoader.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Initializers\UniformInit.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Utils\TextUtil.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
   </ItemGroup>

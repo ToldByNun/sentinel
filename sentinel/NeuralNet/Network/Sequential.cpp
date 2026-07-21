@@ -70,9 +70,7 @@ void Sequential::train(Embedding& embedding, MeanPool& meanPool, const std::vect
 }
 
 void Sequential::train(Embedding& embedding, MeanPool& meanPool, const ClassificationDataset& dataset, int epochs) {
-    if (dataset.examples.empty()) {
-        return;
-    }
+    if (dataset.examples.empty()) return;
 
     for (int epoch = 0; epoch < epochs; ++epoch) {
         float epochLoss = 0.0f;
@@ -91,14 +89,11 @@ void Sequential::train(Embedding& embedding, MeanPool& meanPool, const Classific
             int predicted = 0;
             float bestProbability = probabilities.data[0][0];
             for (size_t classIndex = 1; classIndex < probabilities.data.size(); ++classIndex) {
-                if (probabilities.data[classIndex][0] > bestProbability) {
-                    bestProbability = probabilities.data[classIndex][0];
-                    predicted = static_cast<int>(classIndex);
-                }
+                if (probabilities.data[classIndex][0] <= bestProbability) continue;
+                bestProbability = probabilities.data[classIndex][0];
+                predicted = static_cast<int>(classIndex);
             }
-            if (predicted == example.label) {
-                ++correct;
-            }
+            if (predicted == example.label) ++correct;
 
             Matrix layer2Gradient = CrossEntropy::gradient(probabilities, example.target);
             Matrix weightGradient2 = Matrix::multiply(
@@ -141,7 +136,7 @@ void Sequential::train(Embedding& embedding, MeanPool& meanPool, const Classific
             const float accuracy = static_cast<float>(correct) / static_cast<float>(dataset.size());
             std::cout << "Epoch " << epoch
                       << " | loss: " << averageLoss
-                      << " | acc: " << accuracy
+                      << " | accuracy: " << accuracy
                       << '\n';
         }
     }
@@ -153,10 +148,9 @@ int Sequential::predictClass(Embedding& embedding, MeanPool& meanPool, const std
     int predicted = 0;
     float bestProbability = probabilities.data[0][0];
     for (size_t classIndex = 1; classIndex < probabilities.data.size(); ++classIndex) {
-        if (probabilities.data[classIndex][0] > bestProbability) {
-            bestProbability = probabilities.data[classIndex][0];
-            predicted = static_cast<int>(classIndex);
-        }
+        if (probabilities.data[classIndex][0] <= bestProbability) continue;
+        bestProbability = probabilities.data[classIndex][0];
+        predicted = static_cast<int>(classIndex);
     }
     return predicted;
 }

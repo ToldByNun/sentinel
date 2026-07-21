@@ -1,12 +1,18 @@
 #include "Embedding.hpp"
+#include "../Initializers/UniformInit.hpp"
 
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 Embedding::Embedding(int vocabSize, int embeddingDim) {
     if (vocabSize <= 0 || embeddingDim <= 0) throw std::invalid_argument("vocabSize and embeddingDim must be > 0");
 
-    this->weight.data = std::vector<std::vector<float>>(static_cast<size_t>(vocabSize), std::vector<float>(static_cast<size_t>(embeddingDim), 0.01f));
+    this->weight.data = std::vector<std::vector<float>>(
+        static_cast<size_t>(vocabSize),
+        std::vector<float>(static_cast<size_t>(embeddingDim), 0.0f)
+    );
+    UniformInit::fill(this->weight, 0.05f, 42u);
 }
 
 Embedding::Embedding(Matrix weight) : weight(std::move(weight)) {
@@ -34,9 +40,8 @@ Matrix Embedding::forward(const std::vector<int>& tokenIds) {
         const int tokenId = tokenIds[tokenIndex];
         if (tokenId < 0 || tokenId >= this->vocabSize()) throw std::out_of_range("token id out of range in Embedding::forward");
 
-        for (int dimensionIndex = 0; dimensionIndex < dimension; ++dimensionIndex) {
+        for (int dimensionIndex = 0; dimensionIndex < dimension; ++dimensionIndex)
             result.data[dimensionIndex][tokenIndex] = this->weight.data[tokenId][dimensionIndex];
-        }
     }
 
     return result;
@@ -55,9 +60,8 @@ Matrix Embedding::backward(const Matrix& outputGradient) const {
 
     for (size_t tokenIndex = 0; tokenIndex < this->lastTokenIds.size(); ++tokenIndex) {
         const int tokenId = this->lastTokenIds[tokenIndex];
-        for (int dimensionIndex = 0; dimensionIndex < dimension; ++dimensionIndex) {
+        for (int dimensionIndex = 0; dimensionIndex < dimension; ++dimensionIndex)
             weightGradient.data[tokenId][dimensionIndex] += outputGradient.data[dimensionIndex][tokenIndex];
-        }
     }
 
     return weightGradient;

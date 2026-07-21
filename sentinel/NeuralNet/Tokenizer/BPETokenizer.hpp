@@ -26,7 +26,7 @@ public:
 
     int vocabSize() const;
     int tokenToId(const std::string& token) const;
-    const std::string& idToToken(int id) const;
+    const std::string& idToToken(int tokenId) const;
 
 private:
     using Pair = std::pair<std::string, std::string>;

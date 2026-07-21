@@ -1,0 +1,20 @@
+#ifndef UNIFORMINIT_HPP
+#define UNIFORMINIT_HPP
+
+#include "../Math/Matrix.hpp"
+
+/// <summary>Fills matrices with small unique values in [-scale, scale]. Breaks weight symmetry.</summary>
+class UniformInit {
+public:
+    /// <summary>Create rows x columns matrix with pseudo-random values.</summary>
+    static Matrix matrix(int rows, int columns, float scale, unsigned seed);
+
+    /// <summary>Overwrite an existing matrix in-place.</summary>
+    static void fill(Matrix& matrix, float scale, unsigned seed);
+
+private:
+    static unsigned advanceSeed(unsigned seed);
+    static float sampleValue(unsigned& seed, float scale);
+};
+
+#endif // UNIFORMINIT_HPP

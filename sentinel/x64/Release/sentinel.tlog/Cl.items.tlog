@@ -1,6 +1,9 @@
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Activations\ReLU.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\ReLU.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Activations\Softmax.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\Softmax.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Data\ClassificationDataset.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\ClassificationDataset.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Data\JsonlLoader.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\JsonlLoader.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Initializers\UniformInit.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\UniformInit.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Utils\TextUtil.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\TextUtil.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\Dense.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\Dense.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\Dropout.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\Dropout.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\Embedding.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\Embedding.obj
