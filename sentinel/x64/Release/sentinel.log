@@ -1,0 +1,13 @@
+﻿  ReLU.cpp
+  Dense.cpp
+  Dropout.cpp
+  MSE.cpp
+  main.cpp
+  Matrix.cpp
+  Sequential.cpp
+  SGD.cpp
+  Code wird generiert.
+  Previous IPDB not found, fall back to full compilation.
+  All 253 functions were compiled because no usable IPDB/IOBJ from previous compilation was found.
+  Codegenerierung ist abgeschlossen.
+  sentinel.vcxproj -> C:\Users\mikaj\source\repos\sentinel\x64\Release\sentinel.exe

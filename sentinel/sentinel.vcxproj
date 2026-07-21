@@ -18,6 +18,26 @@
       <Platform>x64</Platform>
     </ProjectConfiguration>
   </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="NeuralNet\Activations\ReLU.cpp" />
+    <ClCompile Include="NeuralNet\Layers\Dense.cpp" />
+    <ClCompile Include="NeuralNet\Layers\Dropout.cpp" />
+    <ClCompile Include="NeuralNet\Losses\MSE.cpp" />
+    <ClCompile Include="NeuralNet\main.cpp" />
+    <ClCompile Include="NeuralNet\Math\Matrix.cpp" />
+    <ClCompile Include="NeuralNet\Network\Sequential.cpp" />
+    <ClCompile Include="NeuralNet\Optimizers\SGD.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="NeuralNet\Activations\ReLU.hpp" />
+    <ClInclude Include="NeuralNet\Layers\Dense.hpp" />
+    <ClInclude Include="NeuralNet\Layers\Dropout.hpp" />
+    <ClInclude Include="NeuralNet\Layers\Layer.hpp" />
+    <ClInclude Include="NeuralNet\Losses\MSE.hpp" />
+    <ClInclude Include="NeuralNet\Math\Matrix.hpp" />
+    <ClInclude Include="NeuralNet\Network\Sequential.hpp" />
+    <ClInclude Include="NeuralNet\Optimizers\SGD.hpp" />
+  </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>18.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
@@ -138,9 +158,6 @@
       <EnableSegmentHeap>true</EnableSegmentHeap>
     </Manifest>
   </ItemDefinitionGroup>
-  <ItemGroup>
-    <ClCompile Include="main.cpp" />
-  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
