@@ -5,8 +5,8 @@
 
 class ReLU {
 public:
-    static Matrix apply(Matrix a);
-    static Matrix derivative(Matrix a);
+    static Matrix apply(Matrix matrix);
+    static Matrix derivative(Matrix matrix);
 };
 
 #endif // RELU_HPP

@@ -6,9 +6,9 @@
 #include <stdexcept>
 
 size_t BPETokenizer::PairHash::operator()(const Pair& pair) const {
-    size_t h1 = std::hash<std::string>{}(pair.first);
-    size_t h2 = std::hash<std::string>{}(pair.second);
-    return h1 ^ (h2 << 1);
+    size_t hashFirst = std::hash<std::string>{}(pair.first);
+    size_t hashSecond = std::hash<std::string>{}(pair.second);
+    return hashFirst ^ (hashSecond << 1);
 }
 
 void BPETokenizer::train(const std::string& text, int vocabSize) {
@@ -33,8 +33,8 @@ std::vector<int> BPETokenizer::encode(const std::string& text) const {
     for (const std::string& word : words) {
         std::vector<std::string> tokens;
         tokens.reserve(word.size());
-        for (char c : word) {
-            tokens.emplace_back(1, c);
+        for (char character : word) {
+            tokens.emplace_back(1, character);
         }
 
         tokens = this->applyMerges(tokens);
@@ -53,9 +53,11 @@ std::string BPETokenizer::decode(const std::vector<int>& tokenIds) const {
     std::string result;
     result.reserve(tokenIds.size());
 
-    for (int id : tokenIds) {
-        if (id < 0 || id >= static_cast<int>(this->idToToken_.size())) throw std::out_of_range("token id out of range");
-        result += this->idToToken_[id];
+    for (int tokenId : tokenIds) {
+        if (tokenId < 0 || tokenId >= static_cast<int>(this->idToToken_.size())) {
+            throw std::out_of_range("token id out of range");
+        }
+        result += this->idToToken_[tokenId];
     }
 
     return result;
@@ -78,8 +80,8 @@ const std::string& BPETokenizer::idToToken(int id) const {
 
 void BPETokenizer::buildBaseVocabulary(const std::vector<std::string>& corpus) {
     for (const std::string& text : corpus) {
-        for (char c : text) {
-            std::string token(1, c);
+        for (char character : text) {
+            std::string token(1, character);
             if (this->tokenToId_.find(token) == this->tokenToId_.end()) {
                 this->tokenToId_[token] = static_cast<int>(this->idToToken_.size());
                 this->idToToken_.push_back(token);
@@ -96,11 +98,11 @@ void BPETokenizer::learnMerges(const std::vector<std::string>& corpus, int vocab
             std::vector<std::string> tokens;
             tokens.reserve(word.size());
 
-            for (char c : word) {
-                tokens.emplace_back(1, c);
+            for (char character : word) {
+                tokens.emplace_back(1, character);
             }
 
-            if (!tokens.empty()) words.push_back(std::move(tokens)); 
+            if (!tokens.empty()) words.push_back(std::move(tokens));
         }
     }
 
@@ -108,8 +110,8 @@ void BPETokenizer::learnMerges(const std::vector<std::string>& corpus, int vocab
         std::unordered_map<Pair, int, PairHash> pairCounts;
 
         for (const auto& tokens : words) {
-            for (size_t i = 0; i + 1 < tokens.size(); ++i) {
-                pairCounts[{tokens[i], tokens[i + 1]}]++;
+            for (size_t tokenIndex = 0; tokenIndex + 1 < tokens.size(); ++tokenIndex) {
+                pairCounts[{tokens[tokenIndex], tokens[tokenIndex + 1]}]++;
             }
         }
 
@@ -118,8 +120,8 @@ void BPETokenizer::learnMerges(const std::vector<std::string>& corpus, int vocab
         auto best = std::max_element(
             pairCounts.begin(),
             pairCounts.end(),
-            [](const auto& a, const auto& b) {
-                return a.second < b.second;
+            [](const auto& left, const auto& right) {
+                return left.second < right.second;
             }
         );
 
@@ -134,14 +136,15 @@ void BPETokenizer::learnMerges(const std::vector<std::string>& corpus, int vocab
             std::vector<std::string> updated;
             updated.reserve(tokens.size());
 
-            for (size_t i = 0; i < tokens.size();) {
-                if (i + 1 < tokens.size() && tokens[i] == bestPair.first && tokens[i + 1] == bestPair.second) {
+            for (size_t tokenIndex = 0; tokenIndex < tokens.size();) {
+                if (tokenIndex + 1 < tokens.size()
+                    && tokens[tokenIndex] == bestPair.first
+                    && tokens[tokenIndex + 1] == bestPair.second) {
                     updated.push_back(merged);
-                    i += 2;
-                }
-                else {
-                    updated.push_back(tokens[i]);
-                    ++i;
+                    tokenIndex += 2;
+                } else {
+                    updated.push_back(tokens[tokenIndex]);
+                    ++tokenIndex;
                 }
             }
 
@@ -170,14 +173,15 @@ std::vector<std::string> BPETokenizer::applyMerges(const std::vector<std::string
         std::vector<std::string> updated;
         updated.reserve(result.size());
 
-        for (size_t i = 0; i < result.size();) {
-            if (i + 1 < result.size() && result[i] == merge.first && result[i + 1] == merge.second) {
+        for (size_t tokenIndex = 0; tokenIndex < result.size();) {
+            if (tokenIndex + 1 < result.size()
+                && result[tokenIndex] == merge.first
+                && result[tokenIndex + 1] == merge.second) {
                 updated.push_back(merged);
-                i += 2;
-            }
-            else {
-                updated.push_back(result[i]);
-                ++i;
+                tokenIndex += 2;
+            } else {
+                updated.push_back(result[tokenIndex]);
+                ++tokenIndex;
             }
         }
 

@@ -10,12 +10,12 @@ public:
     Matrix() = default;
     explicit Matrix(std::vector<std::vector<float>> values);
 
-    static Matrix multiply(const Matrix& a, const Matrix& b);
-    static Matrix transpose(const Matrix& a);
-    static Matrix add(const Matrix& a, const Matrix& b);
-    static Matrix subtract(const Matrix& a, const Matrix& b);
-    static Matrix scale(const Matrix& a, float s);
-    static Matrix multiplyElementwise(const Matrix& a, const Matrix& b);
+    static Matrix multiply(const Matrix& left, const Matrix& right);
+    static Matrix transpose(const Matrix& matrix);
+    static Matrix add(const Matrix& left, const Matrix& right);
+    static Matrix subtract(const Matrix& left, const Matrix& right);
+    static Matrix scale(const Matrix& matrix, float scalar);
+    static Matrix multiplyElementwise(const Matrix& left, const Matrix& right);
 };
 
 #endif // MATRIX_HPP

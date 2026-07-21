@@ -1,19 +1,19 @@
 #include "ReLU.hpp"
 
-Matrix ReLU::apply(Matrix a) {
-    for (size_t i = 0; i < a.data.size(); i++) {
-        for (size_t j = 0; j < a.data[i].size(); j++) {
-            a.data[i][j] = a.data[i][j] > 0.0f ? a.data[i][j] : 0.0f;
+Matrix ReLU::apply(Matrix matrix) {
+    for (size_t row = 0; row < matrix.data.size(); row++) {
+        for (size_t col = 0; col < matrix.data[row].size(); col++) {
+            matrix.data[row][col] = matrix.data[row][col] > 0.0f ? matrix.data[row][col] : 0.0f;
         }
     }
-    return a;
+    return matrix;
 }
 
-Matrix ReLU::derivative(Matrix a) {
-    for (size_t i = 0; i < a.data.size(); i++) {
-        for (size_t j = 0; j < a.data[i].size(); j++) {
-            a.data[i][j] = a.data[i][j] > 0.0f ? 1.0f : 0.0f;
+Matrix ReLU::derivative(Matrix matrix) {
+    for (size_t row = 0; row < matrix.data.size(); row++) {
+        for (size_t col = 0; col < matrix.data[row].size(); col++) {
+            matrix.data[row][col] = matrix.data[row][col] > 0.0f ? 1.0f : 0.0f;
         }
     }
-    return a;
+    return matrix;
 }

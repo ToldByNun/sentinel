@@ -17,6 +17,8 @@ public:
     int embeddingDim() const;
 
     Matrix forward(const std::vector<int>& tokenIds);
+
+    Matrix backward(const Matrix& outputGradient) const;
 };
 
 #endif // EMBEDDING_HPP

@@ -4,74 +4,74 @@
 
 Matrix::Matrix(std::vector<std::vector<float>> values) : data(std::move(values)) {}
 
-Matrix Matrix::multiply(const Matrix& a, const Matrix& b) {
-    size_t rowsA = a.data.size();
-    size_t colsA = a.data[0].size();
-    size_t colsB = b.data[0].size();
+Matrix Matrix::multiply(const Matrix& left, const Matrix& right) {
+    size_t rowsLeft = left.data.size();
+    size_t colsLeft = left.data[0].size();
+    size_t colsRight = right.data[0].size();
 
     Matrix result;
-    result.data = std::vector<std::vector<float>>(rowsA, std::vector<float>(colsB, 0.0f));
+    result.data = std::vector<std::vector<float>>(rowsLeft, std::vector<float>(colsRight, 0.0f));
 
-    for (size_t i = 0; i < rowsA; i++) {
-        for (size_t j = 0; j < colsB; j++) {
-            for (size_t k = 0; k < colsA; k++) {
-                result.data[i][j] += a.data[i][k] * b.data[k][j];
+    for (size_t row = 0; row < rowsLeft; row++) {
+        for (size_t col = 0; col < colsRight; col++) {
+            for (size_t shared = 0; shared < colsLeft; shared++) {
+                result.data[row][col] += left.data[row][shared] * right.data[shared][col];
             }
         }
     }
     return result;
 }
 
-Matrix Matrix::transpose(const Matrix& a) {
-    size_t rows = a.data.size();
-    size_t cols = a.data[0].size();
+Matrix Matrix::transpose(const Matrix& matrix) {
+    size_t rows = matrix.data.size();
+    size_t cols = matrix.data[0].size();
 
     Matrix result;
     result.data = std::vector<std::vector<float>>(cols, std::vector<float>(rows, 0.0f));
 
-    for (size_t i = 0; i < rows; i++) {
-        for (size_t j = 0; j < cols; j++) {
-            result.data[j][i] = a.data[i][j];
+    for (size_t row = 0; row < rows; row++) {
+        for (size_t col = 0; col < cols; col++) {
+            result.data[col][row] = matrix.data[row][col];
         }
     }
     return result;
 }
 
-Matrix Matrix::add(const Matrix& a, const Matrix& b) {
-    Matrix result = a;
-    for (size_t i = 0; i < a.data.size(); i++) {
-        for (size_t j = 0; j < a.data[i].size(); j++) {
-            result.data[i][j] += b.data[i][j];
+Matrix Matrix::add(const Matrix& left, const Matrix& right) {
+    Matrix result = left;
+    for (size_t row = 0; row < left.data.size(); row++) {
+        for (size_t col = 0; col < left.data[row].size(); col++) {
+            result.data[row][col] += right.data[row][col];
         }
     }
     return result;
 }
 
-Matrix Matrix::subtract(const Matrix& a, const Matrix& b) {
-    Matrix result = a;
-    for (size_t i = 0; i < a.data.size(); i++) {
-        for (size_t j = 0; j < a.data[i].size(); j++) {
-            result.data[i][j] -= b.data[i][j];
+Matrix Matrix::subtract(const Matrix& left, const Matrix& right) {
+    Matrix result = left;
+    for (size_t row = 0; row < left.data.size(); row++) {
+        for (size_t col = 0; col < left.data[row].size(); col++) {
+            result.data[row][col] -= right.data[row][col];
         }
     }
     return result;
 }
 
-Matrix Matrix::scale(const Matrix& a, float s) {
-    Matrix result = a;
-    for (size_t i = 0; i < a.data.size(); i++) {
-        for (size_t j = 0; j < a.data[i].size(); j++) {
-            result.data[i][j] *= s;
+Matrix Matrix::scale(const Matrix& matrix, float scalar) {
+    Matrix result = matrix;
+    for (size_t row = 0; row < matrix.data.size(); row++) {
+        for (size_t col = 0; col < matrix.data[row].size(); col++) {
+            result.data[row][col] *= scalar;
         }
     }
     return result;
 }
 
-Matrix Matrix::multiplyElementwise(const Matrix& a, const Matrix& b) {
-    Matrix result = a;
-    for (size_t i = 0; i < a.data.size(); ++i) {
-        for (size_t j = 0; j < a.data[i].size(); ++j) {
-            result.data[i][j] = a.data[i][j] * b.data[i][j];
+Matrix Matrix::multiplyElementwise(const Matrix& left, const Matrix& right) {
+    Matrix result = left;
+    for (size_t row = 0; row < left.data.size(); ++row) {
+        for (size_t col = 0; col < left.data[row].size(); ++col) {
+            result.data[row][col] = left.data[row][col] * right.data[row][col];
         }
     }
     return result;

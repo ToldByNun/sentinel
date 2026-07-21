@@ -3,11 +3,12 @@
 
 #include "../Math/Matrix.hpp"
 
-#include <vector>
-
 class MeanPool {
 public:
-	static Matrix meanPool(const Matrix& embeddings);
+    size_t lastSequenceLength = 0;
+
+    Matrix forward(const Matrix& embeddings);
+    Matrix backward(const Matrix& pooledGradient) const;
 };
 
 #endif // MEANPOOL_HPP

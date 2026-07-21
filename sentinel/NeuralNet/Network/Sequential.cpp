@@ -19,20 +19,95 @@ void Sequential::train(const Matrix& input, const Matrix& target, int epochs) {
         Matrix hidden = ReLU::apply(this->layer1.forward(input));
         Matrix prediction = ReLU::apply(this->layer2.forward(hidden));
 
-        Matrix loss = MSE::gradient(prediction, target);
+        Matrix lossGradient = MSE::gradient(prediction, target);
 
-        Matrix delta2 = Matrix::multiplyElementwise(loss, ReLU::derivative(this->layer2.lastZ));
-        Matrix dW2 = Matrix::multiply(delta2, Matrix::transpose(this->layer2.lastInput));
+        Matrix layer2Gradient = Matrix::multiplyElementwise(
+            lossGradient,
+            ReLU::derivative(this->layer2.lastZ)
+        );
+        Matrix weightGradient2 = Matrix::multiply(
+            layer2Gradient,
+            Matrix::transpose(this->layer2.lastInput)
+        );
 
-        Matrix wt_delta2 = Matrix::multiply(Matrix::transpose(this->layer2.weight), delta2);
-        Matrix delta1 = Matrix::multiplyElementwise(wt_delta2, ReLU::derivative(this->layer1.lastZ));
-        Matrix dW1 = Matrix::multiply(delta1, Matrix::transpose(this->layer1.lastInput));
+        Matrix inputGradient2 = Matrix::multiply(
+            Matrix::transpose(this->layer2.weight),
+            layer2Gradient
+        );
+        Matrix layer1Gradient = Matrix::multiplyElementwise(
+            inputGradient2,
+            ReLU::derivative(this->layer1.lastZ)
+        );
+        Matrix weightGradient1 = Matrix::multiply(
+            layer1Gradient,
+            Matrix::transpose(this->layer1.lastInput)
+        );
 
-        this->optimizer.update(this->layer2.weight, dW2);
-        this->optimizer.update(this->layer2.bias, delta2);
+        this->optimizer.update(this->layer2.weight, weightGradient2);
+        this->optimizer.update(this->layer2.bias, layer2Gradient);
 
-        this->optimizer.update(this->layer1.weight, dW1);
-        this->optimizer.update(this->layer1.bias, delta1);
+        this->optimizer.update(this->layer1.weight, weightGradient1);
+        this->optimizer.update(this->layer1.bias, layer1Gradient);
+
+        if (epoch % 1000 == 0) {
+            std::cout << "Epoch " << epoch << " | Prediction[0]: " << prediction.data[0][0] << '\n';
+        }
+    }
+}
+
+void Sequential::train(
+    Embedding& embedding,
+    MeanPool& meanPool,
+    const std::vector<int>& tokenIds,
+    const Matrix& target,
+    int epochs
+) {
+    for (int epoch = 0; epoch < epochs; ++epoch) {
+        Matrix embedded = embedding.forward(tokenIds);
+        Matrix pooled = meanPool.forward(embedded);
+
+        Matrix hidden = ReLU::apply(this->layer1.forward(pooled));
+        Matrix prediction = ReLU::apply(this->layer2.forward(hidden));
+
+        Matrix lossGradient = MSE::gradient(prediction, target);
+
+        Matrix layer2Gradient = Matrix::multiplyElementwise(
+            lossGradient,
+            ReLU::derivative(this->layer2.lastZ)
+        );
+        Matrix weightGradient2 = Matrix::multiply(
+            layer2Gradient,
+            Matrix::transpose(this->layer2.lastInput)
+        );
+
+        Matrix inputGradient2 = Matrix::multiply(
+            Matrix::transpose(this->layer2.weight),
+            layer2Gradient
+        );
+        Matrix layer1Gradient = Matrix::multiplyElementwise(
+            inputGradient2,
+            ReLU::derivative(this->layer1.lastZ)
+        );
+        Matrix weightGradient1 = Matrix::multiply(
+            layer1Gradient,
+            Matrix::transpose(this->layer1.lastInput)
+        );
+
+        Matrix pooledGradient = Matrix::multiply(
+            Matrix::transpose(this->layer1.weight),
+            layer1Gradient
+        );
+
+        Matrix embeddingGradient = meanPool.backward(pooledGradient);
+        Matrix embeddingWeightGradient = embedding.backward(embeddingGradient);
+
+        this->optimizer.update(this->layer2.weight, weightGradient2);
+        this->optimizer.update(this->layer2.bias, layer2Gradient);
+
+        this->optimizer.update(this->layer1.weight, weightGradient1);
+        this->optimizer.update(this->layer1.bias, layer1Gradient);
+
+        this->optimizer.update(embedding.weight, embeddingWeightGradient);
 
         if (epoch % 1000 == 0) {
             std::cout << "Epoch " << epoch << " | Prediction[0]: " << prediction.data[0][0] << '\n';

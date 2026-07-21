@@ -35,10 +35,10 @@ int main() {
     int outDim = 3;
 
     Matrix weight1(std::vector<std::vector<float>>(hidden, std::vector<float>(embeddingDim, 0.1f)));
-    Matrix bias1(std::vector<std::vector<float>>(hidden, std::vector<float>(1.0f, 0.1f)));
-    
+    Matrix bias1(std::vector<std::vector<float>>(hidden, std::vector<float>(1, 0.0f)));
+
     Matrix weight2(std::vector<std::vector<float>>(outDim, std::vector<float>(hidden, 0.1f)));
-    Matrix bias2(std::vector<std::vector<float>>(outDim, std::vector<float>(1.0f, 0.1f)));
+    Matrix bias2(std::vector<std::vector<float>>(outDim, std::vector<float>(1, 0.0f)));
 
     BPETokenizer tokenizer;
     tokenizer.train(corpus, 150);
@@ -47,10 +47,9 @@ int main() {
     std::cout << "vocab size: " << tokenizer.vocabSize() << '\n';
 
     Embedding embedding(tokenizer.vocabSize(), embeddingDim);
+    MeanPool meanPool;
 
     std::vector<int> ids = tokenizer.encode("main vector");
-    Matrix x = MeanPool::meanPool(embedding.forward(ids));
-
     Matrix target({ {1.0f}, {0.0f}, {0.0f} });
 
     Sequential model(
@@ -58,7 +57,8 @@ int main() {
         Dense(std::move(weight2), std::move(bias2)),
         SGD(0.01f)
     );
-    model.train(x, target, 10000);
+
+    model.train(embedding, meanPool, ids, target, 10000);
 
     return 0;
 }
