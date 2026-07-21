@@ -48,6 +48,12 @@
     <ClCompile Include="NeuralNet\Layers\MeanPool.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
+    <ClCompile Include="NeuralNet\Activations\Softmax.cpp">
+      <Filter>Quelldateien</Filter>
+    </ClCompile>
+    <ClCompile Include="NeuralNet\Losses\CrossEntropy.cpp">
+      <Filter>Quelldateien</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="NeuralNet\Activations\ReLU.hpp">
@@ -81,6 +87,12 @@
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Layers\MeanPool.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Activations\Softmax.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Losses\CrossEntropy.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
   </ItemGroup>

@@ -50,6 +50,7 @@ int main() {
     MeanPool meanPool;
 
     std::vector<int> ids = tokenizer.encode("main vector");
+    // One-hot target: Klasse 0 von 3 — Softmax soll p0 → 1 lernen
     Matrix target({ {1.0f}, {0.0f}, {0.0f} });
 
     Sequential model(

@@ -20,10 +20,12 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="NeuralNet\Activations\ReLU.cpp" />
+    <ClCompile Include="NeuralNet\Activations\Softmax.cpp" />
     <ClCompile Include="NeuralNet\Layers\Dense.cpp" />
     <ClCompile Include="NeuralNet\Layers\Dropout.cpp" />
     <ClCompile Include="NeuralNet\Layers\Embedding.cpp" />
     <ClCompile Include="NeuralNet\Layers\MeanPool.cpp" />
+    <ClCompile Include="NeuralNet\Losses\CrossEntropy.cpp" />
     <ClCompile Include="NeuralNet\Losses\MSE.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="NeuralNet\Math\Matrix.cpp" />
@@ -33,11 +35,13 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="NeuralNet\Activations\ReLU.hpp" />
+    <ClInclude Include="NeuralNet\Activations\Softmax.hpp" />
     <ClInclude Include="NeuralNet\Layers\Dense.hpp" />
     <ClInclude Include="NeuralNet\Layers\Dropout.hpp" />
     <ClInclude Include="NeuralNet\Layers\Embedding.hpp" />
     <ClInclude Include="NeuralNet\Layers\Layer.hpp" />
     <ClInclude Include="NeuralNet\Layers\MeanPool.hpp" />
+    <ClInclude Include="NeuralNet\Losses\CrossEntropy.hpp" />
     <ClInclude Include="NeuralNet\Losses\MSE.hpp" />
     <ClInclude Include="NeuralNet\Math\Matrix.hpp" />
     <ClInclude Include="NeuralNet\Network\Sequential.hpp" />
