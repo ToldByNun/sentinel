@@ -1,6 +1,7 @@
 #include "NeuralNet/Tokenizer/BPETokenizer.hpp"
 #include "NeuralNet/Layers/Embedding.hpp"
 #include "NeuralNet/Layers/Dense.hpp"
+#include "NeuralNet/Layers/MeanPool.hpp"
 #include "NeuralNet/Network/Sequential.hpp"
 #include "NeuralNet/Optimizers/SGD.hpp"
 #include "NeuralNet/Math/Matrix.hpp"
@@ -29,46 +30,35 @@ int main() {
         "Backpropagation gradient check failed: expected dW1 to match numerical derivative."
     };
 
+    int embeddingDim = 8;
+    int hidden = 4;
+    int outDim = 3;
+
+    Matrix weight1(std::vector<std::vector<float>>(hidden, std::vector<float>(embeddingDim, 0.1f)));
+    Matrix bias1(std::vector<std::vector<float>>(hidden, std::vector<float>(1.0f, 0.1f)));
+    
+    Matrix weight2(std::vector<std::vector<float>>(outDim, std::vector<float>(hidden, 0.1f)));
+    Matrix bias2(std::vector<std::vector<float>>(outDim, std::vector<float>(1.0f, 0.1f)));
+
     BPETokenizer tokenizer;
     tokenizer.train(corpus, 150);
 
     std::cout << "corpus size: " << corpus.size() << '\n';
     std::cout << "vocab size: " << tokenizer.vocabSize() << '\n';
 
-    const int embeddingDim = 8;
     Embedding embedding(tokenizer.vocabSize(), embeddingDim);
 
     std::vector<int> ids = tokenizer.encode("main vector");
-    Matrix x = embedding.forward(ids);
+    Matrix x = MeanPool::meanPool(embedding.forward(ids));
 
-    std::cout << "token count: " << ids.size() << '\n';
-    std::cout << "embedding shape: " << x.data.size() << " x " << (x.data.empty() ? 0 : x.data[0].size()) << '\n';
-
-    Matrix input({ {1.0f}, {2.0f}, {0.5f} });
-    Matrix target({ {2.0f}, {4.0f}, {1.0f} });
-
-    Matrix weight1({
-        {0.1f, 0.2f, 0.1f},
-        {0.1f, 0.1f, 0.2f},
-        {0.2f, 0.1f, 0.1f},
-        {0.1f, 0.1f, 0.1f}
-    });
-    Matrix bias1({ {0.0f}, {0.0f}, {0.0f}, {0.0f} });
-
-    Matrix weight2({
-        {0.1f, 0.1f, 0.1f, 0.1f},
-        {0.1f, 0.2f, 0.1f, 0.1f},
-        {0.1f, 0.1f, 0.2f, 0.1f}
-    });
-    Matrix bias2({ {0.0f}, {0.0f}, {0.0f} });
+    Matrix target({ {1.0f}, {0.0f}, {0.0f} });
 
     Sequential model(
         Dense(std::move(weight1), std::move(bias1)),
         Dense(std::move(weight2), std::move(bias2)),
         SGD(0.01f)
     );
-
-    model.train(input, target, 10000);
+    model.train(x, target, 10000);
 
     return 0;
 }
