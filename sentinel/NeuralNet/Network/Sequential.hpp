@@ -1,6 +1,7 @@
 #ifndef SEQUENTIAL_HPP
 #define SEQUENTIAL_HPP
 
+#include "../Data/ClassificationDataset.hpp"
 #include "../Layers/Dense.hpp"
 #include "../Layers/Embedding.hpp"
 #include "../Layers/MeanPool.hpp"
@@ -9,6 +10,9 @@
 
 #include <vector>
 
+/// <summary>
+/// text path: Embedding -> MeanPool -> Dense -> Softmax.
+/// </summary>
 class Sequential {
 public:
     Dense layer1;
@@ -17,16 +21,26 @@ public:
 
     Sequential(Dense layer1, Dense layer2, SGD optimizer);
 
+    /// <summary>forward from a feature vector returns class probs</summary>
     Matrix forward(const Matrix& input);
+
+    /// <summary>forward from token ids (embed + pool + mlp)</summary>
+    Matrix forward(Embedding& embedding, MeanPool& meanPool, const std::vector<int>& tokenIds);
+
+    /// <summary>train on one matrix example (no embedding)</summary>
     void train(const Matrix& input, const Matrix& target, int epochs);
 
-    void train(
-        Embedding& embedding,
-        MeanPool& meanPool,
-        const std::vector<int>& tokenIds,
-        const Matrix& target,
-        int epochs
-    );
+    /// <summary>train on one tokenized example</summary>
+    void train(Embedding& embedding, MeanPool& meanPool, const std::vector<int>& tokenIds, const Matrix& target,int epochs);
+
+    /// <summary>
+    /// train on the full dataset.
+    /// backprop goes through dense and into embedding weights.
+    /// </summary>
+    void train(Embedding& embedding, MeanPool& meanPool, const ClassificationDataset& dataset, int epochs);
+
+    /// <summary>argmax class for token ids</summary>
+    int predictClass(Embedding& embedding, MeanPool& meanPool, const std::vector<int>& tokenIds);
 };
 
 #endif // SEQUENTIAL_HPP

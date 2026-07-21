@@ -1,8 +1,14 @@
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Activations\ReLU.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\ReLU.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Activations\Softmax.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\Softmax.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Data\ClassificationDataset.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\ClassificationDataset.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\Dense.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\Dense.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\Dropout.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\Dropout.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\Embedding.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\Embedding.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\MeanPool.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\MeanPool.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Losses\CrossEntropy.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\CrossEntropy.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Losses\MSE.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\MSE.obj
-C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\main.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\main.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\main.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\main.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Math\Matrix.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\Matrix.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Network\Sequential.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\Sequential.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Optimizers\SGD.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\SGD.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Tokenizer\BPETokenizer.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\BPETokenizer.obj

@@ -54,6 +54,9 @@
     <ClCompile Include="NeuralNet\Losses\CrossEntropy.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
+    <ClCompile Include="NeuralNet\Data\ClassificationDataset.cpp">
+      <Filter>Quelldateien</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="NeuralNet\Activations\ReLU.hpp">
@@ -93,6 +96,9 @@
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Losses\CrossEntropy.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Data\ClassificationDataset.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
   </ItemGroup>

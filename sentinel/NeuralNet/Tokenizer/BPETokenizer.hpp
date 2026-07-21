@@ -6,14 +6,22 @@
 #include <utility>
 #include <vector>
 
+/// <summary>BPE tokenizer. call train() before encode/decode</summary>
 class BPETokenizer {
 public:
     BPETokenizer() = default;
 
+    /// <summary>learn merges from one string</summary>
     void train(const std::string& text, int vocabSize);
+
+    /// <summary>learn merges from a corpus</summary>
+    /// <param name="vocabSize">target vocab size (must be bigger than #unique chars)</param>
     void train(const std::vector<std::string>& corpus, int vocabSize);
 
+    /// <summary>text -> token ids</summary>
     std::vector<int> encode(const std::string& text) const;
+
+    /// <summary>token ids -> text (concat)</summary>
     std::string decode(const std::vector<int>& tokenIds) const;
 
     int vocabSize() const;

@@ -1,6 +1,8 @@
 #include "CrossEntropy.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 float CrossEntropy::loss(const Matrix& probabilities, const Matrix& target) {

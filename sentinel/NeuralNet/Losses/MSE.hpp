@@ -5,7 +5,10 @@
 
 class MSE {
 public:
+    /// <summary>mean squared error</summary>
     static float loss(const Matrix& prediction, const Matrix& target);
+
+    /// <summary>dL/d(prediction)</summary>
     static Matrix gradient(const Matrix& prediction, const Matrix& target);
 };
 

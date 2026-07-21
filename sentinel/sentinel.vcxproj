@@ -21,6 +21,7 @@
   <ItemGroup>
     <ClCompile Include="NeuralNet\Activations\ReLU.cpp" />
     <ClCompile Include="NeuralNet\Activations\Softmax.cpp" />
+    <ClCompile Include="NeuralNet\Data\ClassificationDataset.cpp" />
     <ClCompile Include="NeuralNet\Layers\Dense.cpp" />
     <ClCompile Include="NeuralNet\Layers\Dropout.cpp" />
     <ClCompile Include="NeuralNet\Layers\Embedding.cpp" />
@@ -36,6 +37,7 @@
   <ItemGroup>
     <ClInclude Include="NeuralNet\Activations\ReLU.hpp" />
     <ClInclude Include="NeuralNet\Activations\Softmax.hpp" />
+    <ClInclude Include="NeuralNet\Data\ClassificationDataset.hpp" />
     <ClInclude Include="NeuralNet\Layers\Dense.hpp" />
     <ClInclude Include="NeuralNet\Layers\Dropout.hpp" />
     <ClInclude Include="NeuralNet\Layers\Embedding.hpp" />

@@ -1,6 +1,7 @@
 #include "MeanPool.hpp"
 
 #include <stdexcept>
+#include <vector>
 
 Matrix MeanPool::forward(const Matrix& embeddings) {
     if (embeddings.data.empty() || embeddings.data[0].empty()) throw std::invalid_argument("MeanPool::forward expects a non-empty embedding matrix");

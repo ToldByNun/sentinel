@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <stdexcept>
+#include <vector>
 
 Matrix Softmax::apply(const Matrix& logits) {
     if (logits.data.empty() || logits.data[0].empty()) throw std::invalid_argument("Softmax::apply expects a non-empty matrix");

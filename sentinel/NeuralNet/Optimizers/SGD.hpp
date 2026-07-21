@@ -3,12 +3,14 @@
 
 #include "../Math/Matrix.hpp"
 
+/// <summary>SGD: param -= lr * grad</summary>
 class SGD {
 public:
     float learningRate;
 
     explicit SGD(float learningRate);
 
+    /// <summary>In-place update.</summary>
     void update(Matrix& parameter, const Matrix& gradient) const;
 };
 
