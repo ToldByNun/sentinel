@@ -40,7 +40,9 @@ public:
     void train(Embedding& embedding, MeanPool& meanPool, const ClassificationDataset& dataset, int epochs);
 
     /// <summary>
-    /// train on trainDataset every logEveryEpochs also reports testAccuracy (no test grad updates)
+    /// train on trainDataset every logEveryEpochs reports testAccuracy
+    /// stops early if testAccuracy does not improve for earlyStoppingPatience checks
+    /// restores best weights after stop
     /// </summary>
     void train(
         Embedding& embedding,
@@ -48,7 +50,8 @@ public:
         const ClassificationDataset& trainDataset,
         const ClassificationDataset& testDataset,
         int epochs,
-        int logEveryEpochs = 500
+        int logEveryEpochs = 500,
+        int earlyStoppingPatience = 3
     );
 
     /// <summary>argmax class for token ids</summary>

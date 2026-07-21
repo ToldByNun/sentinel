@@ -71,7 +71,7 @@ void Sequential::train(Embedding& embedding, MeanPool& meanPool, const std::vect
 
 void Sequential::train(Embedding& embedding, MeanPool& meanPool, const ClassificationDataset& dataset, int epochs) {
     ClassificationDataset emptyTest;
-    this->train(embedding, meanPool, dataset, emptyTest, epochs, 500);
+    this->train(embedding, meanPool, dataset, emptyTest, epochs, 500, 3);
 }
 
 void Sequential::train(
@@ -80,10 +80,22 @@ void Sequential::train(
     const ClassificationDataset& trainDataset,
     const ClassificationDataset& testDataset,
     int epochs,
-    int logEveryEpochs
+    int logEveryEpochs,
+    int earlyStoppingPatience
 ) {
     if (trainDataset.examples.empty()) return;
     if (logEveryEpochs <= 0) logEveryEpochs = 500;
+    if (earlyStoppingPatience <= 0) earlyStoppingPatience = 3;
+
+    const bool useEarlyStopping = !testDataset.examples.empty();
+
+    Matrix bestLayer1Weight = this->layer1.weight;
+    Matrix bestLayer1Bias = this->layer1.bias;
+    Matrix bestLayer2Weight = this->layer2.weight;
+    Matrix bestLayer2Bias = this->layer2.bias;
+    Matrix bestEmbeddingWeight = embedding.weight;
+    float bestTestAccuracy = -1.0f;
+    int checksWithoutImprovement = 0;
 
     for (int epoch = 0; epoch < epochs; ++epoch) {
         float epochLoss = 0.0f;
@@ -153,13 +165,47 @@ void Sequential::train(
                   << " | loss: " << averageLoss
                   << " | trainAccuracy: " << trainAccuracy;
 
-        if (!testDataset.examples.empty()) {
-            const float testAccuracy = this->accuracy(embedding, meanPool, testDataset);
-            std::cout << " | testAccuracy: " << testAccuracy;
+        if (!useEarlyStopping) {
+            std::cout << '\n';
+            continue;
         }
 
-        std::cout << '\n';
+        const float testAccuracy = this->accuracy(embedding, meanPool, testDataset);
+        std::cout << " | testAccuracy: " << testAccuracy << '\n';
+
+        if (testAccuracy > bestTestAccuracy) {
+            bestTestAccuracy = testAccuracy;
+            checksWithoutImprovement = 0;
+            bestLayer1Weight = this->layer1.weight;
+            bestLayer1Bias = this->layer1.bias;
+            bestLayer2Weight = this->layer2.weight;
+            bestLayer2Bias = this->layer2.bias;
+            bestEmbeddingWeight = embedding.weight;
+            continue;
+        }
+
+        ++checksWithoutImprovement;
+        if (checksWithoutImprovement < earlyStoppingPatience) continue;
+
+        this->layer1.weight = bestLayer1Weight;
+        this->layer1.bias = bestLayer1Bias;
+        this->layer2.weight = bestLayer2Weight;
+        this->layer2.bias = bestLayer2Bias;
+        embedding.weight = bestEmbeddingWeight;
+
+        std::cout << "early stop at epoch " << epoch
+                  << " | bestTestAccuracy: " << bestTestAccuracy
+                  << '\n';
+        return;
     }
+
+    if (!useEarlyStopping) return;
+
+    this->layer1.weight = bestLayer1Weight;
+    this->layer1.bias = bestLayer1Bias;
+    this->layer2.weight = bestLayer2Weight;
+    this->layer2.bias = bestLayer2Bias;
+    embedding.weight = bestEmbeddingWeight;
 }
 
 int Sequential::predictClass(Embedding& embedding, MeanPool& meanPool, const std::vector<int>& tokenIds) {
