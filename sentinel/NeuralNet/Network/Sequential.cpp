@@ -154,3 +154,15 @@ int Sequential::predictClass(Embedding& embedding, MeanPool& meanPool, const std
     }
     return predicted;
 }
+
+float Sequential::accuracy(Embedding& embedding, MeanPool& meanPool, const ClassificationDataset& dataset) {
+    if (dataset.examples.empty()) return 0.0f;
+
+    int correct = 0;
+    for (const ClassificationExample& example : dataset.examples) {
+        const int predicted = this->predictClass(embedding, meanPool, example.tokenIds);
+        if (predicted == example.label) ++correct;
+    }
+
+    return static_cast<float>(correct) / static_cast<float>(dataset.size());
+}

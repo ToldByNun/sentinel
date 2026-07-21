@@ -9,8 +9,7 @@ float MSE::loss(const Matrix& prediction, const Matrix& target) {
 
     float sum = 0.0f;
     for (const auto& row : difference.data) {
-        for (float value : row)
-            sum += value * value;
+        for (float value : row) sum += value * value;
     }
 
     return sum / totalElements;

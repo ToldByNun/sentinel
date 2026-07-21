@@ -36,7 +36,7 @@ public:
         const BPETokenizer& tokenizer
     );
 
-    /// <summary>encode texts with explicit labels (for SERA etc.).</summary>
+    /// <summary>encode texts with explicit labels (for SERA etc)</summary>
     static ClassificationDataset buildLabeled(
         const std::vector<std::string>& texts,
         const std::vector<int>& labels,

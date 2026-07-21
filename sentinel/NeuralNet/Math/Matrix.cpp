@@ -14,8 +14,7 @@ Matrix Matrix::multiply(const Matrix& left, const Matrix& right) {
 
     for (size_t row = 0; row < rowsLeft; row++) {
         for (size_t column = 0; column < columnsRight; column++) {
-            for (size_t shared = 0; shared < columnsLeft; shared++)
-                result.data[row][column] += left.data[row][shared] * right.data[shared][column];
+            for (size_t shared = 0; shared < columnsLeft; shared++) result.data[row][column] += left.data[row][shared] * right.data[shared][column];
         }
     }
     return result;
@@ -29,8 +28,7 @@ Matrix Matrix::transpose(const Matrix& matrix) {
     result.data = std::vector<std::vector<float>>(columns, std::vector<float>(rows, 0.0f));
 
     for (size_t row = 0; row < rows; row++) {
-        for (size_t column = 0; column < columns; column++)
-            result.data[column][row] = matrix.data[row][column];
+        for (size_t column = 0; column < columns; column++) result.data[column][row] = matrix.data[row][column];
     }
     return result;
 }
@@ -38,8 +36,7 @@ Matrix Matrix::transpose(const Matrix& matrix) {
 Matrix Matrix::add(const Matrix& left, const Matrix& right) {
     Matrix result = left;
     for (size_t row = 0; row < left.data.size(); row++) {
-        for (size_t column = 0; column < left.data[row].size(); column++)
-            result.data[row][column] += right.data[row][column];
+        for (size_t column = 0; column < left.data[row].size(); column++) result.data[row][column] += right.data[row][column];
     }
     return result;
 }
@@ -47,8 +44,7 @@ Matrix Matrix::add(const Matrix& left, const Matrix& right) {
 Matrix Matrix::subtract(const Matrix& left, const Matrix& right) {
     Matrix result = left;
     for (size_t row = 0; row < left.data.size(); row++) {
-        for (size_t column = 0; column < left.data[row].size(); column++)
-            result.data[row][column] -= right.data[row][column];
+        for (size_t column = 0; column < left.data[row].size(); column++) result.data[row][column] -= right.data[row][column];
     }
     return result;
 }
@@ -56,8 +52,7 @@ Matrix Matrix::subtract(const Matrix& left, const Matrix& right) {
 Matrix Matrix::scale(const Matrix& matrix, float scalar) {
     Matrix result = matrix;
     for (size_t row = 0; row < matrix.data.size(); row++) {
-        for (size_t column = 0; column < matrix.data[row].size(); column++)
-            result.data[row][column] *= scalar;
+        for (size_t column = 0; column < matrix.data[row].size(); column++) result.data[row][column] *= scalar;
     }
     return result;
 }
@@ -65,8 +60,7 @@ Matrix Matrix::scale(const Matrix& matrix, float scalar) {
 Matrix Matrix::multiplyElementwise(const Matrix& left, const Matrix& right) {
     Matrix result = left;
     for (size_t row = 0; row < left.data.size(); ++row) {
-        for (size_t column = 0; column < left.data[row].size(); ++column)
-            result.data[row][column] = left.data[row][column] * right.data[row][column];
+        for (size_t column = 0; column < left.data[row].size(); ++column) result.data[row][column] = left.data[row][column] * right.data[row][column];
     }
     return result;
 }

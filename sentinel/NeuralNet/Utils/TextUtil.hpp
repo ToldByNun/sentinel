@@ -3,10 +3,10 @@
 
 #include <string>
 
-/// <summary>Small string helpers.</summary>
+/// <summary>small string helpers</summary>
 class TextUtil {
 public:
-    /// <summary>Keep at most maximumCharacters; otherwise cut from the front.</summary>
+    /// <summary>keep at most maximumCharacters; otherwise cut from the front</summary>
     static std::string truncate(const std::string& text, size_t maximumCharacters);
 };
 

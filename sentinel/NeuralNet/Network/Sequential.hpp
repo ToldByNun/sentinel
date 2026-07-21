@@ -41,6 +41,9 @@ public:
 
     /// <summary>argmax class for token ids</summary>
     int predictClass(Embedding& embedding, MeanPool& meanPool, const std::vector<int>& tokenIds);
+
+    /// <summary>Fraction of correctly classified examples (no training).</summary>
+    float accuracy(Embedding& embedding, MeanPool& meanPool, const ClassificationDataset& dataset);
 };
 
 #endif // SEQUENTIAL_HPP

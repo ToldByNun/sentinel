@@ -30,7 +30,6 @@ void UniformInit::fill(Matrix& matrix, float scale, unsigned seed) {
         throw std::invalid_argument("UniformInit::fill expects a non-empty matrix");
 
     for (size_t row = 0; row < matrix.data.size(); ++row) {
-        for (size_t column = 0; column < matrix.data[row].size(); ++column)
-            matrix.data[row][column] = UniformInit::sampleValue(seed, scale);
+        for (size_t column = 0; column < matrix.data[row].size(); ++column) matrix.data[row][column] = UniformInit::sampleValue(seed, scale);
     }
 }

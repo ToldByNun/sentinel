@@ -40,8 +40,7 @@ Matrix Embedding::forward(const std::vector<int>& tokenIds) {
         const int tokenId = tokenIds[tokenIndex];
         if (tokenId < 0 || tokenId >= this->vocabSize()) throw std::out_of_range("token id out of range in Embedding::forward");
 
-        for (int dimensionIndex = 0; dimensionIndex < dimension; ++dimensionIndex)
-            result.data[dimensionIndex][tokenIndex] = this->weight.data[tokenId][dimensionIndex];
+        for (int dimensionIndex = 0; dimensionIndex < dimension; ++dimensionIndex) result.data[dimensionIndex][tokenIndex] = this->weight.data[tokenId][dimensionIndex];
     }
 
     return result;
@@ -60,8 +59,7 @@ Matrix Embedding::backward(const Matrix& outputGradient) const {
 
     for (size_t tokenIndex = 0; tokenIndex < this->lastTokenIds.size(); ++tokenIndex) {
         const int tokenId = this->lastTokenIds[tokenIndex];
-        for (int dimensionIndex = 0; dimensionIndex < dimension; ++dimensionIndex)
-            weightGradient.data[tokenId][dimensionIndex] += outputGradient.data[dimensionIndex][tokenIndex];
+        for (int dimensionIndex = 0; dimensionIndex < dimension; ++dimensionIndex) weightGradient.data[tokenId][dimensionIndex] += outputGradient.data[dimensionIndex][tokenIndex];
     }
 
     return weightGradient;

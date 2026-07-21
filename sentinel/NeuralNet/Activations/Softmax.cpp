@@ -19,8 +19,7 @@ Matrix Softmax::apply(const Matrix& logits) {
     for (size_t column = 0; column < columnCount; ++column) {
         float maxLogit = logits.data[0][column];
         for (size_t classIndex = 1; classIndex < classCount; ++classIndex) {
-            if (logits.data[classIndex][column] > maxLogit)
-                maxLogit = logits.data[classIndex][column];
+            if (logits.data[classIndex][column] > maxLogit) maxLogit = logits.data[classIndex][column];
         }
 
         float exponentialSum = 0.0f;
@@ -30,8 +29,7 @@ Matrix Softmax::apply(const Matrix& logits) {
             exponentialSum += value;
         }
 
-        for (size_t classIndex = 0; classIndex < classCount; ++classIndex)
-            probabilities.data[classIndex][column] /= exponentialSum;
+        for (size_t classIndex = 0; classIndex < classCount; ++classIndex) probabilities.data[classIndex][column] /= exponentialSum;
     }
 
     return probabilities;

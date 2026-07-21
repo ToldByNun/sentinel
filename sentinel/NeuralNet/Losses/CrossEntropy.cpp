@@ -4,8 +4,7 @@
 #include <stdexcept>
 
 float CrossEntropy::loss(const Matrix& probabilities, const Matrix& target) {
-    if (probabilities.data.size() != target.data.size() || probabilities.data.empty() || probabilities.data[0].size() != target.data[0].size())
-        throw std::invalid_argument("CrossEntropy::loss shape mismatch");
+    if (probabilities.data.size() != target.data.size() || probabilities.data.empty() || probabilities.data[0].size() != target.data[0].size()) throw std::invalid_argument("CrossEntropy::loss shape mismatch");
 
     float total = 0.0f;
 

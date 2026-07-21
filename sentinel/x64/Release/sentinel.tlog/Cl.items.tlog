@@ -1,6 +1,8 @@
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Activations\ReLU.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\ReLU.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Activations\Softmax.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\Softmax.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Data\ClassificationDataset.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\ClassificationDataset.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Data\DatasetSplit.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\DatasetSplit.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Data\GeneralizationProbe.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\GeneralizationProbe.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Data\JsonlLoader.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\JsonlLoader.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Initializers\UniformInit.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\UniformInit.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Utils\TextUtil.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\TextUtil.obj

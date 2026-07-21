@@ -20,8 +20,21 @@ void BPETokenizer::train(const std::vector<std::string>& corpus, int vocabSize) 
     this->idToToken_.clear();
     this->merges_.clear();
 
+    this->addUnknownToken();
     this->buildBaseVocabulary(corpus);
     this->learnMerges(corpus, vocabSize);
+}
+
+void BPETokenizer::addUnknownToken() {
+    this->unknownTokenId_ = 0;
+    this->tokenToId_[BPETokenizer::UnknownToken] = this->unknownTokenId_;
+    this->idToToken_.push_back(BPETokenizer::UnknownToken);
+}
+
+int BPETokenizer::lookupTokenId(const std::string& token) const {
+    auto found = this->tokenToId_.find(token);
+    if (found == this->tokenToId_.end()) return this->unknownTokenId_;
+    return found->second;
 }
 
 std::vector<int> BPETokenizer::encode(const std::string& text) const {
@@ -36,11 +49,8 @@ std::vector<int> BPETokenizer::encode(const std::string& text) const {
 
         tokens = this->applyMerges(tokens);
 
-        for (const std::string& token : tokens) {
-            auto found = this->tokenToId_.find(token);
-            if (found == this->tokenToId_.end()) throw std::runtime_error("unknown token during encode: " + token);
-            tokenIds.push_back(found->second);
-        }
+        for (const std::string& token : tokens)
+            tokenIds.push_back(this->lookupTokenId(token));
     }
 
     return tokenIds;
@@ -63,10 +73,12 @@ int BPETokenizer::vocabSize() const {
     return static_cast<int>(this->idToToken_.size());
 }
 
+int BPETokenizer::unknownTokenId() const {
+    return this->unknownTokenId_;
+}
+
 int BPETokenizer::tokenToId(const std::string& token) const {
-    auto found = this->tokenToId_.find(token);
-    if (found == this->tokenToId_.end()) throw std::runtime_error("unknown token: " + token);
-    return found->second;
+    return this->lookupTokenId(token);
 }
 
 const std::string& BPETokenizer::idToToken(int tokenId) const {

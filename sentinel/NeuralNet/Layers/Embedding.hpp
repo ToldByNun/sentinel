@@ -5,7 +5,7 @@
 
 #include <vector>
 
-/// <summary>Token lookup table. weight = vocabSize x embeddingDim.</summary>
+/// <summary>token lookup table. weight = vocabSize x embeddingDim</summary>
 class Embedding {
 public:
     Matrix weight;
@@ -17,14 +17,14 @@ public:
     int vocabSize() const;
     int embeddingDim() const;
 
-    /// <summary>Lookup embeddings for each token id.</summary>
+    /// <summary>lookup embeddings for each token id</summary>
     /// <param name="tokenIds">BPE token ids</param>
     /// <returns>embeddingDim x sequenceLength (one column per token)</returns>
     Matrix forward(const std::vector<int>& tokenIds);
 
-    /// <summary>Push gradients back into the embedding rows that were used.</summary>
-    /// <param name="outputGradient">Gradient w.r.t. forward output (embeddingDim x sequenceLength)</param>
-    /// <returns>Gradient for weight (vocabSize x embeddingDim)</returns>
+    /// <summary>push gradients back into the embedding rows that were used</summary>
+    /// <param name="outputGradient">gradient w.r.t. forward output (embeddingDim x sequenceLength)</param>
+    /// <returns>gradient for weight (vocabSize x embeddingDim)</returns>
     Matrix backward(const Matrix& outputGradient) const;
 };
 

@@ -10,7 +10,7 @@ public:
 
     explicit SGD(float learningRate);
 
-    /// <summary>In-place update.</summary>
+    /// <summary>in place update</summary>
     void update(Matrix& parameter, const Matrix& gradient) const;
 };
 
