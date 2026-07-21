@@ -7,7 +7,7 @@
 
 class Embedding {
 public:
-    Matrix weight; // rows = vocabSize, cols = embeddingDim
+    Matrix weight;
     std::vector<int> lastTokenIds;
 
     Embedding(int vocabSize, int embeddingDim);
@@ -16,7 +16,6 @@ public:
     int vocabSize() const;
     int embeddingDim() const;
 
-    // Returns embeddingDim x sequenceLength (one column per token)
     Matrix forward(const std::vector<int>& tokenIds);
 };
 
