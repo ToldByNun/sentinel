@@ -24,6 +24,32 @@ matrix2D multiplyMatrix(const matrix2D& a, const matrix2D& b) {
 	return result;
 }
 
+matrix2D relu(matrix2D& a) {
+	size_t rowsA = a.data.size();
+	size_t colsA = a.data[0].size();
+
+	for (int i = 0; i < rowsA; i++) {
+		for (int j = 0; j < colsA; j++) {
+			a.data[i][j] = a.data[i][j] > 0.0f ? a.data[i][j] : 0.0f;
+		}
+	}
+
+	return a;
+}
+
+matrix2D reluDerivative(matrix2D a) {
+	size_t rowsA = a.data.size();
+	size_t colsA = a.data[0].size();
+
+	for (int i = 0; i < rowsA; i++) {
+		for (int j = 0; j < colsA; j++) {
+			a.data[i][j] = a.data[i][j] > 0.0f ? 1.0f : 0.0f;
+		}
+	}
+
+	return a;
+}
+
 matrix2D transpose(const matrix2D& a) {
 	size_t rows = a.data.size();
 	size_t cols = a.data[0].size();
@@ -83,15 +109,31 @@ matrix2D getLoss(const matrix2D& prediction, const matrix2D& target) {
 	return subtract(prediction, target);
 }
 
-void calculateLoss(const matrix2D& loss, const matrix2D& input, matrix2D& weight, matrix2D& bias) {
-	matrix2D dW = multiplyMatrix(loss, transpose(input));
+matrix2D multiplyElements(const matrix2D& a, const matrix2D& b) {
+	matrix2D result = a;
+	for (int i = 0; i < a.data.size(); ++i) {
+		for (int j = 0; j < a.data[i].size(); ++j) {
+			result.data[i][j] = a.data[i][j] * b.data[i][j];
+		}
+	}
+
+	return result;
+}
+
+void calculateLoss(const matrix2D& loss, const matrix2D z, const matrix2D& input, matrix2D& weight, matrix2D& bias) {
+	matrix2D delta = multiplyElements(loss, reluDerivative(z));
+	
+	matrix2D dW = multiplyMatrix(delta, transpose(input));
 
 	weight = subtract(weight, scale(dW, 0.01f));
 	bias = subtract(bias, scale(loss, 0.01f));
 }
 
-matrix2D forward(const matrix2D& input, const matrix2D& weight, const matrix2D& bias) {
-	return add(multiplyMatrix(weight, input), bias);
+matrix2D forward(const matrix2D& input, const matrix2D& weight, const matrix2D& bias, matrix2D& zOut) {
+	zOut = add(multiplyMatrix(weight, input), bias);
+
+	matrix2D activated = zOut;
+	return relu(activated);
 }
 
 int main() {
@@ -112,10 +154,12 @@ int main() {
 	bias.data = { {0.0f}, {0.0f}, {0.0f} };
 
 	for (int epoch = 0; epoch < 10000; ++epoch) {
-		matrix2D prediction = forward(input, weight, bias);
+		matrix2D z;
+
+		matrix2D prediction = forward(input, weight, bias, z);
 		matrix2D loss = getLoss(prediction, target);
 
-		calculateLoss(loss, input, weight, bias);
+		calculateLoss(loss, z, input, weight, bias);
 
 		std::cout << "Epoch " << epoch << " | Weight[0][0]: " << weight.data[0][0] << '\n';
 	}
