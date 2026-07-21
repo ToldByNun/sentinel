@@ -97,7 +97,7 @@ int main() {
         SGD(0.05f)
     );
 
-    model.train(embedding, meanPool, trainDataset, testDataset, 2000, 500, 3);
+    model.train(embedding, meanPool, trainDataset, testDataset, 2000, 500, 3, 16);
 
     const float trainAccuracy = model.accuracy(embedding, meanPool, trainDataset);
     const float testAccuracy = model.accuracy(embedding, meanPool, testDataset);

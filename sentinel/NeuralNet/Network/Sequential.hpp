@@ -40,7 +40,8 @@ public:
     void train(Embedding& embedding, MeanPool& meanPool, const ClassificationDataset& dataset, int epochs);
 
     /// <summary>
-    /// train on trainDataset every logEveryEpochs reports testAccuracy
+    /// train with minibatches (accumulate grads then one update)
+    /// every logEveryEpochs reports testAccuracy
     /// stops early if testAccuracy does not improve for earlyStoppingPatience checks
     /// restores best weights after stop
     /// </summary>
@@ -51,7 +52,8 @@ public:
         const ClassificationDataset& testDataset,
         int epochs,
         int logEveryEpochs = 500,
-        int earlyStoppingPatience = 3
+        int earlyStoppingPatience = 3,
+        int batchSize = 16
     );
 
     /// <summary>argmax class for token ids</summary>
@@ -59,6 +61,20 @@ public:
 
     /// <summary>fraction of correctly classified examples (no training)</summary>
     float accuracy(Embedding& embedding, MeanPool& meanPool, const ClassificationDataset& dataset);
+
+private:
+    /// <summary>same shape as matrix filled with zeros</summary>
+    static Matrix zerosLike(const Matrix& matrix);
+
+    /// <summary>linear congruential step for shuffle</summary>
+    static unsigned advanceSeed(unsigned seed);
+
+    /// <summary>Fisher-Yates order of exampleCount indices</summary>
+    static std::vector<size_t> shuffledOrder(size_t exampleCount, unsigned& seed);
+
+    /// <summary>add gradient into total in place</summary>
+    static void accumulateGradient(Matrix& total, const Matrix& gradient);
 };
 
 #endif // SEQUENTIAL_HPP
+
