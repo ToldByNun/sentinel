@@ -3,7 +3,7 @@
 #include "NeuralNet/Layers/Dense.hpp"
 #include "NeuralNet/Layers/MeanPool.hpp"
 #include "NeuralNet/Network/Sequential.hpp"
-#include "NeuralNet/Optimizers/SGD.hpp"
+#include "NeuralNet/Optimizers/Adam.hpp"
 #include "NeuralNet/Math/Matrix.hpp"
 #include "NeuralNet/Data/ClassificationDataset.hpp"
 #include "NeuralNet/Data/DatasetSplit.hpp"
@@ -94,7 +94,7 @@ int main() {
     Sequential model(
         Dense(std::move(weight1), std::move(bias1)),
         Dense(std::move(weight2), std::move(bias2)),
-        SGD(0.05f),
+        Adam(0.001f),
         0.3f
     );
 

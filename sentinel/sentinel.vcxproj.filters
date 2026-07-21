@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Quelldateien">
@@ -31,6 +31,9 @@
       <Filter>Quelldateien</Filter>
     </ClCompile>
     <ClCompile Include="NeuralNet\Network\Sequential.cpp">
+      <Filter>Quelldateien</Filter>
+    </ClCompile>
+    <ClCompile Include="NeuralNet\Optimizers\Adam.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
     <ClCompile Include="NeuralNet\Optimizers\SGD.cpp">
@@ -90,6 +93,9 @@
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Network\Sequential.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Optimizers\Adam.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Optimizers\SGD.hpp">

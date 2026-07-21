@@ -7,7 +7,7 @@
 #include "../Layers/Embedding.hpp"
 #include "../Layers/MeanPool.hpp"
 #include "../Math/Matrix.hpp"
-#include "../Optimizers/SGD.hpp"
+#include "../Optimizers/Adam.hpp"
 
 #include <vector>
 
@@ -19,9 +19,14 @@ public:
     Dense layer1;
     Dense layer2;
     Dropout dropout;
-    SGD optimizer;
+    Adam optimizer;
 
-    Sequential(Dense layer1, Dense layer2, SGD optimizer, float dropRate = 0.3f);
+    AdamState layer1WeightState;
+    AdamState layer1BiasState;
+    AdamState layer2WeightState;
+    AdamState layer2BiasState;
+
+    Sequential(Dense layer1, Dense layer2, Adam optimizer, float dropRate = 0.3f);
 
     /// <summary>forward from a feature vector returns class probs (eval mode)</summary>
     Matrix forward(const Matrix& input);
@@ -76,6 +81,14 @@ private:
 
     /// <summary>add gradient into total in place</summary>
     static void accumulateGradient(Matrix& total, const Matrix& gradient);
+
+    /// <summary>one Adam step for both Dense layers</summary>
+    void updateDenseParameters(
+        const Matrix& weightGradient1,
+        const Matrix& biasGradient1,
+        const Matrix& weightGradient2,
+        const Matrix& biasGradient2
+    );
 };
 
 #endif // SEQUENTIAL_HPP

@@ -35,6 +35,7 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="NeuralNet\Math\Matrix.cpp" />
     <ClCompile Include="NeuralNet\Network\Sequential.cpp" />
+    <ClCompile Include="NeuralNet\Optimizers\Adam.cpp" />
     <ClCompile Include="NeuralNet\Optimizers\SGD.cpp" />
     <ClCompile Include="NeuralNet\Tokenizer\BPETokenizer.cpp" />
   </ItemGroup>
@@ -55,6 +56,7 @@
     <ClInclude Include="NeuralNet\Losses\MSE.hpp" />
     <ClInclude Include="NeuralNet\Math\Matrix.hpp" />
     <ClInclude Include="NeuralNet\Network\Sequential.hpp" />
+    <ClInclude Include="NeuralNet\Optimizers\Adam.hpp" />
     <ClInclude Include="NeuralNet\Optimizers\SGD.hpp" />
     <ClInclude Include="NeuralNet\Tokenizer\BPETokenizer.hpp" />
   </ItemGroup>

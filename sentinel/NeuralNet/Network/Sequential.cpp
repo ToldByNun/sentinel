@@ -7,8 +7,15 @@
 #include "../Activations/Softmax.hpp"
 #include "../Losses/CrossEntropy.hpp"
 
-Sequential::Sequential(Dense layer1, Dense layer2, SGD optimizer, float dropRate)
-    : layer1(std::move(layer1)), layer2(std::move(layer2)), dropout(dropRate), optimizer(optimizer) {}
+Sequential::Sequential(Dense layer1, Dense layer2, Adam optimizer, float dropRate)
+    : layer1(std::move(layer1)),
+      layer2(std::move(layer2)),
+      dropout(dropRate),
+      optimizer(optimizer),
+      layer1WeightState(AdamState::zerosLike(this->layer1.weight)),
+      layer1BiasState(AdamState::zerosLike(this->layer1.bias)),
+      layer2WeightState(AdamState::zerosLike(this->layer2.weight)),
+      layer2BiasState(AdamState::zerosLike(this->layer2.bias)) {}
 
 Matrix Sequential::zerosLike(const Matrix& matrix) {
     Matrix result = matrix;
@@ -44,6 +51,19 @@ void Sequential::accumulateGradient(Matrix& total, const Matrix& gradient) {
         for (size_t column = 0; column < total.data[row].size(); ++column)
             total.data[row][column] += gradient.data[row][column];
     }
+}
+
+void Sequential::updateDenseParameters(
+    const Matrix& weightGradient1,
+    const Matrix& biasGradient1,
+    const Matrix& weightGradient2,
+    const Matrix& biasGradient2
+) {
+    this->optimizer.step();
+    this->optimizer.update(this->layer2.weight, this->layer2WeightState, weightGradient2);
+    this->optimizer.update(this->layer2.bias, this->layer2BiasState, biasGradient2);
+    this->optimizer.update(this->layer1.weight, this->layer1WeightState, weightGradient1);
+    this->optimizer.update(this->layer1.bias, this->layer1BiasState, biasGradient1);
 }
 
 Matrix Sequential::forward(const Matrix& input) {
@@ -89,11 +109,7 @@ void Sequential::train(const Matrix& input, const Matrix& target, int epochs) {
             Matrix::transpose(this->layer1.lastInput)
         );
 
-        this->optimizer.update(this->layer2.weight, weightGradient2);
-        this->optimizer.update(this->layer2.bias, layer2Gradient);
-
-        this->optimizer.update(this->layer1.weight, weightGradient1);
-        this->optimizer.update(this->layer1.bias, layer1Gradient);
+        this->updateDenseParameters(weightGradient1, layer1Gradient, weightGradient2, layer2Gradient);
 
         if (epoch % 1000 == 0) {
             const float loss = CrossEntropy::loss(probabilities, target);
@@ -135,6 +151,8 @@ void Sequential::train(
 
     const bool useEarlyStopping = !testDataset.examples.empty();
     const size_t exampleCount = trainDataset.examples.size();
+
+    AdamState embeddingWeightState = AdamState::zerosLike(embedding.weight);
 
     Matrix bestLayer1Weight = this->layer1.weight;
     Matrix bestLayer1Bias = this->layer1.bias;
@@ -221,11 +239,17 @@ void Sequential::train(
             }
 
             const float inverseBatchCount = 1.0f / batchCount;
-            this->optimizer.update(this->layer2.weight, Matrix::scale(accumulatedWeightGradient2, inverseBatchCount));
-            this->optimizer.update(this->layer2.bias, Matrix::scale(accumulatedBiasGradient2, inverseBatchCount));
-            this->optimizer.update(this->layer1.weight, Matrix::scale(accumulatedWeightGradient1, inverseBatchCount));
-            this->optimizer.update(this->layer1.bias, Matrix::scale(accumulatedBiasGradient1, inverseBatchCount));
-            this->optimizer.update(embedding.weight, Matrix::scale(accumulatedEmbeddingGradient, inverseBatchCount));
+            this->updateDenseParameters(
+                Matrix::scale(accumulatedWeightGradient1, inverseBatchCount),
+                Matrix::scale(accumulatedBiasGradient1, inverseBatchCount),
+                Matrix::scale(accumulatedWeightGradient2, inverseBatchCount),
+                Matrix::scale(accumulatedBiasGradient2, inverseBatchCount)
+            );
+            this->optimizer.update(
+                embedding.weight,
+                embeddingWeightState,
+                Matrix::scale(accumulatedEmbeddingGradient, inverseBatchCount)
+            );
         }
 
         if (epoch % logEveryEpochs != 0) continue;
