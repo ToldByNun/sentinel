@@ -19,7 +19,7 @@ void Sequential::train(const Matrix& input, const Matrix& target, int epochs) {
         Matrix hidden = ReLU::apply(this->layer1.forward(input));
         Matrix prediction = ReLU::apply(this->layer2.forward(hidden));
 
-        Matrix loss = MSE::compute(prediction, target);
+        Matrix loss = MSE::gradient(prediction, target);
 
         Matrix delta2 = Matrix::multiplyElementwise(loss, ReLU::derivative(this->layer2.lastZ));
         Matrix dW2 = Matrix::multiply(delta2, Matrix::transpose(this->layer2.lastInput));

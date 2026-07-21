@@ -5,7 +5,8 @@
 
 class MSE {
 public:
-    static Matrix compute(const Matrix& prediction, const Matrix& target);
+    static float loss(const Matrix& prediction, const Matrix& target);
+    static Matrix gradient(const Matrix& prediction, const Matrix& target);
 };
 
 #endif // MSE_HPP
