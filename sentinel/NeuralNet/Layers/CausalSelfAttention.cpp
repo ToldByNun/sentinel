@@ -16,10 +16,10 @@ CausalSelfAttention::CausalSelfAttention(Matrix queryWeight, Matrix keyWeight, M
       headCount(headCount),
       headDimension(0) {
     if (this->headCount <= 0) throw std::invalid_argument("CausalSelfAttention headCount must be > 0");
-    if (this->queryWeight.data.empty()) throw std::invalid_argument("CausalSelfAttention empty weights");
-    if (static_cast<int>(this->queryWeight.data.size()) % this->headCount != 0)
+    if (this->queryWeight.empty()) throw std::invalid_argument("CausalSelfAttention empty weights");
+    if (static_cast<int>(this->queryWeight.rows) % this->headCount != 0)
         throw std::invalid_argument("CausalSelfAttention embeddingDim must be divisible by headCount");
-    this->headDimension = static_cast<int>(this->queryWeight.data.size()) / this->headCount;
+    this->headDimension = static_cast<int>(this->queryWeight.rows) / this->headCount;
 }
 
 CausalSelfAttention CausalSelfAttention::create(int embeddingDim, int headCount, unsigned seed) {
@@ -37,32 +37,30 @@ CausalSelfAttention CausalSelfAttention::create(int embeddingDim, int headCount,
 }
 
 Matrix CausalSelfAttention::zerosLike(const Matrix& matrix) {
-    Matrix result = matrix;
-    for (size_t row = 0; row < result.data.size(); ++row) {
-        for (size_t column = 0; column < result.data[row].size(); ++column)
-            result.data[row][column] = 0.0f;
-    }
-    return result;
+    return Matrix::zerosLike(matrix);
 }
 
 Matrix CausalSelfAttention::extractHead(const Matrix& full, int headIndex, int headDimension) {
-    Matrix head;
-    head.data.resize(static_cast<size_t>(headDimension));
+    Matrix head(static_cast<size_t>(headDimension), full.cols, 0.0f);
     const size_t rowOffset = static_cast<size_t>(headIndex * headDimension);
-    for (int row = 0; row < headDimension; ++row)
-        head.data[static_cast<size_t>(row)] = full.data[rowOffset + static_cast<size_t>(row)];
+    for (int row = 0; row < headDimension; ++row) {
+        for (size_t column = 0; column < full.cols; ++column)
+            head.at(static_cast<size_t>(row), column) = full.at(rowOffset + static_cast<size_t>(row), column);
+    }
     return head;
 }
 
 void CausalSelfAttention::writeHead(Matrix& full, int headIndex, int headDimension, const Matrix& head) {
     const size_t rowOffset = static_cast<size_t>(headIndex * headDimension);
-    for (int row = 0; row < headDimension; ++row)
-        full.data[rowOffset + static_cast<size_t>(row)] = head.data[static_cast<size_t>(row)];
+    for (int row = 0; row < headDimension; ++row) {
+        for (size_t column = 0; column < head.cols; ++column)
+            full.at(rowOffset + static_cast<size_t>(row), column) = head.at(static_cast<size_t>(row), column);
+    }
 }
 
 Matrix CausalSelfAttention::forward(const Matrix& input, CausalSelfAttentionCache& cache) const {
-    if (input.data.empty() || input.data[0].empty()) throw std::invalid_argument("CausalSelfAttention::forward empty input");
-    if (this->queryWeight.data[0].size() != input.data.size())
+    if (input.empty()) throw std::invalid_argument("CausalSelfAttention::forward empty input");
+    if (this->queryWeight.cols != input.rows)
         throw std::invalid_argument("CausalSelfAttention::forward embedding dim mismatch");
 
     cache.input = input;
@@ -70,23 +68,23 @@ Matrix CausalSelfAttention::forward(const Matrix& input, CausalSelfAttentionCach
     cache.key = Matrix::multiply(this->keyWeight, input);
     cache.value = Matrix::multiply(this->valueWeight, input);
 
-    const size_t sequenceLength = input.data[0].size();
+    const size_t sequenceLength = input.cols;
     const float scale = 1.0f / std::sqrt(static_cast<float>(this->headDimension));
 
     cache.scores.assign(static_cast<size_t>(this->headCount), Matrix());
     cache.probabilities.assign(static_cast<size_t>(this->headCount), Matrix());
-    cache.attended.data = std::vector<std::vector<float>>(cache.query.data.size(), std::vector<float>(sequenceLength, 0.0f));
+    cache.attended = Matrix(cache.query.rows, sequenceLength, 0.0f);
 
     for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
         Matrix queryHead = CausalSelfAttention::extractHead(cache.query, headIndex, this->headDimension);
         Matrix keyHead = CausalSelfAttention::extractHead(cache.key, headIndex, this->headDimension);
         Matrix valueHead = CausalSelfAttention::extractHead(cache.value, headIndex, this->headDimension);
 
-        Matrix scores = Matrix::scale(Matrix::multiply(Matrix::transpose(keyHead), queryHead), scale);
+        Matrix scores = Matrix::scale(Matrix::multiply(keyHead, queryHead, true, false), scale);
         for (size_t keyIndex = 0; keyIndex < sequenceLength; ++keyIndex) {
             for (size_t queryIndex = 0; queryIndex < sequenceLength; ++queryIndex) {
                 if (keyIndex <= queryIndex) continue;
-                scores.data[keyIndex][queryIndex] = -1e9f;
+                scores.at(keyIndex, queryIndex) = -1e9f;
             }
         }
 
@@ -102,22 +100,22 @@ Matrix CausalSelfAttention::forward(const Matrix& input, CausalSelfAttentionCach
 }
 
 Matrix CausalSelfAttention::softmaxBackward(const Matrix& probabilities, const Matrix& probabilityGradient) {
-    if (probabilities.data.size() != probabilityGradient.data.size() || probabilities.data[0].size() != probabilityGradient.data[0].size())
+    if (probabilities.rows != probabilityGradient.rows || probabilities.cols != probabilityGradient.cols)
         throw std::invalid_argument("CausalSelfAttention::softmaxBackward shape mismatch");
 
     Matrix scoreGradient = CausalSelfAttention::zerosLike(probabilities);
-    const size_t keyCount = probabilities.data.size();
-    const size_t queryCount = probabilities.data[0].size();
+    const size_t keyCount = probabilities.rows;
+    const size_t queryCount = probabilities.cols;
 
     for (size_t queryIndex = 0; queryIndex < queryCount; ++queryIndex) {
         float dot = 0.0f;
         for (size_t keyIndex = 0; keyIndex < keyCount; ++keyIndex)
-            dot += probabilityGradient.data[keyIndex][queryIndex] * probabilities.data[keyIndex][queryIndex];
+            dot += probabilityGradient.at(keyIndex, queryIndex) * probabilities.at(keyIndex, queryIndex);
 
         for (size_t keyIndex = 0; keyIndex < keyCount; ++keyIndex) {
-            scoreGradient.data[keyIndex][queryIndex] =
-                probabilities.data[keyIndex][queryIndex] *
-                (probabilityGradient.data[keyIndex][queryIndex] - dot);
+            scoreGradient.at(keyIndex, queryIndex) =
+                probabilities.at(keyIndex, queryIndex) *
+                (probabilityGradient.at(keyIndex, queryIndex) - dot);
         }
     }
 
@@ -125,20 +123,20 @@ Matrix CausalSelfAttention::softmaxBackward(const Matrix& probabilities, const M
 }
 
 Matrix CausalSelfAttention::backward(const Matrix& outputGradient, const CausalSelfAttentionCache& cache, Matrix& queryWeightGradient, Matrix& keyWeightGradient, Matrix& valueWeightGradient, Matrix& outputWeightGradient) const {
-    if (cache.input.data.empty()) throw std::logic_error("CausalSelfAttention::backward called before forward");
-    if (outputGradient.data.size() != this->outputWeight.data.size() || outputGradient.data[0].size() != cache.attended.data[0].size())
+    if (cache.input.empty()) throw std::logic_error("CausalSelfAttention::backward called before forward");
+    if (outputGradient.rows != this->outputWeight.rows || outputGradient.cols != cache.attended.cols)
         throw std::invalid_argument("CausalSelfAttention::backward output gradient shape mismatch");
     if (static_cast<int>(cache.scores.size()) != this->headCount || static_cast<int>(cache.probabilities.size()) != this->headCount)
         throw std::invalid_argument("CausalSelfAttention::backward head cache size mismatch");
 
-    outputWeightGradient = Matrix::multiply(outputGradient, Matrix::transpose(cache.attended));
-    Matrix attendedGradient = Matrix::multiply(Matrix::transpose(this->outputWeight), outputGradient);
+    outputWeightGradient = Matrix::multiply(outputGradient, cache.attended, false, true);
+    Matrix attendedGradient = Matrix::multiply(this->outputWeight, outputGradient, true, false);
 
     Matrix queryGradient = CausalSelfAttention::zerosLike(cache.query);
     Matrix keyGradient = CausalSelfAttention::zerosLike(cache.key);
     Matrix valueGradient = CausalSelfAttention::zerosLike(cache.value);
 
-    const size_t sequenceLength = cache.input.data[0].size();
+    const size_t sequenceLength = cache.input.cols;
     const float scale = 1.0f / std::sqrt(static_cast<float>(this->headDimension));
 
     for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
@@ -148,32 +146,32 @@ Matrix CausalSelfAttention::backward(const Matrix& outputGradient, const CausalS
         Matrix valueHead = CausalSelfAttention::extractHead(cache.value, headIndex, this->headDimension);
         const Matrix& probabilities = cache.probabilities[static_cast<size_t>(headIndex)];
 
-        Matrix valueHeadGradient = Matrix::multiply(attendedHeadGradient, Matrix::transpose(probabilities));
-        Matrix probabilityGradient = Matrix::multiply(Matrix::transpose(valueHead), attendedHeadGradient);
+        Matrix valueHeadGradient = Matrix::multiply(attendedHeadGradient, probabilities, false, true);
+        Matrix probabilityGradient = Matrix::multiply(valueHead, attendedHeadGradient, true, false);
         Matrix scoreGradient = CausalSelfAttention::softmaxBackward(probabilities, probabilityGradient);
 
         for (size_t keyIndex = 0; keyIndex < sequenceLength; ++keyIndex) {
             for (size_t queryIndex = 0; queryIndex < sequenceLength; ++queryIndex) {
                 if (keyIndex <= queryIndex) continue;
-                scoreGradient.data[keyIndex][queryIndex] = 0.0f;
+                scoreGradient.at(keyIndex, queryIndex) = 0.0f;
             }
         }
 
         scoreGradient = Matrix::scale(scoreGradient, scale);
         Matrix queryHeadGradient = Matrix::multiply(keyHead, scoreGradient);
-        Matrix keyHeadGradient = Matrix::multiply(queryHead, Matrix::transpose(scoreGradient));
+        Matrix keyHeadGradient = Matrix::multiply(queryHead, scoreGradient, false, true);
 
         CausalSelfAttention::writeHead(queryGradient, headIndex, this->headDimension, queryHeadGradient);
         CausalSelfAttention::writeHead(keyGradient, headIndex, this->headDimension, keyHeadGradient);
         CausalSelfAttention::writeHead(valueGradient, headIndex, this->headDimension, valueHeadGradient);
     }
 
-    queryWeightGradient = Matrix::multiply(queryGradient, Matrix::transpose(cache.input));
-    keyWeightGradient = Matrix::multiply(keyGradient, Matrix::transpose(cache.input));
-    valueWeightGradient = Matrix::multiply(valueGradient, Matrix::transpose(cache.input));
+    queryWeightGradient = Matrix::multiply(queryGradient, cache.input, false, true);
+    keyWeightGradient = Matrix::multiply(keyGradient, cache.input, false, true);
+    valueWeightGradient = Matrix::multiply(valueGradient, cache.input, false, true);
 
-    Matrix inputGradient = Matrix::multiply(Matrix::transpose(this->queryWeight), queryGradient);
-    inputGradient = Matrix::add(inputGradient, Matrix::multiply(Matrix::transpose(this->keyWeight), keyGradient));
-    inputGradient = Matrix::add(inputGradient, Matrix::multiply(Matrix::transpose(this->valueWeight), valueGradient));
+    Matrix inputGradient = Matrix::multiply(this->queryWeight, queryGradient, true, false);
+    inputGradient = Matrix::add(inputGradient, Matrix::multiply(this->keyWeight, keyGradient, true, false));
+    inputGradient = Matrix::add(inputGradient, Matrix::multiply(this->valueWeight, valueGradient, true, false));
     return inputGradient;
 }

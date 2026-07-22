@@ -35,6 +35,9 @@ public:
     /// <summary>zero tensors matching model parameter shapes</summary>
     static LanguageModelGradients zerosFrom(const LanguageModel& model);
 
+    /// <summary>set all gradient tensors to zero in place</summary>
+    void zeroInPlace();
+
     /// <summary>total += other</summary>
     void addInPlace(const LanguageModelGradients& other);
 

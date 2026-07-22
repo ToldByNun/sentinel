@@ -19,6 +19,21 @@ TransformerBlockGradients TransformerBlockGradients::zerosFrom(const Transformer
     return gradients;
 }
 
+void TransformerBlockGradients::zeroInPlace() {
+    Matrix::zeroInPlace(this->queryWeight);
+    Matrix::zeroInPlace(this->keyWeight);
+    Matrix::zeroInPlace(this->valueWeight);
+    Matrix::zeroInPlace(this->attentionOutputWeight);
+    Matrix::zeroInPlace(this->attentionNormGamma);
+    Matrix::zeroInPlace(this->attentionNormBeta);
+    Matrix::zeroInPlace(this->feedForwardNormGamma);
+    Matrix::zeroInPlace(this->feedForwardNormBeta);
+    Matrix::zeroInPlace(this->feedForwardFirstWeight);
+    Matrix::zeroInPlace(this->feedForwardFirstBias);
+    Matrix::zeroInPlace(this->feedForwardSecondWeight);
+    Matrix::zeroInPlace(this->feedForwardSecondBias);
+}
+
 void TransformerBlockGradients::addInPlace(const TransformerBlockGradients& other) {
     Matrix::addInPlace(this->queryWeight, other.queryWeight);
     Matrix::addInPlace(this->keyWeight, other.keyWeight);

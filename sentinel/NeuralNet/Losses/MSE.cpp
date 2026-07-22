@@ -3,13 +3,16 @@
 float MSE::loss(const Matrix& prediction, const Matrix& target) {
     Matrix difference = Matrix::subtract(prediction, target);
 
-    size_t rows = difference.data.size();
-    size_t columns = rows > 0 ? difference.data[0].size() : 0;
-    float totalElements = static_cast<float>(rows * columns);
+    const size_t rows = difference.rows;
+    const size_t columns = difference.cols;
+    const float totalElements = static_cast<float>(rows * columns);
 
     float sum = 0.0f;
-    for (const auto& row : difference.data) {
-        for (float value : row) sum += value * value;
+    for (size_t row = 0; row < rows; ++row) {
+        for (size_t column = 0; column < columns; ++column) {
+            const float value = difference.at(row, column);
+            sum += value * value;
+        }
     }
 
     return sum / totalElements;
@@ -18,9 +21,9 @@ float MSE::loss(const Matrix& prediction, const Matrix& target) {
 Matrix MSE::gradient(const Matrix& prediction, const Matrix& target) {
     Matrix difference = Matrix::subtract(prediction, target);
 
-    size_t rows = difference.data.size();
-    size_t columns = rows > 0 ? difference.data[0].size() : 0;
-    float totalElements = static_cast<float>(rows * columns);
+    const size_t rows = difference.rows;
+    const size_t columns = difference.cols;
+    const float totalElements = static_cast<float>(rows * columns);
 
     return Matrix::scale(difference, 2.0f / totalElements);
 }

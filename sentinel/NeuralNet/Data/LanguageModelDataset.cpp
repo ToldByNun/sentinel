@@ -7,17 +7,13 @@ Matrix LanguageModelDataset::makeOneHotSequence(const std::vector<int>& targetTo
     if (vocabularySize <= 0) throw std::invalid_argument("LanguageModelDataset::makeOneHotSequence vocabularySize must be > 0");
     if (targetTokenIds.empty()) throw std::invalid_argument("LanguageModelDataset::makeOneHotSequence empty targets");
 
-    Matrix target;
-    target.data = std::vector<std::vector<float>>(
-        static_cast<size_t>(vocabularySize),
-        std::vector<float>(targetTokenIds.size(), 0.0f)
-    );
+    Matrix target(static_cast<size_t>(vocabularySize), targetTokenIds.size(), 0.0f);
 
     for (size_t position = 0; position < targetTokenIds.size(); ++position) {
         const int tokenId = targetTokenIds[position];
         if (tokenId < 0 || tokenId >= vocabularySize)
             throw std::out_of_range("LanguageModelDataset::makeOneHotSequence token id out of range");
-        target.data[static_cast<size_t>(tokenId)][position] = 1.0f;
+        target.at(static_cast<size_t>(tokenId), position) = 1.0f;
     }
 
     return target;

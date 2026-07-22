@@ -40,6 +40,9 @@ public:
     /// <summary>zero tensors matching block parameter shapes</summary>
     static TransformerBlockGradients zerosFrom(const TransformerBlock& block);
 
+    /// <summary>set all gradient tensors to zero in place</summary>
+    void zeroInPlace();
+
     /// <summary>total += other</summary>
     void addInPlace(const TransformerBlockGradients& other);
 

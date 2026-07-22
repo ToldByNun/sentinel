@@ -5,13 +5,9 @@
 Matrix ClassificationDataset::makeOneHot(int label, int classCount) {
     if (label < 0 || label >= classCount) throw std::out_of_range("ClassificationDataset::makeOneHot label out of range");
 
-    Matrix target;
-    target.data = std::vector<std::vector<float>>(
-        static_cast<size_t>(classCount),
-        std::vector<float>(1, 0.0f)
-    );
+    Matrix target(static_cast<size_t>(classCount), 1, 0.0f);
 
-    target.data[label][0] = 1.0f;
+    target.at(static_cast<size_t>(label), 0) = 1.0f;
     return target;
 }
 

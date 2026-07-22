@@ -1,5 +1,6 @@
 #include "LanguageModel.hpp"
 
+#include <chrono>
 #include <iostream>
 #include <stdexcept>
 #include <utility>
@@ -25,6 +26,17 @@ LanguageModelGradients LanguageModelGradients::zerosFrom(const LanguageModel& mo
     gradients.projectionWeight = Matrix::zerosLike(model.outputProjection.weight);
     gradients.projectionBias = Matrix::zerosLike(model.outputProjection.bias);
     return gradients;
+}
+
+void LanguageModelGradients::zeroInPlace() {
+    Matrix::zeroInPlace(this->tokenEmbedding);
+    Matrix::zeroInPlace(this->positionEmbedding);
+    for (TransformerBlockGradients& block : this->blocks)
+        block.zeroInPlace();
+    Matrix::zeroInPlace(this->finalNormGamma);
+    Matrix::zeroInPlace(this->finalNormBeta);
+    Matrix::zeroInPlace(this->projectionWeight);
+    Matrix::zeroInPlace(this->projectionBias);
 }
 
 void LanguageModelGradients::addInPlace(const LanguageModelGradients& other) {
@@ -80,23 +92,22 @@ std::vector<int> LanguageModel::positionIds(size_t sequenceLength) {
 }
 
 Matrix LanguageModel::sumColumns(const Matrix& gradient) {
-    Matrix biasGradient;
-    biasGradient.data = std::vector<std::vector<float>>(gradient.data.size(), std::vector<float>(1, 0.0f));
-    for (size_t row = 0; row < gradient.data.size(); ++row) {
+    Matrix biasGradient(gradient.rows, 1, 0.0f);
+    for (size_t row = 0; row < gradient.rows; ++row) {
         float total = 0.0f;
-        for (size_t column = 0; column < gradient.data[row].size(); ++column)
-            total += gradient.data[row][column];
-        biasGradient.data[row][0] = total;
+        for (size_t column = 0; column < gradient.cols; ++column)
+            total += gradient.at(row, column);
+        biasGradient.at(row, 0) = total;
     }
     return biasGradient;
 }
 
 Matrix LanguageModel::broadcastBiasAdd(const Matrix& product, const Matrix& bias) {
     Matrix result = product;
-    for (size_t row = 0; row < result.data.size(); ++row) {
-        const float biasValue = bias.data[row][0];
-        for (size_t column = 0; column < result.data[row].size(); ++column)
-            result.data[row][column] += biasValue;
+    for (size_t row = 0; row < result.rows; ++row) {
+        const float biasValue = bias.at(row, 0);
+        for (size_t column = 0; column < result.cols; ++column)
+            result.at(row, column) += biasValue;
     }
     return result;
 }
@@ -130,7 +141,7 @@ float LanguageModel::exampleLoss(const LanguageModelExample& example) {
     LanguageModelCache cache;
     Matrix logits = this->forwardLocal(example.inputTokenIds, cache);
     Matrix probabilities = Softmax::apply(logits);
-    Matrix target = example.targetOneHot.data.empty()
+    Matrix target = example.targetOneHot.empty()
         ? LanguageModelDataset::makeOneHotSequence(example.targetTokenIds, this->tokenEmbedding.vocabSize())
         : example.targetOneHot;
     return CrossEntropy::loss(probabilities, target);
@@ -155,15 +166,15 @@ float LanguageModel::accumulateExample(const LanguageModelExample& example, Lang
     LanguageModelCache cache;
     Matrix logits = this->forwardLocal(example.inputTokenIds, cache);
     Matrix probabilities = Softmax::apply(logits);
-    Matrix target = example.targetOneHot.data.empty()
+    Matrix target = example.targetOneHot.empty()
         ? LanguageModelDataset::makeOneHotSequence(example.targetTokenIds, this->tokenEmbedding.vocabSize())
         : example.targetOneHot;
     const float loss = CrossEntropy::loss(probabilities, target);
 
     Matrix logitGradient = CrossEntropy::gradient(probabilities, target);
-    Matrix projectionWeightGradient = Matrix::multiply(logitGradient, Matrix::transpose(cache.blockOutput));
+    Matrix projectionWeightGradient = Matrix::multiply(logitGradient, cache.blockOutput, false, true);
     Matrix projectionBiasGradient = LanguageModel::sumColumns(logitGradient);
-    Matrix hiddenGradient = Matrix::multiply(Matrix::transpose(this->outputProjection.weight), logitGradient);
+    Matrix hiddenGradient = Matrix::multiply(this->outputProjection.weight, logitGradient, true, false);
 
     Matrix finalNormGammaGradient;
     Matrix finalNormBetaGradient;
@@ -216,17 +227,23 @@ void LanguageModel::train(const LanguageModelDataset& trainDataset, const Langua
     if (threadCount < 1) threadCount = 1;
 #endif
 
+    std::vector<LanguageModelGradients> threadGradients(static_cast<size_t>(threadCount));
+    for (int threadIndex = 0; threadIndex < threadCount; ++threadIndex)
+        threadGradients[static_cast<size_t>(threadIndex)] = LanguageModelGradients::zerosFrom(*this);
+
+    LanguageModelGradients merged = LanguageModelGradients::zerosFrom(*this);
+
     for (int epoch = 0; epoch < epochs; ++epoch) {
         float epochLoss = 0.0f;
+        const auto epochStart = std::chrono::steady_clock::now();
 
         for (int batchStart = 0; batchStart < exampleCount; batchStart += batchSize) {
             int batchEnd = batchStart + batchSize;
             if (batchEnd > exampleCount) batchEnd = exampleCount;
             const float batchCount = static_cast<float>(batchEnd - batchStart);
 
-            std::vector<LanguageModelGradients> threadGradients(static_cast<size_t>(threadCount));
             for (int threadIndex = 0; threadIndex < threadCount; ++threadIndex)
-                threadGradients[static_cast<size_t>(threadIndex)] = LanguageModelGradients::zerosFrom(*this);
+                threadGradients[static_cast<size_t>(threadIndex)].zeroInPlace();
 
             float batchLoss = 0.0f;
 
@@ -247,8 +264,8 @@ void LanguageModel::train(const LanguageModelDataset& trainDataset, const Langua
                 }
             }
 
-            LanguageModelGradients merged = threadGradients[0];
-            for (int threadIndex = 1; threadIndex < threadCount; ++threadIndex)
+            merged.zeroInPlace();
+            for (int threadIndex = 0; threadIndex < threadCount; ++threadIndex)
                 merged.addInPlace(threadGradients[static_cast<size_t>(threadIndex)]);
             merged.scaleInPlace(1.0f / batchCount);
             this->applyGradients(merged);
@@ -259,7 +276,10 @@ void LanguageModel::train(const LanguageModelDataset& trainDataset, const Langua
         if (epoch % logEveryEpochs != 0) continue;
 
         const float averageTrainLoss = epochLoss / static_cast<float>(trainDataset.size());
-        std::cout << "Epoch " << epoch << " | trainLoss: " << averageTrainLoss;
+        const auto epochEnd = std::chrono::steady_clock::now();
+        const double epochSeconds = std::chrono::duration<double>(epochEnd - epochStart).count();
+        std::cout << "Epoch " << epoch << " | trainLoss: " << averageTrainLoss
+                  << " | sec: " << epochSeconds;
 
         if (!testDataset.examples.empty()) {
             const float testLoss = this->averageLoss(testDataset);
@@ -271,12 +291,12 @@ void LanguageModel::train(const LanguageModelDataset& trainDataset, const Langua
 }
 
 int LanguageModel::argmaxLastColumn(const Matrix& logits) {
-    const size_t lastColumn = logits.data[0].size() - 1;
+    const size_t lastColumn = logits.cols - 1;
     int bestTokenId = 0;
-    float bestLogit = logits.data[0][lastColumn];
-    for (size_t tokenId = 1; tokenId < logits.data.size(); ++tokenId) {
-        if (logits.data[tokenId][lastColumn] <= bestLogit) continue;
-        bestLogit = logits.data[tokenId][lastColumn];
+    float bestLogit = logits.at(0, lastColumn);
+    for (size_t tokenId = 1; tokenId < logits.rows; ++tokenId) {
+        if (logits.at(tokenId, lastColumn) <= bestLogit) continue;
+        bestLogit = logits.at(tokenId, lastColumn);
         bestTokenId = static_cast<int>(tokenId);
     }
     return bestTokenId;
@@ -285,13 +305,12 @@ int LanguageModel::argmaxLastColumn(const Matrix& logits) {
 int LanguageModel::sampleLastColumn(const Matrix& logits, float temperature, int topK, unsigned& seed) {
     if (temperature <= 0.0f) return LanguageModel::argmaxLastColumn(logits);
 
-    const size_t vocabularySize = logits.data.size();
-    const size_t lastColumn = logits.data[0].size() - 1;
+    const size_t vocabularySize = logits.rows;
+    const size_t lastColumn = logits.cols - 1;
 
-    Matrix scaledLogits;
-    scaledLogits.data = std::vector<std::vector<float>>(vocabularySize, std::vector<float>(1, 0.0f));
+    Matrix scaledLogits(vocabularySize, 1, 0.0f);
     for (size_t tokenId = 0; tokenId < vocabularySize; ++tokenId)
-        scaledLogits.data[tokenId][0] = logits.data[tokenId][lastColumn] / temperature;
+        scaledLogits.at(tokenId, 0) = logits.at(tokenId, lastColumn) / temperature;
 
     Matrix probabilities = Softmax::apply(scaledLogits);
 
@@ -305,8 +324,8 @@ int LanguageModel::sampleLastColumn(const Matrix& logits, float temperature, int
         for (size_t rank = 0; rank < keepCount; ++rank) {
             size_t bestIndex = rank;
             for (size_t index = rank + 1; index < candidateTokenIds.size(); ++index) {
-                if (probabilities.data[static_cast<size_t>(candidateTokenIds[index])][0]
-                    <= probabilities.data[static_cast<size_t>(candidateTokenIds[bestIndex])][0])
+                if (probabilities.at(static_cast<size_t>(candidateTokenIds[index]), 0)
+                    <= probabilities.at(static_cast<size_t>(candidateTokenIds[bestIndex]), 0))
                     continue;
                 bestIndex = index;
             }
@@ -317,16 +336,16 @@ int LanguageModel::sampleLastColumn(const Matrix& logits, float temperature, int
 
         float probabilitySum = 0.0f;
         for (int tokenId : candidateTokenIds)
-            probabilitySum += probabilities.data[static_cast<size_t>(tokenId)][0];
+            probabilitySum += probabilities.at(static_cast<size_t>(tokenId), 0);
         if (probabilitySum <= 0.0f) return candidateTokenIds[0];
         for (int tokenId : candidateTokenIds)
-            probabilities.data[static_cast<size_t>(tokenId)][0] /= probabilitySum;
+            probabilities.at(static_cast<size_t>(tokenId), 0) /= probabilitySum;
     }
 
     const float unit = UniformInit::unitSample(seed);
     float cumulative = 0.0f;
     for (int tokenId : candidateTokenIds) {
-        cumulative += probabilities.data[static_cast<size_t>(tokenId)][0];
+        cumulative += probabilities.at(static_cast<size_t>(tokenId), 0);
         if (unit <= cumulative) return tokenId;
     }
     return candidateTokenIds.back();

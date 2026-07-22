@@ -18,12 +18,7 @@ Sequential::Sequential(Dense layer1, Dense layer2, Adam optimizer, float dropRat
       layer2BiasState(AdamState::zerosLike(this->layer2.bias)) {}
 
 Matrix Sequential::zerosLike(const Matrix& matrix) {
-    Matrix result = matrix;
-    for (size_t row = 0; row < result.data.size(); ++row) {
-        for (size_t column = 0; column < result.data[row].size(); ++column)
-            result.data[row][column] = 0.0f;
-    }
-    return result;
+    return Matrix::zerosLike(matrix);
 }
 
 unsigned Sequential::advanceSeed(unsigned seed) {
@@ -47,10 +42,7 @@ std::vector<size_t> Sequential::shuffledOrder(size_t exampleCount, unsigned& see
 }
 
 void Sequential::accumulateGradient(Matrix& total, const Matrix& gradient) {
-    for (size_t row = 0; row < total.data.size(); ++row) {
-        for (size_t column = 0; column < total.data[row].size(); ++column)
-            total.data[row][column] += gradient.data[row][column];
-    }
+    Matrix::addInPlace(total, gradient);
 }
 
 void Sequential::updateDenseParameters(const Matrix& weightGradient1, const Matrix& biasGradient1, const Matrix& weightGradient2, const Matrix& biasGradient2) {
@@ -87,12 +79,16 @@ void Sequential::train(const Matrix& input, const Matrix& target, int epochs) {
         Matrix layer2Gradient = CrossEntropy::gradient(probabilities, target);
         Matrix weightGradient2 = Matrix::multiply(
             layer2Gradient,
-            Matrix::transpose(this->layer2.lastInput)
+            this->layer2.lastInput,
+            false,
+            true
         );
 
         Matrix inputGradient2 = Matrix::multiply(
-            Matrix::transpose(this->layer2.weight),
-            layer2Gradient
+            this->layer2.weight,
+            layer2Gradient,
+            true,
+            false
         );
         Matrix hiddenGradient = this->dropout.backward(inputGradient2);
         Matrix layer1Gradient = Matrix::multiplyElementwise(
@@ -101,7 +97,9 @@ void Sequential::train(const Matrix& input, const Matrix& target, int epochs) {
         );
         Matrix weightGradient1 = Matrix::multiply(
             layer1Gradient,
-            Matrix::transpose(this->layer1.lastInput)
+            this->layer1.lastInput,
+            false,
+            true
         );
 
         this->updateDenseParameters(weightGradient1, layer1Gradient, weightGradient2, layer2Gradient);
@@ -181,10 +179,10 @@ void Sequential::train(Embedding& embedding, MeanPool& meanPool, const Classific
                 epochLoss += CrossEntropy::loss(probabilities, example.target);
 
                 int predicted = 0;
-                float bestProbability = probabilities.data[0][0];
-                for (size_t classIndex = 1; classIndex < probabilities.data.size(); ++classIndex) {
-                    if (probabilities.data[classIndex][0] <= bestProbability) continue;
-                    bestProbability = probabilities.data[classIndex][0];
+                float bestProbability = probabilities.at(0, 0);
+                for (size_t classIndex = 1; classIndex < probabilities.rows; ++classIndex) {
+                    if (probabilities.at(classIndex, 0) <= bestProbability) continue;
+                    bestProbability = probabilities.at(classIndex, 0);
                     predicted = static_cast<int>(classIndex);
                 }
                 if (predicted == example.label) ++correct;
@@ -192,12 +190,16 @@ void Sequential::train(Embedding& embedding, MeanPool& meanPool, const Classific
                 Matrix layer2Gradient = CrossEntropy::gradient(probabilities, example.target);
                 Matrix weightGradient2 = Matrix::multiply(
                     layer2Gradient,
-                    Matrix::transpose(this->layer2.lastInput)
+                    this->layer2.lastInput,
+                    false,
+                    true
                 );
 
                 Matrix inputGradient2 = Matrix::multiply(
-                    Matrix::transpose(this->layer2.weight),
-                    layer2Gradient
+                    this->layer2.weight,
+                    layer2Gradient,
+                    true,
+                    false
                 );
                 Matrix hiddenGradient = this->dropout.backward(inputGradient2);
                 Matrix layer1Gradient = Matrix::multiplyElementwise(
@@ -206,12 +208,16 @@ void Sequential::train(Embedding& embedding, MeanPool& meanPool, const Classific
                 );
                 Matrix weightGradient1 = Matrix::multiply(
                     layer1Gradient,
-                    Matrix::transpose(this->layer1.lastInput)
+                    this->layer1.lastInput,
+                    false,
+                    true
                 );
 
                 Matrix pooledGradient = Matrix::multiply(
-                    Matrix::transpose(this->layer1.weight),
-                    layer1Gradient
+                    this->layer1.weight,
+                    layer1Gradient,
+                    true,
+                    false
                 );
 
                 Matrix embeddingGradient = meanPool.backward(pooledGradient);
@@ -298,10 +304,10 @@ int Sequential::predictClass(Embedding& embedding, MeanPool& meanPool, const std
     Matrix probabilities = this->forward(embedding, meanPool, tokenIds);
 
     int predicted = 0;
-    float bestProbability = probabilities.data[0][0];
-    for (size_t classIndex = 1; classIndex < probabilities.data.size(); ++classIndex) {
-        if (probabilities.data[classIndex][0] <= bestProbability) continue;
-        bestProbability = probabilities.data[classIndex][0];
+    float bestProbability = probabilities.at(0, 0);
+    for (size_t classIndex = 1; classIndex < probabilities.rows; ++classIndex) {
+        if (probabilities.at(classIndex, 0) <= bestProbability) continue;
+        bestProbability = probabilities.at(classIndex, 0);
         predicted = static_cast<int>(classIndex);
     }
     return predicted;
