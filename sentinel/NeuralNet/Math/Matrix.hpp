@@ -28,6 +28,15 @@ public:
 
     /// <summary>element wise multiply same shape required</summary>
     static Matrix multiplyElementwise(const Matrix& left, const Matrix& right);
+
+    /// <summary>total += delta in place</summary>
+    static void addInPlace(Matrix& total, const Matrix& delta);
+
+    /// <summary>matrix *= scalar in place</summary>
+    static void scaleInPlace(Matrix& matrix, float scalar);
+
+    /// <summary>same shape filled with zeros</summary>
+    static Matrix zerosLike(const Matrix& matrix);
 };
 
 #endif // MATRIX_HPP

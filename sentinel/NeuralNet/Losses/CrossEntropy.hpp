@@ -9,7 +9,7 @@ public:
     /// <summary>-sum(target * log(probabilities)) averaged over columns</summary>
     static float loss(const Matrix& probabilities, const Matrix& target);
 
-    /// <summary>gradient wrt logits for Softmax+CrossEntropy: probabilities - target</summary>
+    /// <summary>gradient wrt logits for mean Softmax+CrossEntropy: (probabilities - target) / columns</summary>
     static Matrix gradient(const Matrix& probabilities, const Matrix& target);
 };
 

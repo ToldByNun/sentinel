@@ -27,10 +27,8 @@ int Embedding::embeddingDim() const {
     return this->weight.data.empty() ? 0 : static_cast<int>(this->weight.data[0].size());
 }
 
-Matrix Embedding::forward(const std::vector<int>& tokenIds) {
+Matrix Embedding::forward(const std::vector<int>& tokenIds) const {
     if (tokenIds.empty()) throw std::invalid_argument("tokenIds must not be empty");
-
-    this->lastTokenIds = tokenIds;
 
     const int dimension = this->embeddingDim();
     Matrix result;
@@ -40,26 +38,30 @@ Matrix Embedding::forward(const std::vector<int>& tokenIds) {
         const int tokenId = tokenIds[tokenIndex];
         if (tokenId < 0 || tokenId >= this->vocabSize()) throw std::out_of_range("token id out of range in Embedding::forward");
 
-        for (int dimensionIndex = 0; dimensionIndex < dimension; ++dimensionIndex) result.data[dimensionIndex][tokenIndex] = this->weight.data[tokenId][dimensionIndex];
+        for (int dimensionIndex = 0; dimensionIndex < dimension; ++dimensionIndex)
+            result.data[dimensionIndex][tokenIndex] = this->weight.data[tokenId][dimensionIndex];
     }
 
     return result;
 }
 
-Matrix Embedding::backward(const Matrix& outputGradient) const {
-    if (this->lastTokenIds.empty()) throw std::logic_error("Embedding::backward called before forward");
+Matrix Embedding::backward(const Matrix& outputGradient, const std::vector<int>& tokenIds) const {
+    if (tokenIds.empty()) throw std::invalid_argument("Embedding::backward empty tokenIds");
     if (outputGradient.data.empty()) throw std::invalid_argument("Embedding::backward expects a non-empty gradient");
-    if (outputGradient.data[0].size() != this->lastTokenIds.size()) throw std::invalid_argument("Embedding::backward sequence length mismatch");
+    if (outputGradient.data[0].size() != tokenIds.size()) throw std::invalid_argument("Embedding::backward sequence length mismatch");
     if (static_cast<int>(outputGradient.data.size()) != this->embeddingDim()) throw std::invalid_argument("Embedding::backward embedding dim mismatch");
 
     Matrix weightGradient;
-    weightGradient.data = std::vector<std::vector<float>>(static_cast<size_t>(this->vocabSize()), std::vector<float>(static_cast<size_t>(this->embeddingDim()), 0.0f));
+    weightGradient.data = std::vector<std::vector<float>>(
+        static_cast<size_t>(this->vocabSize()),
+        std::vector<float>(static_cast<size_t>(this->embeddingDim()), 0.0f)
+    );
 
     const int dimension = this->embeddingDim();
-
-    for (size_t tokenIndex = 0; tokenIndex < this->lastTokenIds.size(); ++tokenIndex) {
-        const int tokenId = this->lastTokenIds[tokenIndex];
-        for (int dimensionIndex = 0; dimensionIndex < dimension; ++dimensionIndex) weightGradient.data[tokenId][dimensionIndex] += outputGradient.data[dimensionIndex][tokenIndex];
+    for (size_t tokenIndex = 0; tokenIndex < tokenIds.size(); ++tokenIndex) {
+        const int tokenId = tokenIds[tokenIndex];
+        for (int dimensionIndex = 0; dimensionIndex < dimension; ++dimensionIndex)
+            weightGradient.data[tokenId][dimensionIndex] += outputGradient.data[dimensionIndex][tokenIndex];
     }
 
     return weightGradient;

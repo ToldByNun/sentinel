@@ -29,12 +29,14 @@
     <ClCompile Include="NeuralNet\Utils\TextUtil.cpp" />
     <ClCompile Include="NeuralNet\Layers\Dense.cpp" />
     <ClCompile Include="NeuralNet\Layers\Dropout.cpp" />
+    <ClCompile Include="NeuralNet\Layers\CausalSelfAttention.cpp" />
     <ClCompile Include="NeuralNet\Layers\Embedding.cpp" />
     <ClCompile Include="NeuralNet\Layers\MeanPool.cpp" />
     <ClCompile Include="NeuralNet\Losses\CrossEntropy.cpp" />
     <ClCompile Include="NeuralNet\Losses\MSE.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="NeuralNet\Math\Matrix.cpp" />
+    <ClCompile Include="NeuralNet\Network\LanguageModel.cpp" />
     <ClCompile Include="NeuralNet\Network\Sequential.cpp" />
     <ClCompile Include="NeuralNet\Optimizers\Adam.cpp" />
     <ClCompile Include="NeuralNet\Optimizers\SGD.cpp" />
@@ -51,12 +53,14 @@
     <ClInclude Include="NeuralNet\Utils\TextUtil.hpp" />
     <ClInclude Include="NeuralNet\Layers\Dense.hpp" />
     <ClInclude Include="NeuralNet\Layers\Dropout.hpp" />
+    <ClInclude Include="NeuralNet\Layers\CausalSelfAttention.hpp" />
     <ClInclude Include="NeuralNet\Layers\Embedding.hpp" />
     <ClInclude Include="NeuralNet\Layers\Layer.hpp" />
     <ClInclude Include="NeuralNet\Layers\MeanPool.hpp" />
     <ClInclude Include="NeuralNet\Losses\CrossEntropy.hpp" />
     <ClInclude Include="NeuralNet\Losses\MSE.hpp" />
     <ClInclude Include="NeuralNet\Math\Matrix.hpp" />
+    <ClInclude Include="NeuralNet\Network\LanguageModel.hpp" />
     <ClInclude Include="NeuralNet\Network\Sequential.hpp" />
     <ClInclude Include="NeuralNet\Optimizers\Adam.hpp" />
     <ClInclude Include="NeuralNet\Optimizers\SGD.hpp" />
@@ -121,6 +125,7 @@
       <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <OpenMPSupport>true</OpenMPSupport>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -139,6 +144,7 @@
       <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <OpenMPSupport>true</OpenMPSupport>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -155,6 +161,7 @@
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <OpenMPSupport>true</OpenMPSupport>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -173,6 +180,7 @@
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <OpenMPSupport>true</OpenMPSupport>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>

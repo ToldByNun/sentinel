@@ -51,8 +51,10 @@ std::vector<JsonlRow> JsonlLoader::load(const std::string& path, int maximumRows
 
     std::vector<JsonlRow> rows;
     std::string line;
+    const bool unlimited = maximumRows < 1;
 
-    while (static_cast<int>(rows.size()) < maximumRows && std::getline(file, line)) {
+    while (std::getline(file, line)) {
+        if (!unlimited && static_cast<int>(rows.size()) >= maximumRows) break;
         if (line.empty()) continue;
 
         JsonlRow row;

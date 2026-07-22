@@ -24,6 +24,7 @@ Matrix CrossEntropy::gradient(const Matrix& probabilities, const Matrix& target)
     if (probabilities.data.size() != target.data.size() || probabilities.data.empty() || probabilities.data[0].size() != target.data[0].size())
         throw std::invalid_argument("CrossEntropy::gradient shape mismatch");
 
-    // dL/d(logits) = softmax(logits) - target
-    return Matrix::subtract(probabilities, target);
+    // matches loss averaged over columns: dL/d(logits) = (softmax - target) / columnCount
+    const float inverseColumnCount = 1.0f / static_cast<float>(probabilities.data[0].size());
+    return Matrix::scale(Matrix::subtract(probabilities, target), inverseColumnCount);
 }

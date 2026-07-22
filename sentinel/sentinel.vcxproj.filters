@@ -21,6 +21,9 @@
     <ClCompile Include="NeuralNet\Layers\Dense.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
+    <ClCompile Include="NeuralNet\Layers\CausalSelfAttention.cpp">
+      <Filter>Quelldateien</Filter>
+    </ClCompile>
     <ClCompile Include="NeuralNet\Layers\Dropout.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
@@ -31,6 +34,9 @@
       <Filter>Quelldateien</Filter>
     </ClCompile>
     <ClCompile Include="NeuralNet\Network\Sequential.cpp">
+      <Filter>Quelldateien</Filter>
+    </ClCompile>
+    <ClCompile Include="NeuralNet\Network\LanguageModel.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
     <ClCompile Include="NeuralNet\Optimizers\Adam.cpp">
@@ -83,6 +89,9 @@
     <ClInclude Include="NeuralNet\Layers\Dense.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
+    <ClInclude Include="NeuralNet\Layers\CausalSelfAttention.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
     <ClInclude Include="NeuralNet\Layers\Dropout.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
@@ -96,6 +105,9 @@
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Network\Sequential.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Network\LanguageModel.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Optimizers\Adam.hpp">

@@ -2,24 +2,38 @@
 #include "NeuralNet/Data/DatasetSplit.hpp"
 #include "NeuralNet/Data/JsonlLoader.hpp"
 #include "NeuralNet/Data/LanguageModelDataset.hpp"
-#include "NeuralNet/Losses/CrossEntropy.hpp"
+#include "NeuralNet/Network/LanguageModel.hpp"
+#include "NeuralNet/Optimizers/Adam.hpp"
 #include "NeuralNet/Utils/TextUtil.hpp"
 
 #include <iostream>
 #include <string>
 #include <vector>
 
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
+
 /// <summary>
-/// demo: build next-token (shifted) language-model examples from SERA text
-/// no sequence model yet — only dataset + CrossEntropy shape check
+/// demo: tiny causal LM on SERA text
+/// Embedding + position + causal attention + vocab projection
 /// </summary>
 int main() {
     const std::string samplePath = "../SERA-Data/sera_sample.jsonl";
     const size_t maximumTextCharacters = 400;
     const size_t maximumTokenCount = 64;
     const float trainRatio = 0.8f;
+    const int embeddingDim = 32;
+    const int maximumPositionCount = static_cast<int>(maximumTokenCount);
 
-    std::vector<JsonlRow> rows = JsonlLoader::load(samplePath, 500);
+#if defined(_OPENMP)
+    std::cout << "OpenMP threads: " << omp_get_max_threads() << '\n';
+#else
+    std::cout << "OpenMP: disabled\n";
+#endif
+
+    // 0 = load entire jsonl (sera_sample has 10000 rows)
+    std::vector<JsonlRow> rows = JsonlLoader::load(samplePath, 0);
 
     std::vector<std::string> texts;
     for (const JsonlRow& row : rows) {
@@ -35,50 +49,56 @@ int main() {
     DatasetSplit split = DatasetSplit::partitionTexts(texts, trainRatio, 42u);
 
     BPETokenizer tokenizer;
-    tokenizer.train(split.trainTexts, 300);
+    tokenizer.train(split.trainTexts, 500);
 
+    // skip storing one-hots for all rows (build on the fly while training)
     LanguageModelDataset trainDataset = LanguageModelDataset::build(
         split.trainTexts,
         tokenizer,
         maximumTokenCount,
-        true
+        false
     );
     LanguageModelDataset testDataset = LanguageModelDataset::build(
         split.testTexts,
         tokenizer,
         maximumTokenCount,
-        true
+        false
     );
 
     std::cout << "texts: " << texts.size() << '\n';
-    std::cout << "train texts: " << split.trainSize() << " | test texts: " << split.testSize() << '\n';
-    std::cout << "vocab size: " << tokenizer.vocabSize() << '\n';
     std::cout << "train examples: " << trainDataset.size()
-              << " | next-token positions: " << trainDataset.totalPredictionCount() << '\n';
-    std::cout << "test examples: " << testDataset.size()
-              << " | next-token positions: " << testDataset.totalPredictionCount() << '\n';
+              << " | test examples: " << testDataset.size() << '\n';
+    std::cout << "vocab size: " << tokenizer.vocabSize() << '\n';
+    std::cout << "next-token positions train: " << trainDataset.totalPredictionCount() << '\n';
 
     if (trainDataset.examples.empty()) {
         std::cout << "no language-model examples (need sequences with >= 2 tokens)\n";
         return 1;
     }
 
+    LanguageModel model(
+        tokenizer.vocabSize(),
+        embeddingDim,
+        maximumPositionCount,
+        Adam(0.001f)
+    );
+
+    model.train(trainDataset, testDataset, 50, 1, 64);
+
+    std::cout << "final trainLoss: " << model.averageLoss(trainDataset) << '\n';
+    if (!testDataset.examples.empty())
+        std::cout << "final testLoss:  " << model.averageLoss(testDataset) << '\n';
+
     const LanguageModelExample& sample = trainDataset.examples[0];
-    const size_t previewCount = (sample.inputTokenIds.size() < 8) ? sample.inputTokenIds.size() : 8;
+    const size_t promptLength = (sample.inputTokenIds.size() < 12) ? sample.inputTokenIds.size() : 12;
+    std::vector<int> prompt;
+    for (size_t index = 0; index < promptLength; ++index)
+        prompt.push_back(sample.inputTokenIds[index]);
 
-    std::cout << "--- shift preview (first train example, first " << previewCount << " positions) ---\n";
-    for (size_t position = 0; position < previewCount; ++position) {
-        const int inputId = sample.inputTokenIds[position];
-        const int targetId = sample.targetTokenIds[position];
-        std::cout << "pos " << position
-                  << " | in:  [" << inputId << "] \"" << tokenizer.idToToken(inputId) << "\""
-                  << " | out: [" << targetId << "] \"" << tokenizer.idToToken(targetId) << "\""
-                  << '\n';
-    }
+    std::vector<int> generated = model.generate(prompt, 20);
 
-    // smoke test: identical probability/target matrices -> loss near 0
-    const float perfectLoss = CrossEntropy::loss(sample.targetOneHot, sample.targetOneHot);
-    std::cout << "perfect-prediction CE (should be ~0): " << perfectLoss << '\n';
+    std::cout << "--- prompt ---\n" << tokenizer.decode(prompt) << '\n';
+    std::cout << "--- generated ---\n" << tokenizer.decode(generated) << '\n';
 
     return 0;
 }

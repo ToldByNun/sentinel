@@ -8,12 +8,14 @@ C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Initializers\UniformInit
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Utils\TextUtil.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\TextUtil.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\Dense.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\Dense.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\Dropout.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\Dropout.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\CausalSelfAttention.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\CausalSelfAttention.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\Embedding.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\Embedding.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\MeanPool.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\MeanPool.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Losses\CrossEntropy.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\CrossEntropy.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Losses\MSE.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\MSE.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\main.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\main.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Math\Matrix.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\Matrix.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Network\LanguageModel.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\LanguageModel.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Network\Sequential.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\Sequential.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Optimizers\Adam.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\Adam.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Optimizers\SGD.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\SGD.obj

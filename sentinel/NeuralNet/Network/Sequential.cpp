@@ -229,7 +229,7 @@ void Sequential::train(
                 );
 
                 Matrix embeddingGradient = meanPool.backward(pooledGradient);
-                Matrix embeddingWeightGradient = embedding.backward(embeddingGradient);
+                Matrix embeddingWeightGradient = embedding.backward(embeddingGradient, example.tokenIds);
 
                 Sequential::accumulateGradient(accumulatedWeightGradient2, weightGradient2);
                 Sequential::accumulateGradient(accumulatedBiasGradient2, layer2Gradient);

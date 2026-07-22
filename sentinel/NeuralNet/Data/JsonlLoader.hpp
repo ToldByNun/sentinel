@@ -14,7 +14,7 @@ public:
 /// <summary>tiny JSONL reader no real JSON parser just pulls string fields</summary>
 class JsonlLoader {
 public:
-    /// <summary>load up to maximumRows lines from a .jsonl file</summary>
+    /// <summary>load up to maximumRows lines from a .jsonl file (maximumRows less than 1 means no limit)</summary>
     static std::vector<JsonlRow> load(const std::string& path, int maximumRows = 50);
 
     /// <summary>map source string to class id (T1=0, T2=1, else -1)</summary>

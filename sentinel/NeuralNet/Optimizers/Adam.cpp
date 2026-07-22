@@ -80,30 +80,64 @@ void Adam::update(Matrix& parameter, AdamState& state, const Matrix& gradient) c
     if (state.firstMoment.data.size() != parameter.data.size() || state.firstMoment.data[0].size() != parameter.data[0].size())
         throw std::invalid_argument("Adam::update moment shape mismatch");
 
-    state.firstMoment = Matrix::add(
-        Matrix::scale(state.firstMoment, this->beta1),
-        Matrix::scale(gradient, 1.0f - this->beta1)
-    );
-    state.secondMoment = Matrix::add(
-        Matrix::scale(state.secondMoment, this->beta2),
-        Matrix::scale(Adam::squareElements(gradient), 1.0f - this->beta2)
-    );
+    const float firstMomentCorrection = 1.0f - std::pow(this->beta1, static_cast<float>(this->timeStep));
+    const float secondMomentCorrection = 1.0f - std::pow(this->beta2, static_cast<float>(this->timeStep));
+    const float inverseFirstCorrection = 1.0f / firstMomentCorrection;
+    const float inverseSecondCorrection = 1.0f / secondMomentCorrection;
+
+    for (size_t row = 0; row < parameter.data.size(); ++row) {
+        for (size_t column = 0; column < parameter.data[row].size(); ++column) {
+            const float gradientValue = gradient.data[row][column];
+            float& firstMoment = state.firstMoment.data[row][column];
+            float& secondMoment = state.secondMoment.data[row][column];
+
+            firstMoment = this->beta1 * firstMoment + (1.0f - this->beta1) * gradientValue;
+            secondMoment = this->beta2 * secondMoment + (1.0f - this->beta2) * gradientValue * gradientValue;
+
+            const float correctedFirst = firstMoment * inverseFirstCorrection;
+            const float correctedSecond = secondMoment * inverseSecondCorrection;
+            parameter.data[row][column] -= this->learningRate * correctedFirst / (std::sqrt(correctedSecond) + this->epsilon);
+        }
+    }
+}
+
+void Adam::updateSelectedRows(
+    Matrix& parameter,
+    AdamState& state,
+    const Matrix& gradient,
+    const std::vector<int>& rowIndices
+) const {
+    if (this->timeStep <= 0) throw std::invalid_argument("Adam::updateSelectedRows requires step() before update");
+    if (parameter.data.size() != gradient.data.size() || parameter.data[0].size() != gradient.data[0].size())
+        throw std::invalid_argument("Adam::updateSelectedRows parameter/gradient shape mismatch");
+
+    if (state.firstMoment.data.empty()) {
+        state.firstMoment = Adam::zerosLike(parameter);
+        state.secondMoment = Adam::zerosLike(parameter);
+    }
 
     const float firstMomentCorrection = 1.0f - std::pow(this->beta1, static_cast<float>(this->timeStep));
     const float secondMomentCorrection = 1.0f - std::pow(this->beta2, static_cast<float>(this->timeStep));
+    const float inverseFirstCorrection = 1.0f / firstMomentCorrection;
+    const float inverseSecondCorrection = 1.0f / secondMomentCorrection;
+    const size_t columnCount = parameter.data[0].size();
 
-    Matrix correctedFirstMoment = Matrix::scale(state.firstMoment, 1.0f / firstMomentCorrection);
-    Matrix correctedSecondMoment = Matrix::scale(state.secondMoment, 1.0f / secondMomentCorrection);
+    for (int rowIndex : rowIndices) {
+        if (rowIndex < 0 || rowIndex >= static_cast<int>(parameter.data.size()))
+            throw std::out_of_range("Adam::updateSelectedRows row out of range");
 
-    Matrix denominator = Adam::squareRootElements(correctedSecondMoment);
-    for (size_t row = 0; row < denominator.data.size(); ++row) {
-        for (size_t column = 0; column < denominator.data[row].size(); ++column)
-            denominator.data[row][column] += this->epsilon;
+        const size_t row = static_cast<size_t>(rowIndex);
+        for (size_t column = 0; column < columnCount; ++column) {
+            const float gradientValue = gradient.data[row][column];
+            float& firstMoment = state.firstMoment.data[row][column];
+            float& secondMoment = state.secondMoment.data[row][column];
+
+            firstMoment = this->beta1 * firstMoment + (1.0f - this->beta1) * gradientValue;
+            secondMoment = this->beta2 * secondMoment + (1.0f - this->beta2) * gradientValue * gradientValue;
+
+            const float correctedFirst = firstMoment * inverseFirstCorrection;
+            const float correctedSecond = secondMoment * inverseSecondCorrection;
+            parameter.data[row][column] -= this->learningRate * correctedFirst / (std::sqrt(correctedSecond) + this->epsilon);
+        }
     }
-
-    Matrix update = Matrix::scale(
-        Adam::divideElements(correctedFirstMoment, denominator),
-        this->learningRate
-    );
-    parameter = Matrix::subtract(parameter, update);
 }

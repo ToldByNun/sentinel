@@ -1,9 +1,7 @@
-﻿  DatasetSplit.cpp
-  LanguageModelDataset.cpp
-  main.cpp
+﻿  main.cpp
   Code wird generiert.
-  306 of 1256 functions (24.4%) were compiled, the rest were copied from previous compilation.
-    118 functions were new in current compilation
-    133 functions had inline decision re-evaluated but remain unchanged
+  3 of 1428 functions ( 0.2%) were compiled, the rest were copied from previous compilation.
+    0 functions were new in current compilation
+    0 functions had inline decision re-evaluated but remain unchanged
   Codegenerierung ist abgeschlossen.
   sentinel.vcxproj -> C:\Users\mikaj\source\repos\sentinel\x64\Release\sentinel.exe

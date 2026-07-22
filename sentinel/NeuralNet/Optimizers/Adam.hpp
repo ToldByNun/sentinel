@@ -3,6 +3,8 @@
 
 #include "../Math/Matrix.hpp"
 
+#include <vector>
+
 /// <summary>first and second moment buffers for one parameter matrix</summary>
 class AdamState {
 public:
@@ -37,6 +39,14 @@ public:
 
     /// <summary>in place Adam update for one parameter tensor</summary>
     void update(Matrix& parameter, AdamState& state, const Matrix& gradient) const;
+
+    /// <summary>Adam update only for selected rows (sparse embedding updates)</summary>
+    void updateSelectedRows(
+        Matrix& parameter,
+        AdamState& state,
+        const Matrix& gradient,
+        const std::vector<int>& rowIndices
+    ) const;
 
 private:
     /// <summary>same shape filled with zeros</summary>
