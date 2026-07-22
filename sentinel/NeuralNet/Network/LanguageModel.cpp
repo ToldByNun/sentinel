@@ -17,7 +17,6 @@
 LanguageModelGradients LanguageModelGradients::zerosFrom(const LanguageModel& model) {
     LanguageModelGradients gradients;
     gradients.tokenEmbedding = Matrix::zerosLike(model.tokenEmbedding.weight);
-    gradients.positionEmbedding = Matrix::zerosLike(model.positionEmbedding.weight);
     gradients.blocks.reserve(model.blocks.size());
     for (const TransformerBlock& block : model.blocks)
         gradients.blocks.push_back(TransformerBlockGradients::zerosFrom(block));
@@ -30,7 +29,6 @@ LanguageModelGradients LanguageModelGradients::zerosFrom(const LanguageModel& mo
 
 void LanguageModelGradients::zeroInPlace() {
     Matrix::zeroInPlace(this->tokenEmbedding);
-    Matrix::zeroInPlace(this->positionEmbedding);
     for (TransformerBlockGradients& block : this->blocks)
         block.zeroInPlace();
     Matrix::zeroInPlace(this->finalNormGamma);
@@ -41,7 +39,6 @@ void LanguageModelGradients::zeroInPlace() {
 
 void LanguageModelGradients::addInPlace(const LanguageModelGradients& other) {
     Matrix::addInPlace(this->tokenEmbedding, other.tokenEmbedding);
-    Matrix::addInPlace(this->positionEmbedding, other.positionEmbedding);
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex)
         this->blocks[blockIndex].addInPlace(other.blocks[blockIndex]);
     Matrix::addInPlace(this->finalNormGamma, other.finalNormGamma);
@@ -52,7 +49,6 @@ void LanguageModelGradients::addInPlace(const LanguageModelGradients& other) {
 
 void LanguageModelGradients::scaleInPlace(float scalar) {
     Matrix::scaleInPlace(this->tokenEmbedding, scalar);
-    Matrix::scaleInPlace(this->positionEmbedding, scalar);
     for (TransformerBlockGradients& block : this->blocks)
         block.scaleInPlace(scalar);
     Matrix::scaleInPlace(this->finalNormGamma, scalar);
@@ -62,28 +58,20 @@ void LanguageModelGradients::scaleInPlace(float scalar) {
 }
 
 LanguageModel::LanguageModel(int vocabularySize, int embeddingDim, int maximumPositionCount, Adam optimizer, int blockCount, int headCount)
-    : tokenEmbedding(vocabularySize, embeddingDim), positionEmbedding(maximumPositionCount, embeddingDim), finalNorm(embeddingDim), outputProjection(UniformInit::matrix(vocabularySize, embeddingDim, 0.1f, 31u), UniformInit::matrix(vocabularySize, 1, 0.01f, 32u)), optimizer(optimizer), maximumPositionCount(maximumPositionCount) {
+    : tokenEmbedding(vocabularySize, embeddingDim), finalNorm(embeddingDim), outputProjection(UniformInit::matrix(vocabularySize, embeddingDim, 0.1f, 31u), UniformInit::matrix(vocabularySize, 1, 0.01f, 32u)), optimizer(optimizer), maximumPositionCount(maximumPositionCount) {
     if (maximumPositionCount <= 0) throw std::invalid_argument("LanguageModel maximumPositionCount must be > 0");
     if (blockCount <= 0) throw std::invalid_argument("LanguageModel blockCount must be > 0");
     if (headCount <= 0) throw std::invalid_argument("LanguageModel headCount must be > 0");
 
     this->blocks.reserve(static_cast<size_t>(blockCount));
     for (int blockIndex = 0; blockIndex < blockCount; ++blockIndex)
-        this->blocks.push_back(TransformerBlock(embeddingDim, headCount, 21u + static_cast<unsigned>(blockIndex) * 100u));
+        this->blocks.push_back(TransformerBlock(embeddingDim, headCount, maximumPositionCount, 21u + static_cast<unsigned>(blockIndex) * 100u));
 
     this->tokenEmbeddingState = AdamState::zerosLike(this->tokenEmbedding.weight);
-    this->positionEmbeddingState = AdamState::zerosLike(this->positionEmbedding.weight);
     this->finalNormGammaState = AdamState::zerosLike(this->finalNorm.gamma);
     this->finalNormBetaState = AdamState::zerosLike(this->finalNorm.beta);
     this->projectionWeightState = AdamState::zerosLike(this->outputProjection.weight);
     this->projectionBiasState = AdamState::zerosLike(this->outputProjection.bias);
-}
-
-std::vector<int> LanguageModel::positionIds(size_t sequenceLength) {
-    std::vector<int> ids(sequenceLength);
-    for (size_t index = 0; index < sequenceLength; ++index)
-        ids[index] = static_cast<int>(index);
-    return ids;
 }
 
 Matrix LanguageModel::sumColumns(const Matrix& gradient) {
@@ -115,10 +103,7 @@ Matrix LanguageModel::forwardLocal(const std::vector<int>& tokenIds, LanguageMod
     if (cache.blockCaches.size() != this->blocks.size())
         cache.blockCaches.resize(this->blocks.size());
 
-    const std::vector<int> positions = LanguageModel::positionIds(tokenIds.size());
-    Matrix tokenEmbedded = this->tokenEmbedding.forward(tokenIds);
-    Matrix positionEmbedded = this->positionEmbedding.forward(positions);
-    Matrix hidden = Matrix::add(tokenEmbedded, positionEmbedded);
+    Matrix hidden = this->tokenEmbedding.forward(tokenIds);
 
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex)
         hidden = this->blocks[blockIndex].forward(hidden, cache.blockCaches[blockIndex]);
@@ -178,15 +163,12 @@ float LanguageModel::accumulateExample(const LanguageModelExample& example, Lang
     for (int blockIndex = static_cast<int>(this->blocks.size()) - 1; blockIndex >= 0; --blockIndex)
         hiddenGradient = this->blocks[static_cast<size_t>(blockIndex)].backward(hiddenGradient, cache.blockCaches[static_cast<size_t>(blockIndex)], gradients.blocks[static_cast<size_t>(blockIndex)]);
 
-    const std::vector<int> positions = LanguageModel::positionIds(example.inputTokenIds.size());
     Matrix tokenEmbeddingGradient = this->tokenEmbedding.backward(hiddenGradient, example.inputTokenIds);
-    Matrix positionEmbeddingGradient = this->positionEmbedding.backward(hiddenGradient, positions);
 
     Matrix::addInPlace(gradients.projectionWeight, projectionWeightGradient);
     Matrix::addInPlace(gradients.projectionBias, projectionBiasGradient);
     Matrix::addInPlace(gradients.finalNormGamma, finalNormGammaGradient);
     Matrix::addInPlace(gradients.finalNormBeta, finalNormBetaGradient);
-    Matrix::addInPlace(gradients.positionEmbedding, positionEmbeddingGradient);
     Matrix::addInPlace(gradients.tokenEmbedding, tokenEmbeddingGradient);
 
     return loss;
@@ -200,7 +182,6 @@ void LanguageModel::applyGradients(const LanguageModelGradients& gradients) {
     this->optimizer.update(this->finalNorm.beta, this->finalNormBetaState, gradients.finalNormBeta);
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex)
         this->blocks[blockIndex].applyGradients(this->optimizer, gradients.blocks[blockIndex]);
-    this->optimizer.update(this->positionEmbedding.weight, this->positionEmbeddingState, gradients.positionEmbedding);
     this->optimizer.update(this->tokenEmbedding.weight, this->tokenEmbeddingState, gradients.tokenEmbedding);
 }
 

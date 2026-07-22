@@ -26,7 +26,6 @@ public:
 class LanguageModelGradients {
 public:
     Matrix tokenEmbedding;
-    Matrix positionEmbedding;
     std::vector<TransformerBlockGradients> blocks;
     Matrix finalNormGamma;
     Matrix finalNormBeta;
@@ -47,20 +46,18 @@ public:
 };
 
 /// <summary>
-/// causal LM with stacked pre-norm transformer blocks
-/// embed -> (LN Attn FFN) x N -> final LN -> vocab
+/// causal LM with stacked pre-norm transformer blocks and RoPE
+/// token embed -> (LN Attn FFN) x N -> final LN -> vocab
 /// </summary>
 class LanguageModel {
 public:
     Embedding tokenEmbedding;
-    Embedding positionEmbedding;
     std::vector<TransformerBlock> blocks;
     LayerNorm finalNorm;
     Dense outputProjection;
     Adam optimizer;
 
     AdamState tokenEmbeddingState;
-    AdamState positionEmbeddingState;
     AdamState finalNormGammaState;
     AdamState finalNormBetaState;
     AdamState projectionWeightState;
@@ -89,9 +86,6 @@ public:
     std::vector<int> generate(const std::vector<int>& promptTokenIds, int newTokenCount, float temperature = 1.0f, int topK = 40, unsigned seed = 42u);
 
 private:
-    /// <summary>position ids 0 .. sequenceLength-1</summary>
-    static std::vector<int> positionIds(size_t sequenceLength);
-
     /// <summary>token id with highest logit in the last column</summary>
     static int argmaxLastColumn(const Matrix& logits);
 

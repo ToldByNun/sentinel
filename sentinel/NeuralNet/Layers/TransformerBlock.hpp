@@ -74,7 +74,7 @@ public:
     AdamState feedForwardSecondWeightState;
     AdamState feedForwardSecondBiasState;
 
-    TransformerBlock(int embeddingDim, int headCount, unsigned seed);
+    TransformerBlock(int embeddingDim, int headCount, int maximumPositionCount, unsigned seed);
 
     /// <summary>forward through one block writes cache</summary>
     Matrix forward(const Matrix& input, TransformerBlockCache& cache) const;

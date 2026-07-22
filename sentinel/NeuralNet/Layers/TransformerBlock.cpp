@@ -64,8 +64,8 @@ void TransformerBlockGradients::scaleInPlace(float scalar) {
     Matrix::scaleInPlace(this->feedForwardSecondBias, scalar);
 }
 
-TransformerBlock::TransformerBlock(int embeddingDim, int headCount, unsigned seed)
-    : attentionNorm(embeddingDim), attention(CausalSelfAttention::create(embeddingDim, headCount, seed)), feedForwardNorm(embeddingDim), feedForward(FeedForward::create(embeddingDim, 4, seed + 20u)) {
+TransformerBlock::TransformerBlock(int embeddingDim, int headCount, int maximumPositionCount, unsigned seed)
+    : attentionNorm(embeddingDim), attention(CausalSelfAttention::create(embeddingDim, headCount, maximumPositionCount, seed)), feedForwardNorm(embeddingDim), feedForward(FeedForward::create(embeddingDim, 4, seed + 20u)) {
     if (embeddingDim <= 0) throw std::invalid_argument("TransformerBlock embeddingDim must be > 0");
 
     this->queryWeightState = AdamState::zerosLike(this->attention.queryWeight);

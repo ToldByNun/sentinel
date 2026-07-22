@@ -24,6 +24,9 @@
     <ClCompile Include="NeuralNet\Layers\CausalSelfAttention.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
+    <ClCompile Include="NeuralNet\Layers\RotaryEmbedding.cpp">
+      <Filter>Quelldateien</Filter>
+    </ClCompile>
     <ClCompile Include="NeuralNet\Layers\FeedForward.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
@@ -99,6 +102,9 @@
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Layers\CausalSelfAttention.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Layers\RotaryEmbedding.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Layers\FeedForward.hpp">

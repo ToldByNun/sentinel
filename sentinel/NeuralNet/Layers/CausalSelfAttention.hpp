@@ -1,6 +1,7 @@
 #ifndef CAUSALSELFATTENTION_HPP
 #define CAUSALSELFATTENTION_HPP
 
+#include "RotaryEmbedding.hpp"
 #include "../Math/Matrix.hpp"
 
 #include <vector>
@@ -36,7 +37,7 @@ public:
 };
 
 /// <summary>
-/// multi head causal self attention
+/// multi head causal self attention with RoPE on Q and K
 /// input/output shape: embeddingDim x sequenceLength
 /// </summary>
 class CausalSelfAttention {
@@ -45,13 +46,14 @@ public:
     Matrix keyWeight;
     Matrix valueWeight;
     Matrix outputWeight;
+    RotaryEmbedding rotaryEmbedding;
     int headCount;
     int headDimension;
 
-    CausalSelfAttention(Matrix queryWeight, Matrix keyWeight, Matrix valueWeight, Matrix outputWeight, int headCount);
+    CausalSelfAttention(Matrix queryWeight, Matrix keyWeight, Matrix valueWeight, Matrix outputWeight, RotaryEmbedding rotaryEmbedding, int headCount);
 
     /// <summary>create dim x dim weights headCount must divide embeddingDim</summary>
-    static CausalSelfAttention create(int embeddingDim, int headCount = 4, unsigned seed = 11u);
+    static CausalSelfAttention create(int embeddingDim, int headCount, int maximumPositionCount, unsigned seed = 11u);
 
     /// <summary>causal multi head attention writes intermediates into cache</summary>
     Matrix forward(const Matrix& input, CausalSelfAttentionCache& cache) const;

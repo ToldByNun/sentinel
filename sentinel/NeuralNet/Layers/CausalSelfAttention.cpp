@@ -8,19 +8,23 @@
 #include <utility>
 #include <vector>
 
-CausalSelfAttention::CausalSelfAttention(Matrix queryWeight, Matrix keyWeight, Matrix valueWeight, Matrix outputWeight, int headCount)
-    : queryWeight(std::move(queryWeight)), keyWeight(std::move(keyWeight)), valueWeight(std::move(valueWeight)), outputWeight(std::move(outputWeight)), headCount(headCount), headDimension(0) {
+CausalSelfAttention::CausalSelfAttention(Matrix queryWeight, Matrix keyWeight, Matrix valueWeight, Matrix outputWeight, RotaryEmbedding rotaryEmbedding, int headCount)
+    : queryWeight(std::move(queryWeight)), keyWeight(std::move(keyWeight)), valueWeight(std::move(valueWeight)), outputWeight(std::move(outputWeight)), rotaryEmbedding(std::move(rotaryEmbedding)), headCount(headCount), headDimension(0) {
     if (this->headCount <= 0) throw std::invalid_argument("CausalSelfAttention headCount must be > 0");
     if (this->queryWeight.empty()) throw std::invalid_argument("CausalSelfAttention empty weights");
     if (static_cast<int>(this->queryWeight.rows) % this->headCount != 0) throw std::invalid_argument("CausalSelfAttention embeddingDim must be divisible by headCount");
     this->headDimension = static_cast<int>(this->queryWeight.rows) / this->headCount;
+    if (this->headDimension % 2 != 0) throw std::invalid_argument("CausalSelfAttention headDimension must be even for RoPE");
 }
 
-CausalSelfAttention CausalSelfAttention::create(int embeddingDim, int headCount, unsigned seed) {
+CausalSelfAttention CausalSelfAttention::create(int embeddingDim, int headCount, int maximumPositionCount, unsigned seed) {
     if (embeddingDim <= 0) throw std::invalid_argument("CausalSelfAttention::create embeddingDim must be > 0");
     if (headCount <= 0) throw std::invalid_argument("CausalSelfAttention::create headCount must be > 0");
     if (embeddingDim % headCount != 0) throw std::invalid_argument("CausalSelfAttention::create embeddingDim must be divisible by headCount");
-    return CausalSelfAttention(UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed), UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 1u), UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 2u), UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 3u), headCount);
+    if ((embeddingDim / headCount) % 2 != 0) throw std::invalid_argument("CausalSelfAttention::create headDimension must be even for RoPE");
+
+    RotaryEmbedding rotaryEmbedding(embeddingDim / headCount, maximumPositionCount);
+    return CausalSelfAttention(UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed), UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 1u), UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 2u), UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 3u), std::move(rotaryEmbedding), headCount);
 }
 
 void CausalSelfAttention::extractHeadInto(const Matrix& full, int headIndex, int headDimension, Matrix& head) {
@@ -65,6 +69,8 @@ Matrix CausalSelfAttention::forward(const Matrix& input, CausalSelfAttentionCach
     Matrix::gemm(this->queryWeight, input, cache.query);
     Matrix::gemm(this->keyWeight, input, cache.key);
     Matrix::gemm(this->valueWeight, input, cache.value);
+    this->rotaryEmbedding.rotateInPlace(cache.query, this->headCount);
+    this->rotaryEmbedding.rotateInPlace(cache.key, this->headCount);
 
     const size_t sequenceLength = input.cols;
     const float scale = 1.0f / std::sqrt(static_cast<float>(this->headDimension));
@@ -144,6 +150,9 @@ Matrix CausalSelfAttention::backward(const Matrix& outputGradient, CausalSelfAtt
         CausalSelfAttention::writeHead(cache.keyGradient, headIndex, this->headDimension, cache.keyHeadGradient);
         CausalSelfAttention::writeHead(cache.valueGradient, headIndex, this->headDimension, cache.valueHeadGradient);
     }
+
+    this->rotaryEmbedding.rotateInverseInPlace(cache.queryGradient, this->headCount);
+    this->rotaryEmbedding.rotateInverseInPlace(cache.keyGradient, this->headCount);
 
     Matrix::gemm(cache.queryGradient, cache.input, queryWeightGradient, false, true);
     Matrix::gemm(cache.keyGradient, cache.input, keyWeightGradient, false, true);
