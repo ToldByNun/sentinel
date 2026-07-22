@@ -15,8 +15,8 @@
 #endif
 
 /// <summary>
-/// demo: tiny causal LM on SERA text
-/// Embedding + position + causal attention + vocab projection
+/// demo: causal LM on SERA text
+/// Embedding + position + multi head attention + FFN + vocab projection
 /// </summary>
 int main() {
     const std::string samplePath = "../SERA-Data/sera_sample.jsonl";

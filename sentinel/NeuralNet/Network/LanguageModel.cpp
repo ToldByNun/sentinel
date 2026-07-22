@@ -75,7 +75,7 @@ LanguageModel::LanguageModel(int vocabularySize, int embeddingDim, int maximumPo
     : tokenEmbedding(vocabularySize, embeddingDim),
       positionEmbedding(maximumPositionCount, embeddingDim),
       attentionNorm(embeddingDim),
-      attention(CausalSelfAttention::create(embeddingDim, 21u)),
+      attention(CausalSelfAttention::create(embeddingDim, 4, 21u)),
       feedForwardNorm(embeddingDim),
       feedForward(FeedForward::create(embeddingDim, 4, 41u)),
       outputProjection(

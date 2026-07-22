@@ -1,7 +1,16 @@
-﻿  main.cpp
+﻿  ClassificationDataset.cpp
+  DatasetSplit.cpp
+  LanguageModelDataset.cpp
+  CausalSelfAttention.cpp
+  FeedForward.cpp
+  LayerNorm.cpp
+  LanguageModel.cpp
+  Sequential.cpp
+  Adam.cpp
+  main.cpp
   Code wird generiert.
-  3 of 1452 functions ( 0.2%) were compiled, the rest were copied from previous compilation.
-    0 functions were new in current compilation
-    0 functions had inline decision re-evaluated but remain unchanged
+  117 of 1537 functions ( 7.6%) were compiled, the rest were copied from previous compilation.
+    69 functions were new in current compilation
+    236 functions had inline decision re-evaluated but remain unchanged
   Codegenerierung ist abgeschlossen.
   sentinel.vcxproj -> C:\Users\mikaj\source\repos\sentinel\x64\Release\sentinel.exe

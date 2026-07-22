@@ -3,20 +3,22 @@
 
 #include "../Math/Matrix.hpp"
 
-/// <summary>thread local intermediates for one attention forward</summary>
+#include <vector>
+
+/// <summary>thread local intermediates for one multi head attention forward</summary>
 class CausalSelfAttentionCache {
 public:
     Matrix input;
     Matrix query;
     Matrix key;
     Matrix value;
-    Matrix scores;
-    Matrix probabilities;
+    std::vector<Matrix> scores;
+    std::vector<Matrix> probabilities;
     Matrix attended;
 };
 
 /// <summary>
-/// single head causal self attention
+/// multi head causal self attention
 /// input/output shape: embeddingDim x sequenceLength
 /// </summary>
 class CausalSelfAttention {
@@ -25,19 +27,18 @@ public:
     Matrix keyWeight;
     Matrix valueWeight;
     Matrix outputWeight;
+    int headCount;
+    int headDimension;
 
-    CausalSelfAttention(Matrix queryWeight, Matrix keyWeight, Matrix valueWeight, Matrix outputWeight);
+    CausalSelfAttention(Matrix queryWeight, Matrix keyWeight, Matrix valueWeight, Matrix outputWeight, int headCount);
 
-    /// <summary>create dim x dim weights with small random values</summary>
-    static CausalSelfAttention create(int embeddingDim, unsigned seed = 11u);
+    /// <summary>create dim x dim weights headCount must divide embeddingDim</summary>
+    static CausalSelfAttention create(int embeddingDim, int headCount = 4, unsigned seed = 11u);
 
-    /// <summary>causal attention writes intermediates into cache (thread safe if cache is local)</summary>
+    /// <summary>causal multi head attention writes intermediates into cache</summary>
     Matrix forward(const Matrix& input, CausalSelfAttentionCache& cache) const;
 
-    /// <summary>
-    /// backprop through attention using a cache from forward
-    /// returns input gradient and fills weight gradients via out params
-    /// </summary>
+    /// <summary>backprop through multi head attention fills weight gradients via out params</summary>
     Matrix backward(const Matrix& outputGradient, const CausalSelfAttentionCache& cache, Matrix& queryWeightGradient, Matrix& keyWeightGradient, Matrix& valueWeightGradient, Matrix& outputWeightGradient) const;
 
 private:
@@ -46,6 +47,12 @@ private:
 
     /// <summary>zero matrix matching shape</summary>
     static Matrix zerosLike(const Matrix& matrix);
+
+    /// <summary>copy one head block of rows from a full projection</summary>
+    static Matrix extractHead(const Matrix& full, int headIndex, int headDimension);
+
+    /// <summary>write one head block of rows into a full projection</summary>
+    static void writeHead(Matrix& full, int headIndex, int headDimension, const Matrix& head);
 };
 
 #endif // CAUSALSELFATTENTION_HPP

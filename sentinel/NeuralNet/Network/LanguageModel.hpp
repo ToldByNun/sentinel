@@ -57,8 +57,8 @@ public:
 };
 
 /// <summary>
-/// tiny causal LM with pre-norm transformer block
-/// embed -> LN -> Attn -> residual -> LN -> FFN -> residual -> vocab
+/// causal LM with pre-norm transformer block
+/// embed -> LN -> multi head Attn -> residual -> LN -> FFN -> residual -> vocab
 /// </summary>
 class LanguageModel {
 public:
