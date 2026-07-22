@@ -80,10 +80,15 @@ int main() {
         tokenizer.vocabSize(),
         embeddingDim,
         maximumPositionCount,
-        Adam(0.001f)
+        Adam(0.001f),
+        2,
+        4
     );
 
-    model.train(trainDataset, testDataset, 50, 1, 64);
+    std::cout << "blocks: " << model.blocks.size()
+              << " | heads: " << model.blocks[0].attention.headCount << '\n';
+
+    model.train(trainDataset, testDataset, 15, 1, 64);
 
     std::cout << "final trainLoss: " << model.averageLoss(trainDataset) << '\n';
     if (!testDataset.examples.empty())

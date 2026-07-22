@@ -30,6 +30,9 @@
     <ClCompile Include="NeuralNet\Layers\LayerNorm.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
+    <ClCompile Include="NeuralNet\Layers\TransformerBlock.cpp">
+      <Filter>Quelldateien</Filter>
+    </ClCompile>
     <ClCompile Include="NeuralNet\Layers\Dropout.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
@@ -102,6 +105,9 @@
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Layers\LayerNorm.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Layers\TransformerBlock.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Layers\Dropout.hpp">

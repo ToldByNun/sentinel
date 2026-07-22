@@ -2,11 +2,10 @@
 #define LANGUAGEMODEL_HPP
 
 #include "../Data/LanguageModelDataset.hpp"
-#include "../Layers/CausalSelfAttention.hpp"
 #include "../Layers/Dense.hpp"
 #include "../Layers/Embedding.hpp"
-#include "../Layers/FeedForward.hpp"
 #include "../Layers/LayerNorm.hpp"
+#include "../Layers/TransformerBlock.hpp"
 #include "../Math/Matrix.hpp"
 #include "../Optimizers/Adam.hpp"
 
@@ -17,12 +16,8 @@ class LanguageModel;
 /// <summary>thread local caches for one LM forward/backward</summary>
 class LanguageModelCache {
 public:
-    LayerNormCache attentionNormCache;
-    CausalSelfAttentionCache attentionCache;
-    LayerNormCache feedForwardNormCache;
-    FeedForwardCache feedForwardCache;
-    Matrix combined;
-    Matrix afterAttention;
+    std::vector<TransformerBlockCache> blockCaches;
+    LayerNormCache finalNormCache;
     Matrix blockOutput;
 };
 
@@ -31,18 +26,9 @@ class LanguageModelGradients {
 public:
     Matrix tokenEmbedding;
     Matrix positionEmbedding;
-    Matrix queryWeight;
-    Matrix keyWeight;
-    Matrix valueWeight;
-    Matrix attentionOutputWeight;
-    Matrix attentionNormGamma;
-    Matrix attentionNormBeta;
-    Matrix feedForwardNormGamma;
-    Matrix feedForwardNormBeta;
-    Matrix feedForwardFirstWeight;
-    Matrix feedForwardFirstBias;
-    Matrix feedForwardSecondWeight;
-    Matrix feedForwardSecondBias;
+    std::vector<TransformerBlockGradients> blocks;
+    Matrix finalNormGamma;
+    Matrix finalNormBeta;
     Matrix projectionWeight;
     Matrix projectionBias;
 
@@ -57,40 +43,28 @@ public:
 };
 
 /// <summary>
-/// causal LM with pre-norm transformer block
-/// embed -> LN -> multi head Attn -> residual -> LN -> FFN -> residual -> vocab
+/// causal LM with stacked pre-norm transformer blocks
+/// embed -> (LN Attn FFN) x N -> final LN -> vocab
 /// </summary>
 class LanguageModel {
 public:
     Embedding tokenEmbedding;
     Embedding positionEmbedding;
-    LayerNorm attentionNorm;
-    CausalSelfAttention attention;
-    LayerNorm feedForwardNorm;
-    FeedForward feedForward;
+    std::vector<TransformerBlock> blocks;
+    LayerNorm finalNorm;
     Dense outputProjection;
     Adam optimizer;
 
     AdamState tokenEmbeddingState;
     AdamState positionEmbeddingState;
-    AdamState queryWeightState;
-    AdamState keyWeightState;
-    AdamState valueWeightState;
-    AdamState outputWeightState;
-    AdamState attentionNormGammaState;
-    AdamState attentionNormBetaState;
-    AdamState feedForwardNormGammaState;
-    AdamState feedForwardNormBetaState;
-    AdamState feedForwardFirstWeightState;
-    AdamState feedForwardFirstBiasState;
-    AdamState feedForwardSecondWeightState;
-    AdamState feedForwardSecondBiasState;
+    AdamState finalNormGammaState;
+    AdamState finalNormBetaState;
     AdamState projectionWeightState;
     AdamState projectionBiasState;
 
     int maximumPositionCount;
 
-    LanguageModel(int vocabularySize, int embeddingDim, int maximumPositionCount, Adam optimizer);
+    LanguageModel(int vocabularySize, int embeddingDim, int maximumPositionCount, Adam optimizer, int blockCount = 2, int headCount = 4);
 
     /// <summary>logits vocabSize x sequenceLength</summary>
     Matrix forward(const std::vector<int>& tokenIds);
