@@ -1,10 +1,75 @@
 #include "Matrix.hpp"
 
+#include <algorithm>
 #include <stdexcept>
+#include <vector>
 
 #if defined(_OPENMP)
 #include <omp.h>
 #endif
+
+static constexpr size_t gemmBlockSize = 32;
+
+/// <summary>pack transposed src into contiguous outRows x outCols row major</summary>
+static void packTransposed(const Matrix& src, size_t outRows, size_t outCols, std::vector<float>& packed) {
+    if (src.rows != outCols || src.cols != outRows) throw std::invalid_argument("packTransposed shape mismatch");
+    packed.resize(outRows * outCols);
+    for (size_t row = 0; row < outRows; ++row) {
+        for (size_t column = 0; column < outCols; ++column)
+            packed[row * outCols + column] = src.data[column * src.cols + row];
+    }
+}
+
+/// <summary>blocked C = A * B for contiguous row major panels</summary>
+static void blockedGemmNN(const float* left, size_t leftLeadingDimension, const float* right, size_t rightLeadingDimension, float* out, size_t outLeadingDimension, size_t rowCount, size_t columnCount, size_t sharedCount) {
+    for (size_t rowBlock = 0; rowBlock < rowCount; rowBlock += gemmBlockSize) {
+        const size_t rowEnd = (std::min)(rowBlock + gemmBlockSize, rowCount);
+        for (size_t columnBlock = 0; columnBlock < columnCount; columnBlock += gemmBlockSize) {
+            const size_t columnEnd = (std::min)(columnBlock + gemmBlockSize, columnCount);
+            for (size_t sharedBlock = 0; sharedBlock < sharedCount; sharedBlock += gemmBlockSize) {
+                const size_t sharedEnd = (std::min)(sharedBlock + gemmBlockSize, sharedCount);
+                for (size_t row = rowBlock; row < rowEnd; ++row) {
+                    for (size_t shared = sharedBlock; shared < sharedEnd; ++shared) {
+                        const float leftValue = left[row * leftLeadingDimension + shared];
+                        float* outRow = out + row * outLeadingDimension;
+                        const float* rightRow = right + shared * rightLeadingDimension;
+                        for (size_t column = columnBlock; column < columnEnd; ++column)
+                            outRow[column] += leftValue * rightRow[column];
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// <summary>OpenMP over row blocks of blockedGemmNN</summary>
+static void blockedGemmNNParallel(const float* left, size_t leftLeadingDimension, const float* right, size_t rightLeadingDimension, float* out, size_t outLeadingDimension, size_t rowCount, size_t columnCount, size_t sharedCount) {
+#if defined(_OPENMP)
+    const int rowBlockCount = static_cast<int>((rowCount + gemmBlockSize - 1) / gemmBlockSize);
+    #pragma omp parallel for schedule(static)
+    for (int rowBlockIndex = 0; rowBlockIndex < rowBlockCount; ++rowBlockIndex) {
+        const size_t rowBlock = static_cast<size_t>(rowBlockIndex) * gemmBlockSize;
+        const size_t rowEnd = (std::min)(rowBlock + gemmBlockSize, rowCount);
+        for (size_t columnBlock = 0; columnBlock < columnCount; columnBlock += gemmBlockSize) {
+            const size_t columnEnd = (std::min)(columnBlock + gemmBlockSize, columnCount);
+            for (size_t sharedBlock = 0; sharedBlock < sharedCount; sharedBlock += gemmBlockSize) {
+                const size_t sharedEnd = (std::min)(sharedBlock + gemmBlockSize, sharedCount);
+                for (size_t row = rowBlock; row < rowEnd; ++row) {
+                    for (size_t shared = sharedBlock; shared < sharedEnd; ++shared) {
+                        const float leftValue = left[row * leftLeadingDimension + shared];
+                        float* outRow = out + row * outLeadingDimension;
+                        const float* rightRow = right + shared * rightLeadingDimension;
+                        for (size_t column = columnBlock; column < columnEnd; ++column)
+                            outRow[column] += leftValue * rightRow[column];
+                    }
+                }
+            }
+        }
+    }
+#else
+    blockedGemmNN(left, leftLeadingDimension, right, rightLeadingDimension, out, outLeadingDimension, rowCount, columnCount, sharedCount);
+#endif
+}
 
 Matrix::Matrix(size_t rowCount, size_t columnCount, float fillValue) {
     this->resize(rowCount, columnCount, fillValue);
@@ -40,41 +105,41 @@ void Matrix::gemm(const Matrix& left, const Matrix& right, Matrix& out, bool tra
     const size_t leftCols = transposeLeft ? left.rows : left.cols;
     const size_t rightRows = transposeRight ? right.cols : right.rows;
     const size_t rightCols = transposeRight ? right.rows : right.cols;
-
     if (leftCols != rightRows) throw std::invalid_argument("Matrix::gemm shape mismatch");
 
-    out.resize(leftRows, rightCols, 0.0f);
+    if (out.rows != leftRows || out.cols != rightCols)
+        out.resize(leftRows, rightCols, 0.0f);
+    else
+        out.fill(0.0f);
+
+    thread_local std::vector<float> packedLeft;
+    thread_local std::vector<float> packedRight;
+
+    const float* leftPointer = left.data.data();
+    size_t leftLeadingDimension = left.cols;
+    if (transposeLeft) {
+        packTransposed(left, leftRows, leftCols, packedLeft);
+        leftPointer = packedLeft.data();
+        leftLeadingDimension = leftCols;
+    }
+
+    const float* rightPointer = right.data.data();
+    size_t rightLeadingDimension = right.cols;
+    if (transposeRight) {
+        packTransposed(right, rightRows, rightCols, packedRight);
+        rightPointer = packedRight.data();
+        rightLeadingDimension = rightCols;
+    }
 
     const size_t work = leftRows * leftCols * rightCols;
 #if defined(_OPENMP)
     if (work >= 65536 && !omp_in_parallel()) {
-        #pragma omp parallel for schedule(static)
-        for (int row = 0; row < static_cast<int>(leftRows); ++row) {
-            for (size_t shared = 0; shared < leftCols; ++shared) {
-                const float leftValue = transposeLeft
-                    ? left.at(shared, static_cast<size_t>(row))
-                    : left.at(static_cast<size_t>(row), shared);
-                for (size_t column = 0; column < rightCols; ++column) {
-                    const float rightValue = transposeRight
-                        ? right.at(column, shared)
-                        : right.at(shared, column);
-                    out.at(static_cast<size_t>(row), column) += leftValue * rightValue;
-                }
-            }
-        }
+        blockedGemmNNParallel(leftPointer, leftLeadingDimension, rightPointer, rightLeadingDimension, out.data.data(), out.cols, leftRows, rightCols, leftCols);
         return;
     }
 #endif
 
-    for (size_t row = 0; row < leftRows; ++row) {
-        for (size_t shared = 0; shared < leftCols; ++shared) {
-            const float leftValue = transposeLeft ? left.at(shared, row) : left.at(row, shared);
-            for (size_t column = 0; column < rightCols; ++column) {
-                const float rightValue = transposeRight ? right.at(column, shared) : right.at(shared, column);
-                out.at(row, column) += leftValue * rightValue;
-            }
-        }
-    }
+    blockedGemmNN(leftPointer, leftLeadingDimension, rightPointer, rightLeadingDimension, out.data.data(), out.cols, leftRows, rightCols, leftCols);
 }
 
 Matrix Matrix::multiply(const Matrix& left, const Matrix& right) {

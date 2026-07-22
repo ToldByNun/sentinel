@@ -43,9 +43,7 @@ LanguageModelDataset LanguageModelDataset::build(const std::vector<std::string>&
             tokenIds.resize(maximumTokenCount);
         if (tokenIds.size() < 2) continue;
 
-        dataset.examples.push_back(
-            LanguageModelDataset::fromTokenIds(tokenIds, dataset.vocabularySize, buildOneHot)
-        );
+        dataset.examples.push_back(LanguageModelDataset::fromTokenIds(tokenIds, dataset.vocabularySize, buildOneHot));
     }
 
     return dataset;

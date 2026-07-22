@@ -51,19 +51,8 @@ int main() {
     BPETokenizer tokenizer;
     tokenizer.train(split.trainTexts, 2500);
 
-    // skip storing one-hots for all rows (build on the fly while training)
-    LanguageModelDataset trainDataset = LanguageModelDataset::build(
-        split.trainTexts,
-        tokenizer,
-        maximumTokenCount,
-        false
-    );
-    LanguageModelDataset testDataset = LanguageModelDataset::build(
-        split.testTexts,
-        tokenizer,
-        maximumTokenCount,
-        false
-    );
+    LanguageModelDataset trainDataset = LanguageModelDataset::build(split.trainTexts, tokenizer, maximumTokenCount, false);
+    LanguageModelDataset testDataset = LanguageModelDataset::build(split.testTexts, tokenizer, maximumTokenCount, false);
 
     std::cout << "texts: " << texts.size() << '\n';
     std::cout << "train examples: " << trainDataset.size()
@@ -76,17 +65,9 @@ int main() {
         return 1;
     }
 
-    LanguageModel model(
-        tokenizer.vocabSize(),
-        embeddingDim,
-        maximumPositionCount,
-        Adam(0.001f),
-        2,
-        4
-    );
+    LanguageModel model(tokenizer.vocabSize(), embeddingDim, maximumPositionCount, Adam(0.001f), 2, 4);
 
-    std::cout << "blocks: " << model.blocks.size()
-              << " | heads: " << model.blocks[0].attention.headCount << '\n';
+    std::cout << "blocks: " << model.blocks.size() << " | heads: " << model.blocks[0].attention.headCount << '\n';
 
     model.train(trainDataset, testDataset, 15, 1, 64);
 

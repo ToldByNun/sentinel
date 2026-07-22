@@ -62,12 +62,7 @@ void LanguageModelGradients::scaleInPlace(float scalar) {
 }
 
 LanguageModel::LanguageModel(int vocabularySize, int embeddingDim, int maximumPositionCount, Adam optimizer, int blockCount, int headCount)
-    : tokenEmbedding(vocabularySize, embeddingDim),
-      positionEmbedding(maximumPositionCount, embeddingDim),
-      finalNorm(embeddingDim),
-      outputProjection(UniformInit::matrix(vocabularySize, embeddingDim, 0.1f, 31u), UniformInit::matrix(vocabularySize, 1, 0.01f, 32u)),
-      optimizer(optimizer),
-      maximumPositionCount(maximumPositionCount) {
+    : tokenEmbedding(vocabularySize, embeddingDim), positionEmbedding(maximumPositionCount, embeddingDim), finalNorm(embeddingDim), outputProjection(UniformInit::matrix(vocabularySize, embeddingDim, 0.1f, 31u), UniformInit::matrix(vocabularySize, 1, 0.01f, 32u)), optimizer(optimizer), maximumPositionCount(maximumPositionCount) {
     if (maximumPositionCount <= 0) throw std::invalid_argument("LanguageModel maximumPositionCount must be > 0");
     if (blockCount <= 0) throw std::invalid_argument("LanguageModel blockCount must be > 0");
     if (headCount <= 0) throw std::invalid_argument("LanguageModel headCount must be > 0");
@@ -257,10 +252,7 @@ void LanguageModel::train(const LanguageModelDataset& trainDataset, const Langua
                 #pragma omp for reduction(+:batchLoss) schedule(dynamic, 1)
 #endif
                 for (int index = batchStart; index < batchEnd; ++index) {
-                    batchLoss += this->accumulateExample(
-                        trainDataset.examples[static_cast<size_t>(index)],
-                        threadGradients[static_cast<size_t>(threadIndex)]
-                    );
+                    batchLoss += this->accumulateExample(trainDataset.examples[static_cast<size_t>(index)], threadGradients[static_cast<size_t>(threadIndex)]);
                 }
             }
 
@@ -278,8 +270,7 @@ void LanguageModel::train(const LanguageModelDataset& trainDataset, const Langua
         const float averageTrainLoss = epochLoss / static_cast<float>(trainDataset.size());
         const auto epochEnd = std::chrono::steady_clock::now();
         const double epochSeconds = std::chrono::duration<double>(epochEnd - epochStart).count();
-        std::cout << "Epoch " << epoch << " | trainLoss: " << averageTrainLoss
-                  << " | sec: " << epochSeconds;
+        std::cout << "Epoch " << epoch << " | trainLoss: " << averageTrainLoss << " | sec: " << epochSeconds;
 
         if (!testDataset.examples.empty()) {
             const float testLoss = this->averageLoss(testDataset);

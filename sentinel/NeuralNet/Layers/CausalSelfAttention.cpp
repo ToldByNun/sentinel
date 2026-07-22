@@ -9,16 +9,10 @@
 #include <vector>
 
 CausalSelfAttention::CausalSelfAttention(Matrix queryWeight, Matrix keyWeight, Matrix valueWeight, Matrix outputWeight, int headCount)
-    : queryWeight(std::move(queryWeight)),
-      keyWeight(std::move(keyWeight)),
-      valueWeight(std::move(valueWeight)),
-      outputWeight(std::move(outputWeight)),
-      headCount(headCount),
-      headDimension(0) {
+    : queryWeight(std::move(queryWeight)), keyWeight(std::move(keyWeight)), valueWeight(std::move(valueWeight)), outputWeight(std::move(outputWeight)), headCount(headCount), headDimension(0) {
     if (this->headCount <= 0) throw std::invalid_argument("CausalSelfAttention headCount must be > 0");
     if (this->queryWeight.empty()) throw std::invalid_argument("CausalSelfAttention empty weights");
-    if (static_cast<int>(this->queryWeight.rows) % this->headCount != 0)
-        throw std::invalid_argument("CausalSelfAttention embeddingDim must be divisible by headCount");
+    if (static_cast<int>(this->queryWeight.rows) % this->headCount != 0) throw std::invalid_argument("CausalSelfAttention embeddingDim must be divisible by headCount");
     this->headDimension = static_cast<int>(this->queryWeight.rows) / this->headCount;
 }
 
@@ -27,13 +21,7 @@ CausalSelfAttention CausalSelfAttention::create(int embeddingDim, int headCount,
     if (headCount <= 0) throw std::invalid_argument("CausalSelfAttention::create headCount must be > 0");
     if (embeddingDim % headCount != 0) throw std::invalid_argument("CausalSelfAttention::create embeddingDim must be divisible by headCount");
 
-    return CausalSelfAttention(
-        UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed),
-        UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 1u),
-        UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 2u),
-        UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 3u),
-        headCount
-    );
+    return CausalSelfAttention(UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed), UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 1u), UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 2u), UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 3u), headCount);
 }
 
 Matrix CausalSelfAttention::zerosLike(const Matrix& matrix) {
