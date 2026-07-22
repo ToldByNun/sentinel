@@ -31,18 +31,10 @@ public:
     static int inferLabel(const std::string& text);
 
     /// <summary>encode corpus + attach labels tokenizer must already be trained</summary>
-    static ClassificationDataset build(
-        const std::vector<std::string>& corpus,
-        const BPETokenizer& tokenizer
-    );
+    static ClassificationDataset build(const std::vector<std::string>& corpus, const BPETokenizer& tokenizer);
 
     /// <summary>encode texts with explicit labels (for SERA etc)</summary>
-    static ClassificationDataset buildLabeled(
-        const std::vector<std::string>& texts,
-        const std::vector<int>& labels,
-        const BPETokenizer& tokenizer,
-        int classCount
-    );
+    static ClassificationDataset buildLabeled(const std::vector<std::string>& texts, const std::vector<int>& labels, const BPETokenizer& tokenizer, int classCount);
 
     int size() const;
 };

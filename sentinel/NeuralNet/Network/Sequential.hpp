@@ -52,16 +52,7 @@ public:
     /// stops early if testAccuracy does not improve for earlyStoppingPatience checks
     /// restores best weights after stop
     /// </summary>
-    void train(
-        Embedding& embedding,
-        MeanPool& meanPool,
-        const ClassificationDataset& trainDataset,
-        const ClassificationDataset& testDataset,
-        int epochs,
-        int logEveryEpochs = 500,
-        int earlyStoppingPatience = 3,
-        int batchSize = 16
-    );
+    void train(Embedding& embedding, MeanPool& meanPool, const ClassificationDataset& trainDataset, const ClassificationDataset& testDataset, int epochs, int logEveryEpochs = 500, int earlyStoppingPatience = 3, int batchSize = 16);
 
     /// <summary>argmax class for token ids</summary>
     int predictClass(Embedding& embedding, MeanPool& meanPool, const std::vector<int>& tokenIds);
@@ -83,12 +74,7 @@ private:
     static void accumulateGradient(Matrix& total, const Matrix& gradient);
 
     /// <summary>one Adam step for both Dense layers</summary>
-    void updateDenseParameters(
-        const Matrix& weightGradient1,
-        const Matrix& biasGradient1,
-        const Matrix& weightGradient2,
-        const Matrix& biasGradient2
-    );
+    void updateDenseParameters(const Matrix& weightGradient1, const Matrix& biasGradient1, const Matrix& weightGradient2, const Matrix& biasGradient2);
 };
 
 #endif // SEQUENTIAL_HPP

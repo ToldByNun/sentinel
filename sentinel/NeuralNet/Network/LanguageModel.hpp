@@ -5,12 +5,26 @@
 #include "../Layers/CausalSelfAttention.hpp"
 #include "../Layers/Dense.hpp"
 #include "../Layers/Embedding.hpp"
+#include "../Layers/FeedForward.hpp"
+#include "../Layers/LayerNorm.hpp"
 #include "../Math/Matrix.hpp"
 #include "../Optimizers/Adam.hpp"
 
 #include <vector>
 
 class LanguageModel;
+
+/// <summary>thread local caches for one LM forward/backward</summary>
+class LanguageModelCache {
+public:
+    LayerNormCache attentionNormCache;
+    CausalSelfAttentionCache attentionCache;
+    LayerNormCache feedForwardNormCache;
+    FeedForwardCache feedForwardCache;
+    Matrix combined;
+    Matrix afterAttention;
+    Matrix blockOutput;
+};
 
 /// <summary>accumulated gradients for one parallel training batch</summary>
 class LanguageModelGradients {
@@ -21,6 +35,14 @@ public:
     Matrix keyWeight;
     Matrix valueWeight;
     Matrix attentionOutputWeight;
+    Matrix attentionNormGamma;
+    Matrix attentionNormBeta;
+    Matrix feedForwardNormGamma;
+    Matrix feedForwardNormBeta;
+    Matrix feedForwardFirstWeight;
+    Matrix feedForwardFirstBias;
+    Matrix feedForwardSecondWeight;
+    Matrix feedForwardSecondBias;
     Matrix projectionWeight;
     Matrix projectionBias;
 
@@ -35,13 +57,17 @@ public:
 };
 
 /// <summary>
-/// tiny causal LM: token + position embed -> attention + residual -> vocab logits
+/// tiny causal LM with pre-norm transformer block
+/// embed -> LN -> Attn -> residual -> LN -> FFN -> residual -> vocab
 /// </summary>
 class LanguageModel {
 public:
     Embedding tokenEmbedding;
     Embedding positionEmbedding;
+    LayerNorm attentionNorm;
     CausalSelfAttention attention;
+    LayerNorm feedForwardNorm;
+    FeedForward feedForward;
     Dense outputProjection;
     Adam optimizer;
 
@@ -51,17 +77,20 @@ public:
     AdamState keyWeightState;
     AdamState valueWeightState;
     AdamState outputWeightState;
+    AdamState attentionNormGammaState;
+    AdamState attentionNormBetaState;
+    AdamState feedForwardNormGammaState;
+    AdamState feedForwardNormBetaState;
+    AdamState feedForwardFirstWeightState;
+    AdamState feedForwardFirstBiasState;
+    AdamState feedForwardSecondWeightState;
+    AdamState feedForwardSecondBiasState;
     AdamState projectionWeightState;
     AdamState projectionBiasState;
 
     int maximumPositionCount;
 
-    LanguageModel(
-        int vocabularySize,
-        int embeddingDim,
-        int maximumPositionCount,
-        Adam optimizer
-    );
+    LanguageModel(int vocabularySize, int embeddingDim, int maximumPositionCount, Adam optimizer);
 
     /// <summary>logits vocabSize x sequenceLength</summary>
     Matrix forward(const std::vector<int>& tokenIds);
@@ -76,13 +105,7 @@ public:
     void train(const LanguageModelDataset& dataset, int epochs, int logEveryEpochs = 1);
 
     /// <summary>train and also report testLoss every logEveryEpochs</summary>
-    void train(
-        const LanguageModelDataset& trainDataset,
-        const LanguageModelDataset& testDataset,
-        int epochs,
-        int logEveryEpochs = 1,
-        int batchSize = 32
-    );
+    void train(const LanguageModelDataset& trainDataset, const LanguageModelDataset& testDataset, int epochs, int logEveryEpochs = 1, int batchSize = 32);
 
     /// <summary>greedy next-token generation from a prompt</summary>
     std::vector<int> generate(const std::vector<int>& promptTokenIds, int newTokenCount);
@@ -98,11 +121,7 @@ private:
     static Matrix broadcastBiasAdd(const Matrix& product, const Matrix& bias);
 
     /// <summary>forward using only stack local caches (safe under OpenMP)</summary>
-    Matrix forwardLocal(
-        const std::vector<int>& tokenIds,
-        CausalSelfAttentionCache& attentionCache,
-        Matrix& projectionInput
-    ) const;
+    Matrix forwardLocal(const std::vector<int>& tokenIds, LanguageModelCache& cache) const;
 
     /// <summary>forward + backward into thread local gradient bucket (weights stay read only)</summary>
     float accumulateExample(const LanguageModelExample& example, LanguageModelGradients& gradients) const;

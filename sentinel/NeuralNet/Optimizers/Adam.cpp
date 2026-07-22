@@ -101,12 +101,7 @@ void Adam::update(Matrix& parameter, AdamState& state, const Matrix& gradient) c
     }
 }
 
-void Adam::updateSelectedRows(
-    Matrix& parameter,
-    AdamState& state,
-    const Matrix& gradient,
-    const std::vector<int>& rowIndices
-) const {
+void Adam::updateSelectedRows(Matrix& parameter, AdamState& state, const Matrix& gradient, const std::vector<int>& rowIndices) const {
     if (this->timeStep <= 0) throw std::invalid_argument("Adam::updateSelectedRows requires step() before update");
     if (parameter.data.size() != gradient.data.size() || parameter.data[0].size() != gradient.data[0].size())
         throw std::invalid_argument("Adam::updateSelectedRows parameter/gradient shape mismatch");

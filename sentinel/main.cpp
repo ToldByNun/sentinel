@@ -49,7 +49,7 @@ int main() {
     DatasetSplit split = DatasetSplit::partitionTexts(texts, trainRatio, 42u);
 
     BPETokenizer tokenizer;
-    tokenizer.train(split.trainTexts, 500);
+    tokenizer.train(split.trainTexts, 2500);
 
     // skip storing one-hots for all rows (build on the fly while training)
     LanguageModelDataset trainDataset = LanguageModelDataset::build(

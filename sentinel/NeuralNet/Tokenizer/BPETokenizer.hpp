@@ -20,10 +20,10 @@ public:
     /// <param name="vocabSize">target vocab size (must be bigger than #unique chars + unk)</param>
     void train(const std::vector<std::string>& corpus, int vocabSize);
 
-    /// <summary>text -> token ids unknown tokens become unk</summary>
+    /// <summary>text -> token ids unknown tokens become unk spaces kept as leading space on words</summary>
     std::vector<int> encode(const std::string& text) const;
 
-    /// <summary>token ids -> text (concat)</summary>
+    /// <summary>token ids -> text (concat restores leading spaces)</summary>
     std::string decode(const std::vector<int>& tokenIds) const;
 
     int vocabSize() const;

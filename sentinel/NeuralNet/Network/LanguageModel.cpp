@@ -20,6 +20,14 @@ LanguageModelGradients LanguageModelGradients::zerosFrom(const LanguageModel& mo
     gradients.keyWeight = Matrix::zerosLike(model.attention.keyWeight);
     gradients.valueWeight = Matrix::zerosLike(model.attention.valueWeight);
     gradients.attentionOutputWeight = Matrix::zerosLike(model.attention.outputWeight);
+    gradients.attentionNormGamma = Matrix::zerosLike(model.attentionNorm.gamma);
+    gradients.attentionNormBeta = Matrix::zerosLike(model.attentionNorm.beta);
+    gradients.feedForwardNormGamma = Matrix::zerosLike(model.feedForwardNorm.gamma);
+    gradients.feedForwardNormBeta = Matrix::zerosLike(model.feedForwardNorm.beta);
+    gradients.feedForwardFirstWeight = Matrix::zerosLike(model.feedForward.firstWeight);
+    gradients.feedForwardFirstBias = Matrix::zerosLike(model.feedForward.firstBias);
+    gradients.feedForwardSecondWeight = Matrix::zerosLike(model.feedForward.secondWeight);
+    gradients.feedForwardSecondBias = Matrix::zerosLike(model.feedForward.secondBias);
     gradients.projectionWeight = Matrix::zerosLike(model.outputProjection.weight);
     gradients.projectionBias = Matrix::zerosLike(model.outputProjection.bias);
     return gradients;
@@ -32,6 +40,14 @@ void LanguageModelGradients::addInPlace(const LanguageModelGradients& other) {
     Matrix::addInPlace(this->keyWeight, other.keyWeight);
     Matrix::addInPlace(this->valueWeight, other.valueWeight);
     Matrix::addInPlace(this->attentionOutputWeight, other.attentionOutputWeight);
+    Matrix::addInPlace(this->attentionNormGamma, other.attentionNormGamma);
+    Matrix::addInPlace(this->attentionNormBeta, other.attentionNormBeta);
+    Matrix::addInPlace(this->feedForwardNormGamma, other.feedForwardNormGamma);
+    Matrix::addInPlace(this->feedForwardNormBeta, other.feedForwardNormBeta);
+    Matrix::addInPlace(this->feedForwardFirstWeight, other.feedForwardFirstWeight);
+    Matrix::addInPlace(this->feedForwardFirstBias, other.feedForwardFirstBias);
+    Matrix::addInPlace(this->feedForwardSecondWeight, other.feedForwardSecondWeight);
+    Matrix::addInPlace(this->feedForwardSecondBias, other.feedForwardSecondBias);
     Matrix::addInPlace(this->projectionWeight, other.projectionWeight);
     Matrix::addInPlace(this->projectionBias, other.projectionBias);
 }
@@ -43,19 +59,25 @@ void LanguageModelGradients::scaleInPlace(float scalar) {
     Matrix::scaleInPlace(this->keyWeight, scalar);
     Matrix::scaleInPlace(this->valueWeight, scalar);
     Matrix::scaleInPlace(this->attentionOutputWeight, scalar);
+    Matrix::scaleInPlace(this->attentionNormGamma, scalar);
+    Matrix::scaleInPlace(this->attentionNormBeta, scalar);
+    Matrix::scaleInPlace(this->feedForwardNormGamma, scalar);
+    Matrix::scaleInPlace(this->feedForwardNormBeta, scalar);
+    Matrix::scaleInPlace(this->feedForwardFirstWeight, scalar);
+    Matrix::scaleInPlace(this->feedForwardFirstBias, scalar);
+    Matrix::scaleInPlace(this->feedForwardSecondWeight, scalar);
+    Matrix::scaleInPlace(this->feedForwardSecondBias, scalar);
     Matrix::scaleInPlace(this->projectionWeight, scalar);
     Matrix::scaleInPlace(this->projectionBias, scalar);
 }
 
-LanguageModel::LanguageModel(
-    int vocabularySize,
-    int embeddingDim,
-    int maximumPositionCount,
-    Adam optimizer
-)
+LanguageModel::LanguageModel(int vocabularySize, int embeddingDim, int maximumPositionCount, Adam optimizer)
     : tokenEmbedding(vocabularySize, embeddingDim),
       positionEmbedding(maximumPositionCount, embeddingDim),
+      attentionNorm(embeddingDim),
       attention(CausalSelfAttention::create(embeddingDim, 21u)),
+      feedForwardNorm(embeddingDim),
+      feedForward(FeedForward::create(embeddingDim, 4, 41u)),
       outputProjection(
           UniformInit::matrix(vocabularySize, embeddingDim, 0.1f, 31u),
           UniformInit::matrix(vocabularySize, 1, 0.01f, 32u)
@@ -70,6 +92,14 @@ LanguageModel::LanguageModel(
     this->keyWeightState = AdamState::zerosLike(this->attention.keyWeight);
     this->valueWeightState = AdamState::zerosLike(this->attention.valueWeight);
     this->outputWeightState = AdamState::zerosLike(this->attention.outputWeight);
+    this->attentionNormGammaState = AdamState::zerosLike(this->attentionNorm.gamma);
+    this->attentionNormBetaState = AdamState::zerosLike(this->attentionNorm.beta);
+    this->feedForwardNormGammaState = AdamState::zerosLike(this->feedForwardNorm.gamma);
+    this->feedForwardNormBetaState = AdamState::zerosLike(this->feedForwardNorm.beta);
+    this->feedForwardFirstWeightState = AdamState::zerosLike(this->feedForward.firstWeight);
+    this->feedForwardFirstBiasState = AdamState::zerosLike(this->feedForward.firstBias);
+    this->feedForwardSecondWeightState = AdamState::zerosLike(this->feedForward.secondWeight);
+    this->feedForwardSecondBiasState = AdamState::zerosLike(this->feedForward.secondBias);
     this->projectionWeightState = AdamState::zerosLike(this->outputProjection.weight);
     this->projectionBiasState = AdamState::zerosLike(this->outputProjection.bias);
 }
@@ -103,11 +133,7 @@ Matrix LanguageModel::broadcastBiasAdd(const Matrix& product, const Matrix& bias
     return result;
 }
 
-Matrix LanguageModel::forwardLocal(
-    const std::vector<int>& tokenIds,
-    CausalSelfAttentionCache& attentionCache,
-    Matrix& projectionInput
-) const {
+Matrix LanguageModel::forwardLocal(const std::vector<int>& tokenIds, LanguageModelCache& cache) const {
     if (tokenIds.empty()) throw std::invalid_argument("LanguageModel::forwardLocal empty tokenIds");
     if (static_cast<int>(tokenIds.size()) > this->maximumPositionCount)
         throw std::invalid_argument("LanguageModel::forwardLocal sequence longer than maximumPositionCount");
@@ -115,24 +141,28 @@ Matrix LanguageModel::forwardLocal(
     const std::vector<int> positions = LanguageModel::positionIds(tokenIds.size());
     Matrix tokenEmbedded = this->tokenEmbedding.forward(tokenIds);
     Matrix positionEmbedded = this->positionEmbedding.forward(positions);
-    Matrix combined = Matrix::add(tokenEmbedded, positionEmbedded);
+    cache.combined = Matrix::add(tokenEmbedded, positionEmbedded);
 
-    Matrix attended = this->attention.forward(combined, attentionCache);
-    projectionInput = Matrix::add(combined, attended);
-    Matrix product = Matrix::multiply(this->outputProjection.weight, projectionInput);
+    Matrix attentionInput = this->attentionNorm.forward(cache.combined, cache.attentionNormCache);
+    Matrix attended = this->attention.forward(attentionInput, cache.attentionCache);
+    cache.afterAttention = Matrix::add(cache.combined, attended);
+
+    Matrix feedForwardInput = this->feedForwardNorm.forward(cache.afterAttention, cache.feedForwardNormCache);
+    Matrix feedForwardOutput = this->feedForward.forward(feedForwardInput, cache.feedForwardCache);
+    cache.blockOutput = Matrix::add(cache.afterAttention, feedForwardOutput);
+
+    Matrix product = Matrix::multiply(this->outputProjection.weight, cache.blockOutput);
     return LanguageModel::broadcastBiasAdd(product, this->outputProjection.bias);
 }
 
 Matrix LanguageModel::forward(const std::vector<int>& tokenIds) {
-    CausalSelfAttentionCache attentionCache;
-    Matrix projectionInput;
-    return this->forwardLocal(tokenIds, attentionCache, projectionInput);
+    LanguageModelCache cache;
+    return this->forwardLocal(tokenIds, cache);
 }
 
 float LanguageModel::exampleLoss(const LanguageModelExample& example) {
-    CausalSelfAttentionCache attentionCache;
-    Matrix projectionInput;
-    Matrix logits = this->forwardLocal(example.inputTokenIds, attentionCache, projectionInput);
+    LanguageModelCache cache;
+    Matrix logits = this->forwardLocal(example.inputTokenIds, cache);
     Matrix probabilities = Softmax::apply(logits);
     Matrix target = example.targetOneHot.data.empty()
         ? LanguageModelDataset::makeOneHotSequence(example.targetTokenIds, this->tokenEmbedding.vocabSize())
@@ -156,9 +186,8 @@ float LanguageModel::averageLoss(const LanguageModelDataset& dataset) {
 }
 
 float LanguageModel::accumulateExample(const LanguageModelExample& example, LanguageModelGradients& gradients) const {
-    CausalSelfAttentionCache attentionCache;
-    Matrix projectionInput;
-    Matrix logits = this->forwardLocal(example.inputTokenIds, attentionCache, projectionInput);
+    LanguageModelCache cache;
+    Matrix logits = this->forwardLocal(example.inputTokenIds, cache);
     Matrix probabilities = Softmax::apply(logits);
     Matrix target = example.targetOneHot.data.empty()
         ? LanguageModelDataset::makeOneHotSequence(example.targetTokenIds, this->tokenEmbedding.vocabSize())
@@ -166,35 +195,52 @@ float LanguageModel::accumulateExample(const LanguageModelExample& example, Lang
     const float loss = CrossEntropy::loss(probabilities, target);
 
     Matrix logitGradient = CrossEntropy::gradient(probabilities, target);
-
-    Matrix projectionWeightGradient = Matrix::multiply(logitGradient, Matrix::transpose(projectionInput));
+    Matrix projectionWeightGradient = Matrix::multiply(logitGradient, Matrix::transpose(cache.blockOutput));
     Matrix projectionBiasGradient = LanguageModel::sumColumns(logitGradient);
-    Matrix residualGradient = Matrix::multiply(Matrix::transpose(this->outputProjection.weight), logitGradient);
+    Matrix blockOutputGradient = Matrix::multiply(Matrix::transpose(this->outputProjection.weight), logitGradient);
+
+    Matrix feedForwardFirstWeightGradient;
+    Matrix feedForwardFirstBiasGradient;
+    Matrix feedForwardSecondWeightGradient;
+    Matrix feedForwardSecondBiasGradient;
+    Matrix feedForwardInputGradient = this->feedForward.backward(blockOutputGradient, cache.feedForwardCache, feedForwardFirstWeightGradient, feedForwardFirstBiasGradient, feedForwardSecondWeightGradient, feedForwardSecondBiasGradient);
+
+    Matrix feedForwardNormGammaGradient;
+    Matrix feedForwardNormBetaGradient;
+    Matrix afterAttentionFromFeedForward = this->feedForwardNorm.backward(feedForwardInputGradient, cache.feedForwardNormCache, feedForwardNormGammaGradient, feedForwardNormBetaGradient);
+
+    Matrix afterAttentionGradient = Matrix::add(blockOutputGradient, afterAttentionFromFeedForward);
 
     Matrix queryWeightGradient;
     Matrix keyWeightGradient;
     Matrix valueWeightGradient;
-    Matrix outputWeightGradient;
-    Matrix attentionInputGradient = this->attention.backward(
-        residualGradient,
-        attentionCache,
-        queryWeightGradient,
-        keyWeightGradient,
-        valueWeightGradient,
-        outputWeightGradient
-    );
+    Matrix attentionOutputWeightGradient;
+    Matrix attentionInputGradient = this->attention.backward(afterAttentionGradient, cache.attentionCache, queryWeightGradient, keyWeightGradient, valueWeightGradient, attentionOutputWeightGradient);
 
-    Matrix combinedGradient = Matrix::add(residualGradient, attentionInputGradient);
+    Matrix attentionNormGammaGradient;
+    Matrix attentionNormBetaGradient;
+    Matrix combinedFromAttention = this->attentionNorm.backward(attentionInputGradient, cache.attentionNormCache, attentionNormGammaGradient, attentionNormBetaGradient);
+
+    Matrix combinedGradient = Matrix::add(afterAttentionGradient, combinedFromAttention);
+
     const std::vector<int> positions = LanguageModel::positionIds(example.inputTokenIds.size());
     Matrix tokenEmbeddingGradient = this->tokenEmbedding.backward(combinedGradient, example.inputTokenIds);
     Matrix positionEmbeddingGradient = this->positionEmbedding.backward(combinedGradient, positions);
 
     Matrix::addInPlace(gradients.projectionWeight, projectionWeightGradient);
     Matrix::addInPlace(gradients.projectionBias, projectionBiasGradient);
-    Matrix::addInPlace(gradients.attentionOutputWeight, outputWeightGradient);
+    Matrix::addInPlace(gradients.feedForwardSecondWeight, feedForwardSecondWeightGradient);
+    Matrix::addInPlace(gradients.feedForwardSecondBias, feedForwardSecondBiasGradient);
+    Matrix::addInPlace(gradients.feedForwardFirstWeight, feedForwardFirstWeightGradient);
+    Matrix::addInPlace(gradients.feedForwardFirstBias, feedForwardFirstBiasGradient);
+    Matrix::addInPlace(gradients.feedForwardNormGamma, feedForwardNormGammaGradient);
+    Matrix::addInPlace(gradients.feedForwardNormBeta, feedForwardNormBetaGradient);
+    Matrix::addInPlace(gradients.attentionOutputWeight, attentionOutputWeightGradient);
     Matrix::addInPlace(gradients.valueWeight, valueWeightGradient);
     Matrix::addInPlace(gradients.keyWeight, keyWeightGradient);
     Matrix::addInPlace(gradients.queryWeight, queryWeightGradient);
+    Matrix::addInPlace(gradients.attentionNormGamma, attentionNormGammaGradient);
+    Matrix::addInPlace(gradients.attentionNormBeta, attentionNormBetaGradient);
     Matrix::addInPlace(gradients.positionEmbedding, positionEmbeddingGradient);
     Matrix::addInPlace(gradients.tokenEmbedding, tokenEmbeddingGradient);
 
@@ -205,10 +251,18 @@ void LanguageModel::applyGradients(const LanguageModelGradients& gradients) {
     this->optimizer.step();
     this->optimizer.update(this->outputProjection.weight, this->projectionWeightState, gradients.projectionWeight);
     this->optimizer.update(this->outputProjection.bias, this->projectionBiasState, gradients.projectionBias);
+    this->optimizer.update(this->feedForward.secondWeight, this->feedForwardSecondWeightState, gradients.feedForwardSecondWeight);
+    this->optimizer.update(this->feedForward.secondBias, this->feedForwardSecondBiasState, gradients.feedForwardSecondBias);
+    this->optimizer.update(this->feedForward.firstWeight, this->feedForwardFirstWeightState, gradients.feedForwardFirstWeight);
+    this->optimizer.update(this->feedForward.firstBias, this->feedForwardFirstBiasState, gradients.feedForwardFirstBias);
+    this->optimizer.update(this->feedForwardNorm.gamma, this->feedForwardNormGammaState, gradients.feedForwardNormGamma);
+    this->optimizer.update(this->feedForwardNorm.beta, this->feedForwardNormBetaState, gradients.feedForwardNormBeta);
     this->optimizer.update(this->attention.outputWeight, this->outputWeightState, gradients.attentionOutputWeight);
     this->optimizer.update(this->attention.valueWeight, this->valueWeightState, gradients.valueWeight);
     this->optimizer.update(this->attention.keyWeight, this->keyWeightState, gradients.keyWeight);
     this->optimizer.update(this->attention.queryWeight, this->queryWeightState, gradients.queryWeight);
+    this->optimizer.update(this->attentionNorm.gamma, this->attentionNormGammaState, gradients.attentionNormGamma);
+    this->optimizer.update(this->attentionNorm.beta, this->attentionNormBetaState, gradients.attentionNormBeta);
     this->optimizer.update(this->positionEmbedding.weight, this->positionEmbeddingState, gradients.positionEmbedding);
     this->optimizer.update(this->tokenEmbedding.weight, this->tokenEmbeddingState, gradients.tokenEmbedding);
 }
@@ -218,13 +272,7 @@ void LanguageModel::train(const LanguageModelDataset& dataset, int epochs, int l
     this->train(dataset, emptyTest, epochs, logEveryEpochs, 32);
 }
 
-void LanguageModel::train(
-    const LanguageModelDataset& trainDataset,
-    const LanguageModelDataset& testDataset,
-    int epochs,
-    int logEveryEpochs,
-    int batchSize
-) {
+void LanguageModel::train(const LanguageModelDataset& trainDataset, const LanguageModelDataset& testDataset, int epochs, int logEveryEpochs, int batchSize) {
     if (trainDataset.examples.empty()) return;
     if (logEveryEpochs <= 0) logEveryEpochs = 1;
     if (batchSize <= 0) batchSize = 32;

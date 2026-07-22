@@ -161,9 +161,18 @@ std::vector<std::string> BPETokenizer::preTokenize(const std::string& text) cons
     std::vector<std::string> words;
     std::istringstream stream(text);
     std::string word;
+    bool isFirstWord = true;
 
-    while (stream >> word)
-        words.push_back(word);
+    while (stream >> word) {
+        if (isFirstWord) {
+            words.push_back(word);
+            isFirstWord = false;
+            continue;
+        }
+
+        // keep a leading space so decode can restore whitespace (GPT-2 style)
+        words.push_back(" " + word);
+    }
 
     return words;
 }

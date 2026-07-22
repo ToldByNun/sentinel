@@ -38,14 +38,7 @@ public:
     /// backprop through attention using a cache from forward
     /// returns input gradient and fills weight gradients via out params
     /// </summary>
-    Matrix backward(
-        const Matrix& outputGradient,
-        const CausalSelfAttentionCache& cache,
-        Matrix& queryWeightGradient,
-        Matrix& keyWeightGradient,
-        Matrix& valueWeightGradient,
-        Matrix& outputWeightGradient
-    ) const;
+    Matrix backward(const Matrix& outputGradient, const CausalSelfAttentionCache& cache, Matrix& queryWeightGradient, Matrix& keyWeightGradient, Matrix& valueWeightGradient, Matrix& outputWeightGradient) const;
 
 private:
     /// <summary>column wise softmax jacobian applied to probability gradients</summary>

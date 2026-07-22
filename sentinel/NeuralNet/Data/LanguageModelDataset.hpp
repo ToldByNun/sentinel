@@ -32,23 +32,14 @@ public:
     static Matrix makeOneHotSequence(const std::vector<int>& targetTokenIds, int vocabularySize);
 
     /// <summary>shift one token sequence into input/target (+ optional one-hot)</summary>
-    static LanguageModelExample fromTokenIds(
-        const std::vector<int>& tokenIds,
-        int vocabularySize,
-        bool buildOneHot = true
-    );
+    static LanguageModelExample fromTokenIds(const std::vector<int>& tokenIds, int vocabularySize, bool buildOneHot = true);
 
     /// <summary>
     /// encode texts then shift
     /// skips sequences shorter than 2 tokens
     /// if maximumTokenCount > 0 truncates before the shift
     /// </summary>
-    static LanguageModelDataset build(
-        const std::vector<std::string>& texts,
-        const BPETokenizer& tokenizer,
-        size_t maximumTokenCount = 0,
-        bool buildOneHot = true
-    );
+    static LanguageModelDataset build(const std::vector<std::string>& texts, const BPETokenizer& tokenizer, size_t maximumTokenCount = 0, bool buildOneHot = true);
 
     int size() const;
 

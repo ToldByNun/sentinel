@@ -53,12 +53,7 @@ void Sequential::accumulateGradient(Matrix& total, const Matrix& gradient) {
     }
 }
 
-void Sequential::updateDenseParameters(
-    const Matrix& weightGradient1,
-    const Matrix& biasGradient1,
-    const Matrix& weightGradient2,
-    const Matrix& biasGradient2
-) {
+void Sequential::updateDenseParameters(const Matrix& weightGradient1, const Matrix& biasGradient1, const Matrix& weightGradient2, const Matrix& biasGradient2) {
     this->optimizer.step();
     this->optimizer.update(this->layer2.weight, this->layer2WeightState, weightGradient2);
     this->optimizer.update(this->layer2.bias, this->layer2BiasState, biasGradient2);
@@ -134,16 +129,7 @@ void Sequential::train(Embedding& embedding, MeanPool& meanPool, const Classific
     this->train(embedding, meanPool, dataset, emptyTest, epochs, 500, 3, 16);
 }
 
-void Sequential::train(
-    Embedding& embedding,
-    MeanPool& meanPool,
-    const ClassificationDataset& trainDataset,
-    const ClassificationDataset& testDataset,
-    int epochs,
-    int logEveryEpochs,
-    int earlyStoppingPatience,
-    int batchSize
-) {
+void Sequential::train(Embedding& embedding, MeanPool& meanPool, const ClassificationDataset& trainDataset, const ClassificationDataset& testDataset, int epochs, int logEveryEpochs, int earlyStoppingPatience, int batchSize) {
     if (trainDataset.examples.empty()) return;
     if (logEveryEpochs <= 0) logEveryEpochs = 500;
     if (earlyStoppingPatience <= 0) earlyStoppingPatience = 3;

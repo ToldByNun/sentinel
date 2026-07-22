@@ -31,6 +31,8 @@
     <ClCompile Include="NeuralNet\Layers\Dropout.cpp" />
     <ClCompile Include="NeuralNet\Layers\CausalSelfAttention.cpp" />
     <ClCompile Include="NeuralNet\Layers\Embedding.cpp" />
+    <ClCompile Include="NeuralNet\Layers\FeedForward.cpp" />
+    <ClCompile Include="NeuralNet\Layers\LayerNorm.cpp" />
     <ClCompile Include="NeuralNet\Layers\MeanPool.cpp" />
     <ClCompile Include="NeuralNet\Losses\CrossEntropy.cpp" />
     <ClCompile Include="NeuralNet\Losses\MSE.cpp" />
@@ -55,7 +57,9 @@
     <ClInclude Include="NeuralNet\Layers\Dropout.hpp" />
     <ClInclude Include="NeuralNet\Layers\CausalSelfAttention.hpp" />
     <ClInclude Include="NeuralNet\Layers\Embedding.hpp" />
+    <ClInclude Include="NeuralNet\Layers\FeedForward.hpp" />
     <ClInclude Include="NeuralNet\Layers\Layer.hpp" />
+    <ClInclude Include="NeuralNet\Layers\LayerNorm.hpp" />
     <ClInclude Include="NeuralNet\Layers\MeanPool.hpp" />
     <ClInclude Include="NeuralNet\Losses\CrossEntropy.hpp" />
     <ClInclude Include="NeuralNet\Losses\MSE.hpp" />

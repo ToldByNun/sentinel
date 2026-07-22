@@ -10,6 +10,8 @@ C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\Dense.cpp;C:\User
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\Dropout.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\Dropout.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\CausalSelfAttention.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\CausalSelfAttention.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\Embedding.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\Embedding.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\FeedForward.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\FeedForward.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\LayerNorm.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\LayerNorm.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\MeanPool.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\MeanPool.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Losses\CrossEntropy.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\CrossEntropy.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Losses\MSE.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\MSE.obj

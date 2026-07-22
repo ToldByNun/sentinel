@@ -7,12 +7,7 @@
 #include <stdexcept>
 #include <utility>
 
-CausalSelfAttention::CausalSelfAttention(
-    Matrix queryWeight,
-    Matrix keyWeight,
-    Matrix valueWeight,
-    Matrix outputWeight
-)
+CausalSelfAttention::CausalSelfAttention(Matrix queryWeight, Matrix keyWeight, Matrix valueWeight, Matrix outputWeight)
     : queryWeight(std::move(queryWeight)),
       keyWeight(std::move(keyWeight)),
       valueWeight(std::move(valueWeight)),
@@ -91,14 +86,7 @@ Matrix CausalSelfAttention::softmaxBackward(const Matrix& probabilities, const M
     return scoreGradient;
 }
 
-Matrix CausalSelfAttention::backward(
-    const Matrix& outputGradient,
-    const CausalSelfAttentionCache& cache,
-    Matrix& queryWeightGradient,
-    Matrix& keyWeightGradient,
-    Matrix& valueWeightGradient,
-    Matrix& outputWeightGradient
-) const {
+Matrix CausalSelfAttention::backward(const Matrix& outputGradient, const CausalSelfAttentionCache& cache, Matrix& queryWeightGradient, Matrix& keyWeightGradient, Matrix& valueWeightGradient, Matrix& outputWeightGradient) const {
     if (cache.input.data.empty()) throw std::logic_error("CausalSelfAttention::backward called before forward");
     if (outputGradient.data.size() != this->outputWeight.data.size() || outputGradient.data[0].size() != cache.attended.data[0].size())
         throw std::invalid_argument("CausalSelfAttention::backward output gradient shape mismatch");

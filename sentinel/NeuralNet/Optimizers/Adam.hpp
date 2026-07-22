@@ -27,12 +27,7 @@ public:
     float epsilon;
     int timeStep;
 
-    explicit Adam(
-        float learningRate,
-        float beta1 = 0.9f,
-        float beta2 = 0.999f,
-        float epsilon = 1e-8f
-    );
+    explicit Adam(float learningRate, float beta1 = 0.9f, float beta2 = 0.999f, float epsilon = 1e-8f);
 
     /// <summary>advance the shared time step used for bias correction</summary>
     void step();
@@ -41,12 +36,7 @@ public:
     void update(Matrix& parameter, AdamState& state, const Matrix& gradient) const;
 
     /// <summary>Adam update only for selected rows (sparse embedding updates)</summary>
-    void updateSelectedRows(
-        Matrix& parameter,
-        AdamState& state,
-        const Matrix& gradient,
-        const std::vector<int>& rowIndices
-    ) const;
+    void updateSelectedRows(Matrix& parameter, AdamState& state, const Matrix& gradient, const std::vector<int>& rowIndices) const;
 
 private:
     /// <summary>same shape filled with zeros</summary>

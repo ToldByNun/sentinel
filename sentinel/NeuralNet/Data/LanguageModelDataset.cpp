@@ -23,11 +23,7 @@ Matrix LanguageModelDataset::makeOneHotSequence(const std::vector<int>& targetTo
     return target;
 }
 
-LanguageModelExample LanguageModelDataset::fromTokenIds(
-    const std::vector<int>& tokenIds,
-    int vocabularySize,
-    bool buildOneHot
-) {
+LanguageModelExample LanguageModelDataset::fromTokenIds(const std::vector<int>& tokenIds, int vocabularySize, bool buildOneHot) {
     if (tokenIds.size() < 2) throw std::invalid_argument("LanguageModelDataset::fromTokenIds needs at least 2 tokens");
     if (vocabularySize <= 0) throw std::invalid_argument("LanguageModelDataset::fromTokenIds vocabularySize must be > 0");
 
@@ -41,12 +37,7 @@ LanguageModelExample LanguageModelDataset::fromTokenIds(
     return example;
 }
 
-LanguageModelDataset LanguageModelDataset::build(
-    const std::vector<std::string>& texts,
-    const BPETokenizer& tokenizer,
-    size_t maximumTokenCount,
-    bool buildOneHot
-) {
+LanguageModelDataset LanguageModelDataset::build(const std::vector<std::string>& texts, const BPETokenizer& tokenizer, size_t maximumTokenCount, bool buildOneHot) {
     LanguageModelDataset dataset;
     dataset.vocabularySize = tokenizer.vocabSize();
 
