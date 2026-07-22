@@ -3,12 +3,16 @@
 
 #include "../Math/Matrix.hpp"
 
-/// <summary>thread local intermediates for one FeedForward forward</summary>
+/// <summary>thread local intermediates and scratch for one FeedForward pass</summary>
 class FeedForwardCache {
 public:
     Matrix input;
     Matrix hiddenPreActivation;
     Matrix hiddenActivated;
+    Matrix output;
+    Matrix hiddenGradient;
+    Matrix reluDerivative;
+    Matrix inputGradient;
 };
 
 /// <summary>
@@ -30,18 +34,15 @@ public:
     /// <summary>forward writes cache for backprop</summary>
     Matrix forward(const Matrix& input, FeedForwardCache& cache) const;
 
-    /// <summary>
-    /// backprop through the MLP
-    /// returns input gradient and fills weight/bias gradients
-    /// </summary>
-    Matrix backward(const Matrix& outputGradient, const FeedForwardCache& cache, Matrix& firstWeightGradient, Matrix& firstBiasGradient, Matrix& secondWeightGradient, Matrix& secondBiasGradient) const;
+    /// <summary>backprop through the MLP returns input gradient and fills weight/bias gradients</summary>
+    Matrix backward(const Matrix& outputGradient, FeedForwardCache& cache, Matrix& firstWeightGradient, Matrix& firstBiasGradient, Matrix& secondWeightGradient, Matrix& secondBiasGradient) const;
 
 private:
-    /// <summary>broadcast bias column across sequence length</summary>
-    static Matrix broadcastBiasAdd(const Matrix& product, const Matrix& bias);
+    /// <summary>add bias column into product in place</summary>
+    static void broadcastBiasAddInPlace(Matrix& product, const Matrix& bias);
 
     /// <summary>sum gradient columns into a bias column vector</summary>
-    static Matrix sumColumns(const Matrix& gradient);
+    static void sumColumnsInto(const Matrix& gradient, Matrix& biasGradient);
 };
 
 #endif // FEEDFORWARD_HPP

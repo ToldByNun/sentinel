@@ -1,19 +1,27 @@
 #include "ReLU.hpp"
 
-Matrix ReLU::apply(Matrix matrix) {
-    for (size_t row = 0; row < matrix.rows; row++) {
-        for (size_t column = 0; column < matrix.cols; column++)
-            matrix.at(row, column) = matrix.at(row, column) > 0.0f ? matrix.at(row, column) : 0.0f;
-    }
+#include <stdexcept>
 
+void ReLU::applyInto(const Matrix& input, Matrix& out) {
+    if (input.empty()) throw std::invalid_argument("ReLU::applyInto expects a non-empty matrix");
+    out.ensureSize(input.rows, input.cols);
+    for (size_t index = 0; index < input.data.size(); ++index)
+        out.data[index] = input.data[index] > 0.0f ? input.data[index] : 0.0f;
+}
+
+void ReLU::derivativeInto(const Matrix& input, Matrix& out) {
+    if (input.empty()) throw std::invalid_argument("ReLU::derivativeInto expects a non-empty matrix");
+    out.ensureSize(input.rows, input.cols);
+    for (size_t index = 0; index < input.data.size(); ++index)
+        out.data[index] = input.data[index] > 0.0f ? 1.0f : 0.0f;
+}
+
+Matrix ReLU::apply(Matrix matrix) {
+    ReLU::applyInto(matrix, matrix);
     return matrix;
 }
 
 Matrix ReLU::derivative(Matrix matrix) {
-    for (size_t row = 0; row < matrix.rows; row++) {
-        for (size_t column = 0; column < matrix.cols; column++)
-            matrix.at(row, column) = matrix.at(row, column) > 0.0f ? 1.0f : 0.0f;
-    }
-
+    ReLU::derivativeInto(matrix, matrix);
     return matrix;
 }

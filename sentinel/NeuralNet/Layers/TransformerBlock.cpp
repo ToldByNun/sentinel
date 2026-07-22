@@ -95,7 +95,7 @@ Matrix TransformerBlock::forward(const Matrix& input, TransformerBlockCache& cac
     return cache.output;
 }
 
-Matrix TransformerBlock::backward(const Matrix& outputGradient, const TransformerBlockCache& cache, TransformerBlockGradients& gradients) const {
+Matrix TransformerBlock::backward(const Matrix& outputGradient, TransformerBlockCache& cache, TransformerBlockGradients& gradients) const {
     Matrix feedForwardFirstWeightGradient;
     Matrix feedForwardFirstBiasGradient;
     Matrix feedForwardSecondWeightGradient;

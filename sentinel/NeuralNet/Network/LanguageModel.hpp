@@ -19,6 +19,7 @@ public:
     std::vector<TransformerBlockCache> blockCaches;
     LayerNormCache finalNormCache;
     Matrix blockOutput;
+    Matrix probabilities;
 };
 
 /// <summary>accumulated gradients for one parallel training batch</summary>
@@ -107,7 +108,7 @@ private:
     Matrix forwardLocal(const std::vector<int>& tokenIds, LanguageModelCache& cache) const;
 
     /// <summary>forward + backward into thread local gradient bucket (weights stay read only)</summary>
-    float accumulateExample(const LanguageModelExample& example, LanguageModelGradients& gradients) const;
+    float accumulateExample(const LanguageModelExample& example, LanguageModelGradients& gradients, LanguageModelCache& cache) const;
 
     /// <summary>one Adam step from averaged batch gradients</summary>
     void applyGradients(const LanguageModelGradients& gradients);

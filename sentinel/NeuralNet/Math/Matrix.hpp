@@ -26,6 +26,9 @@ public:
     /// <summary>resize and optionally fill</summary>
     void resize(size_t rowCount, size_t columnCount, float fillValue = 0.0f);
 
+    /// <summary>resize only when shape differs</summary>
+    void ensureSize(size_t rowCount, size_t columnCount);
+
     /// <summary>set every element</summary>
     void fill(float value);
 
@@ -52,6 +55,9 @@ public:
 
     /// <summary>element wise multiply same shape required</summary>
     static Matrix multiplyElementwise(const Matrix& left, const Matrix& right);
+
+    /// <summary>total *= other element wise in place</summary>
+    static void multiplyElementwiseInPlace(Matrix& total, const Matrix& other);
 
     /// <summary>total += delta in place</summary>
     static void addInPlace(Matrix& total, const Matrix& delta);

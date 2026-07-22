@@ -21,9 +21,9 @@
 int main() {
     const std::string samplePath = "../SERA-Data/sera_sample.jsonl";
     const size_t maximumTextCharacters = 400;
-    const size_t maximumTokenCount = 64;
+    const size_t maximumTokenCount = 128;
     const float trainRatio = 0.8f;
-    const int embeddingDim = 64;
+    const int embeddingDim = 128;
     const int maximumPositionCount = static_cast<int>(maximumTokenCount);
 
 #if defined(_OPENMP)

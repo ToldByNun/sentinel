@@ -5,7 +5,7 @@
 
 #include <vector>
 
-/// <summary>thread local intermediates for one multi head attention forward</summary>
+/// <summary>thread local intermediates and scratch for one multi head attention pass</summary>
 class CausalSelfAttentionCache {
 public:
     Matrix input;
@@ -15,6 +15,24 @@ public:
     std::vector<Matrix> scores;
     std::vector<Matrix> probabilities;
     Matrix attended;
+    Matrix output;
+
+    Matrix queryHead;
+    Matrix keyHead;
+    Matrix valueHead;
+    Matrix attendedHead;
+
+    Matrix attendedGradient;
+    Matrix queryGradient;
+    Matrix keyGradient;
+    Matrix valueGradient;
+    Matrix probabilityGradient;
+    Matrix scoreGradient;
+    Matrix valueHeadGradient;
+    Matrix queryHeadGradient;
+    Matrix keyHeadGradient;
+    Matrix inputGradient;
+    Matrix temp;
 };
 
 /// <summary>
@@ -39,17 +57,14 @@ public:
     Matrix forward(const Matrix& input, CausalSelfAttentionCache& cache) const;
 
     /// <summary>backprop through multi head attention fills weight gradients via out params</summary>
-    Matrix backward(const Matrix& outputGradient, const CausalSelfAttentionCache& cache, Matrix& queryWeightGradient, Matrix& keyWeightGradient, Matrix& valueWeightGradient, Matrix& outputWeightGradient) const;
+    Matrix backward(const Matrix& outputGradient, CausalSelfAttentionCache& cache, Matrix& queryWeightGradient, Matrix& keyWeightGradient, Matrix& valueWeightGradient, Matrix& outputWeightGradient) const;
 
 private:
-    /// <summary>column wise softmax jacobian applied to probability gradients</summary>
-    static Matrix softmaxBackward(const Matrix& probabilities, const Matrix& probabilityGradient);
+    /// <summary>column wise softmax jacobian writing into scoreGradient</summary>
+    static void softmaxBackwardInto(const Matrix& probabilities, const Matrix& probabilityGradient, Matrix& scoreGradient);
 
-    /// <summary>zero matrix matching shape</summary>
-    static Matrix zerosLike(const Matrix& matrix);
-
-    /// <summary>copy one head block of rows from a full projection</summary>
-    static Matrix extractHead(const Matrix& full, int headIndex, int headDimension);
+    /// <summary>copy one head block of rows from a full projection into head</summary>
+    static void extractHeadInto(const Matrix& full, int headIndex, int headDimension, Matrix& head);
 
     /// <summary>write one head block of rows into a full projection</summary>
     static void writeHead(Matrix& full, int headIndex, int headDimension, const Matrix& head);

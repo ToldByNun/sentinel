@@ -7,13 +7,12 @@
 #include <omp.h>
 #endif
 
-Matrix Softmax::apply(const Matrix& logits) {
-    if (logits.empty()) throw std::invalid_argument("Softmax::apply expects a non-empty matrix");
+void Softmax::applyInto(const Matrix& logits, Matrix& out) {
+    if (logits.empty()) throw std::invalid_argument("Softmax::applyInto expects a non-empty matrix");
 
     const size_t classCount = logits.rows;
     const size_t columnCount = logits.cols;
-
-    Matrix probabilities(classCount, columnCount, 0.0f);
+    out.ensureSize(classCount, columnCount);
 
     const bool useParallel =
 #if defined(_OPENMP)
@@ -35,13 +34,17 @@ Matrix Softmax::apply(const Matrix& logits) {
         float exponentialSum = 0.0f;
         for (size_t classIndex = 0; classIndex < classCount; ++classIndex) {
             const float value = std::exp(logits.at(classIndex, static_cast<size_t>(column)) - maxLogit);
-            probabilities.at(classIndex, static_cast<size_t>(column)) = value;
+            out.at(classIndex, static_cast<size_t>(column)) = value;
             exponentialSum += value;
         }
 
         for (size_t classIndex = 0; classIndex < classCount; ++classIndex)
-            probabilities.at(classIndex, static_cast<size_t>(column)) /= exponentialSum;
+            out.at(classIndex, static_cast<size_t>(column)) /= exponentialSum;
     }
+}
 
+Matrix Softmax::apply(const Matrix& logits) {
+    Matrix probabilities;
+    Softmax::applyInto(logits, probabilities);
     return probabilities;
 }

@@ -112,7 +112,8 @@ Matrix LanguageModel::forwardLocal(const std::vector<int>& tokenIds, LanguageMod
     if (static_cast<int>(tokenIds.size()) > this->maximumPositionCount)
         throw std::invalid_argument("LanguageModel::forwardLocal sequence longer than maximumPositionCount");
 
-    cache.blockCaches.assign(this->blocks.size(), TransformerBlockCache());
+    if (cache.blockCaches.size() != this->blocks.size())
+        cache.blockCaches.resize(this->blocks.size());
 
     const std::vector<int> positions = LanguageModel::positionIds(tokenIds.size());
     Matrix tokenEmbedded = this->tokenEmbedding.forward(tokenIds);
@@ -135,11 +136,11 @@ Matrix LanguageModel::forward(const std::vector<int>& tokenIds) {
 float LanguageModel::exampleLoss(const LanguageModelExample& example) {
     LanguageModelCache cache;
     Matrix logits = this->forwardLocal(example.inputTokenIds, cache);
-    Matrix probabilities = Softmax::apply(logits);
+    Softmax::applyInto(logits, cache.probabilities);
     Matrix target = example.targetOneHot.empty()
         ? LanguageModelDataset::makeOneHotSequence(example.targetTokenIds, this->tokenEmbedding.vocabSize())
         : example.targetOneHot;
-    return CrossEntropy::loss(probabilities, target);
+    return CrossEntropy::loss(cache.probabilities, target);
 }
 
 float LanguageModel::averageLoss(const LanguageModelDataset& dataset) {
@@ -157,16 +158,15 @@ float LanguageModel::averageLoss(const LanguageModelDataset& dataset) {
     return total / static_cast<float>(dataset.size());
 }
 
-float LanguageModel::accumulateExample(const LanguageModelExample& example, LanguageModelGradients& gradients) const {
-    LanguageModelCache cache;
+float LanguageModel::accumulateExample(const LanguageModelExample& example, LanguageModelGradients& gradients, LanguageModelCache& cache) const {
     Matrix logits = this->forwardLocal(example.inputTokenIds, cache);
-    Matrix probabilities = Softmax::apply(logits);
+    Softmax::applyInto(logits, cache.probabilities);
     Matrix target = example.targetOneHot.empty()
         ? LanguageModelDataset::makeOneHotSequence(example.targetTokenIds, this->tokenEmbedding.vocabSize())
         : example.targetOneHot;
-    const float loss = CrossEntropy::loss(probabilities, target);
+    const float loss = CrossEntropy::loss(cache.probabilities, target);
 
-    Matrix logitGradient = CrossEntropy::gradient(probabilities, target);
+    Matrix logitGradient = CrossEntropy::gradient(cache.probabilities, target);
     Matrix projectionWeightGradient = Matrix::multiply(logitGradient, cache.blockOutput, false, true);
     Matrix projectionBiasGradient = LanguageModel::sumColumns(logitGradient);
     Matrix hiddenGradient = Matrix::multiply(this->outputProjection.weight, logitGradient, true, false);
@@ -223,6 +223,7 @@ void LanguageModel::train(const LanguageModelDataset& trainDataset, const Langua
 #endif
 
     std::vector<LanguageModelGradients> threadGradients(static_cast<size_t>(threadCount));
+    std::vector<LanguageModelCache> threadCaches(static_cast<size_t>(threadCount));
     for (int threadIndex = 0; threadIndex < threadCount; ++threadIndex)
         threadGradients[static_cast<size_t>(threadIndex)] = LanguageModelGradients::zerosFrom(*this);
 
@@ -252,7 +253,7 @@ void LanguageModel::train(const LanguageModelDataset& trainDataset, const Langua
                 #pragma omp for reduction(+:batchLoss) schedule(dynamic, 1)
 #endif
                 for (int index = batchStart; index < batchEnd; ++index) {
-                    batchLoss += this->accumulateExample(trainDataset.examples[static_cast<size_t>(index)], threadGradients[static_cast<size_t>(threadIndex)]);
+                    batchLoss += this->accumulateExample(trainDataset.examples[static_cast<size_t>(index)], threadGradients[static_cast<size_t>(threadIndex)], threadCaches[static_cast<size_t>(threadIndex)]);
                 }
             }
 

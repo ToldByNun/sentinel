@@ -80,7 +80,7 @@ public:
     Matrix forward(const Matrix& input, TransformerBlockCache& cache) const;
 
     /// <summary>backprop through one block accumulates into gradients returns input gradient</summary>
-    Matrix backward(const Matrix& outputGradient, const TransformerBlockCache& cache, TransformerBlockGradients& gradients) const;
+    Matrix backward(const Matrix& outputGradient, TransformerBlockCache& cache, TransformerBlockGradients& gradients) const;
 
     /// <summary>apply adam updates for this block</summary>
     void applyGradients(Adam& optimizer, const TransformerBlockGradients& gradients);

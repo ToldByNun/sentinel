@@ -17,51 +17,52 @@ FeedForward FeedForward::create(int embeddingDim, int expandRatio, unsigned seed
     return FeedForward(UniformInit::matrix(hiddenDim, embeddingDim, 0.1f, seed), UniformInit::matrix(hiddenDim, 1, 0.01f, seed + 1u), UniformInit::matrix(embeddingDim, hiddenDim, 0.1f, seed + 2u), UniformInit::matrix(embeddingDim, 1, 0.01f, seed + 3u));
 }
 
-Matrix FeedForward::broadcastBiasAdd(const Matrix& product, const Matrix& bias) {
-    Matrix result = product;
-    for (size_t row = 0; row < result.rows; ++row) {
+void FeedForward::broadcastBiasAddInPlace(Matrix& product, const Matrix& bias) {
+    for (size_t row = 0; row < product.rows; ++row) {
         const float biasValue = bias.at(row, 0);
-        for (size_t column = 0; column < result.cols; ++column)
-            result.at(row, column) += biasValue;
+        for (size_t column = 0; column < product.cols; ++column)
+            product.at(row, column) += biasValue;
     }
-    return result;
 }
 
-Matrix FeedForward::sumColumns(const Matrix& gradient) {
-    Matrix biasGradient(gradient.rows, 1, 0.0f);
+void FeedForward::sumColumnsInto(const Matrix& gradient, Matrix& biasGradient) {
+    biasGradient.ensureSize(gradient.rows, 1);
     for (size_t row = 0; row < gradient.rows; ++row) {
         float total = 0.0f;
         for (size_t column = 0; column < gradient.cols; ++column)
             total += gradient.at(row, column);
         biasGradient.at(row, 0) = total;
     }
-    return biasGradient;
 }
 
 Matrix FeedForward::forward(const Matrix& input, FeedForwardCache& cache) const {
     if (input.empty()) throw std::invalid_argument("FeedForward::forward empty input");
-    if (this->firstWeight.cols != input.rows)
-        throw std::invalid_argument("FeedForward::forward embedding dim mismatch");
+    if (this->firstWeight.cols != input.rows) throw std::invalid_argument("FeedForward::forward embedding dim mismatch");
 
     cache.input = input;
-    cache.hiddenPreActivation = FeedForward::broadcastBiasAdd(Matrix::multiply(this->firstWeight, input), this->firstBias);
-    cache.hiddenActivated = ReLU::apply(cache.hiddenPreActivation);
-    return FeedForward::broadcastBiasAdd(Matrix::multiply(this->secondWeight, cache.hiddenActivated), this->secondBias);
+    Matrix::gemm(this->firstWeight, input, cache.hiddenPreActivation);
+    FeedForward::broadcastBiasAddInPlace(cache.hiddenPreActivation, this->firstBias);
+    ReLU::applyInto(cache.hiddenPreActivation, cache.hiddenActivated);
+
+    Matrix::gemm(this->secondWeight, cache.hiddenActivated, cache.output);
+    FeedForward::broadcastBiasAddInPlace(cache.output, this->secondBias);
+    return cache.output;
 }
 
-Matrix FeedForward::backward(const Matrix& outputGradient, const FeedForwardCache& cache, Matrix& firstWeightGradient, Matrix& firstBiasGradient, Matrix& secondWeightGradient, Matrix& secondBiasGradient) const {
+Matrix FeedForward::backward(const Matrix& outputGradient, FeedForwardCache& cache, Matrix& firstWeightGradient, Matrix& firstBiasGradient, Matrix& secondWeightGradient, Matrix& secondBiasGradient) const {
     if (cache.input.empty()) throw std::logic_error("FeedForward::backward called before forward");
-    if (outputGradient.rows != this->secondWeight.rows || outputGradient.cols != cache.input.cols)
-        throw std::invalid_argument("FeedForward::backward shape mismatch");
+    if (outputGradient.rows != this->secondWeight.rows || outputGradient.cols != cache.input.cols) throw std::invalid_argument("FeedForward::backward shape mismatch");
 
-    secondWeightGradient = Matrix::multiply(outputGradient, cache.hiddenActivated, false, true);
-    secondBiasGradient = FeedForward::sumColumns(outputGradient);
+    Matrix::gemm(outputGradient, cache.hiddenActivated, secondWeightGradient, false, true);
+    FeedForward::sumColumnsInto(outputGradient, secondBiasGradient);
 
-    Matrix hiddenGradient = Matrix::multiply(this->secondWeight, outputGradient, true, false);
-    hiddenGradient = Matrix::multiplyElementwise(hiddenGradient, ReLU::derivative(cache.hiddenPreActivation));
+    Matrix::gemm(this->secondWeight, outputGradient, cache.hiddenGradient, true, false);
+    ReLU::derivativeInto(cache.hiddenPreActivation, cache.reluDerivative);
+    Matrix::multiplyElementwiseInPlace(cache.hiddenGradient, cache.reluDerivative);
 
-    firstWeightGradient = Matrix::multiply(hiddenGradient, cache.input, false, true);
-    firstBiasGradient = FeedForward::sumColumns(hiddenGradient);
+    Matrix::gemm(cache.hiddenGradient, cache.input, firstWeightGradient, false, true);
+    FeedForward::sumColumnsInto(cache.hiddenGradient, firstBiasGradient);
 
-    return Matrix::multiply(this->firstWeight, hiddenGradient, true, false);
+    Matrix::gemm(this->firstWeight, cache.hiddenGradient, cache.inputGradient, true, false);
+    return cache.inputGradient;
 }

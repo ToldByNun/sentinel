@@ -93,6 +93,11 @@ void Matrix::resize(size_t rowCount, size_t columnCount, float fillValue) {
     this->data.assign(rowCount * columnCount, fillValue);
 }
 
+void Matrix::ensureSize(size_t rowCount, size_t columnCount) {
+    if (this->rows == rowCount && this->cols == columnCount) return;
+    this->resize(rowCount, columnCount, 0.0f);
+}
+
 void Matrix::fill(float value) {
     for (size_t index = 0; index < this->data.size(); ++index)
         this->data[index] = value;
@@ -246,6 +251,12 @@ void Matrix::addInPlace(Matrix& total, const Matrix& delta) {
     if (total.rows != delta.rows || total.cols != delta.cols) throw std::invalid_argument("Matrix::addInPlace shape mismatch");
     for (size_t index = 0; index < total.data.size(); ++index)
         total.data[index] += delta.data[index];
+}
+
+void Matrix::multiplyElementwiseInPlace(Matrix& total, const Matrix& other) {
+    if (total.rows != other.rows || total.cols != other.cols) throw std::invalid_argument("Matrix::multiplyElementwiseInPlace shape mismatch");
+    for (size_t index = 0; index < total.data.size(); ++index)
+        total.data[index] *= other.data[index];
 }
 
 void Matrix::scaleInPlace(Matrix& matrix, float scalar) {
