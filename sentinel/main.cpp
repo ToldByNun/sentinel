@@ -23,7 +23,7 @@ int main() {
     const size_t maximumTextCharacters = 400;
     const size_t maximumTokenCount = 64;
     const float trainRatio = 0.8f;
-    const int embeddingDim = 32;
+    const int embeddingDim = 64;
     const int maximumPositionCount = static_cast<int>(maximumTokenCount);
 
 #if defined(_OPENMP)
@@ -100,10 +100,12 @@ int main() {
     for (size_t index = 0; index < promptLength; ++index)
         prompt.push_back(sample.inputTokenIds[index]);
 
-    std::vector<int> generated = model.generate(prompt, 20);
+    std::vector<int> greedy = model.generate(prompt, 20, 0.0f);
+    std::vector<int> sampled = model.generate(prompt, 20, 0.9f, 40, 42u);
 
     std::cout << "--- prompt ---\n" << tokenizer.decode(prompt) << '\n';
-    std::cout << "--- generated ---\n" << tokenizer.decode(generated) << '\n';
+    std::cout << "--- greedy ---\n" << tokenizer.decode(greedy) << '\n';
+    std::cout << "--- sample T=0.9 topK=40 ---\n" << tokenizer.decode(sampled) << '\n';
 
     return 0;
 }

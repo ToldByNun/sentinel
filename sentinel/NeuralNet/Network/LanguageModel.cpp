@@ -270,7 +270,69 @@ void LanguageModel::train(const LanguageModelDataset& trainDataset, const Langua
     }
 }
 
-std::vector<int> LanguageModel::generate(const std::vector<int>& promptTokenIds, int newTokenCount) {
+int LanguageModel::argmaxLastColumn(const Matrix& logits) {
+    const size_t lastColumn = logits.data[0].size() - 1;
+    int bestTokenId = 0;
+    float bestLogit = logits.data[0][lastColumn];
+    for (size_t tokenId = 1; tokenId < logits.data.size(); ++tokenId) {
+        if (logits.data[tokenId][lastColumn] <= bestLogit) continue;
+        bestLogit = logits.data[tokenId][lastColumn];
+        bestTokenId = static_cast<int>(tokenId);
+    }
+    return bestTokenId;
+}
+
+int LanguageModel::sampleLastColumn(const Matrix& logits, float temperature, int topK, unsigned& seed) {
+    if (temperature <= 0.0f) return LanguageModel::argmaxLastColumn(logits);
+
+    const size_t vocabularySize = logits.data.size();
+    const size_t lastColumn = logits.data[0].size() - 1;
+
+    Matrix scaledLogits;
+    scaledLogits.data = std::vector<std::vector<float>>(vocabularySize, std::vector<float>(1, 0.0f));
+    for (size_t tokenId = 0; tokenId < vocabularySize; ++tokenId)
+        scaledLogits.data[tokenId][0] = logits.data[tokenId][lastColumn] / temperature;
+
+    Matrix probabilities = Softmax::apply(scaledLogits);
+
+    std::vector<int> candidateTokenIds;
+    candidateTokenIds.reserve(vocabularySize);
+    for (size_t tokenId = 0; tokenId < vocabularySize; ++tokenId)
+        candidateTokenIds.push_back(static_cast<int>(tokenId));
+
+    if (topK > 0 && static_cast<size_t>(topK) < vocabularySize) {
+        const size_t keepCount = static_cast<size_t>(topK);
+        for (size_t rank = 0; rank < keepCount; ++rank) {
+            size_t bestIndex = rank;
+            for (size_t index = rank + 1; index < candidateTokenIds.size(); ++index) {
+                if (probabilities.data[static_cast<size_t>(candidateTokenIds[index])][0]
+                    <= probabilities.data[static_cast<size_t>(candidateTokenIds[bestIndex])][0])
+                    continue;
+                bestIndex = index;
+            }
+            if (bestIndex != rank)
+                std::swap(candidateTokenIds[rank], candidateTokenIds[bestIndex]);
+        }
+        candidateTokenIds.resize(keepCount);
+
+        float probabilitySum = 0.0f;
+        for (int tokenId : candidateTokenIds)
+            probabilitySum += probabilities.data[static_cast<size_t>(tokenId)][0];
+        if (probabilitySum <= 0.0f) return candidateTokenIds[0];
+        for (int tokenId : candidateTokenIds)
+            probabilities.data[static_cast<size_t>(tokenId)][0] /= probabilitySum;
+    }
+
+    const float unit = UniformInit::unitSample(seed);
+    float cumulative = 0.0f;
+    for (int tokenId : candidateTokenIds) {
+        cumulative += probabilities.data[static_cast<size_t>(tokenId)][0];
+        if (unit <= cumulative) return tokenId;
+    }
+    return candidateTokenIds.back();
+}
+
+std::vector<int> LanguageModel::generate(const std::vector<int>& promptTokenIds, int newTokenCount, float temperature, int topK, unsigned seed) {
     if (promptTokenIds.empty()) throw std::invalid_argument("LanguageModel::generate empty prompt");
     if (newTokenCount < 0) throw std::invalid_argument("LanguageModel::generate newTokenCount must be >= 0");
 
@@ -279,17 +341,8 @@ std::vector<int> LanguageModel::generate(const std::vector<int>& promptTokenIds,
         if (static_cast<int>(tokenIds.size()) >= this->maximumPositionCount) break;
 
         Matrix logits = this->forward(tokenIds);
-        const size_t lastColumn = logits.data[0].size() - 1;
-
-        int bestTokenId = 0;
-        float bestLogit = logits.data[0][lastColumn];
-        for (size_t tokenId = 1; tokenId < logits.data.size(); ++tokenId) {
-            if (logits.data[tokenId][lastColumn] <= bestLogit) continue;
-            bestLogit = logits.data[tokenId][lastColumn];
-            bestTokenId = static_cast<int>(tokenId);
-        }
-
-        tokenIds.push_back(bestTokenId);
+        const int nextTokenId = LanguageModel::sampleLastColumn(logits, temperature, topK, seed);
+        tokenIds.push_back(nextTokenId);
     }
 
     return tokenIds;

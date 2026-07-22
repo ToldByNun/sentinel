@@ -12,6 +12,9 @@ public:
     /// <summary>overwrite an existing matrix in place</summary>
     static void fill(Matrix& matrix, float scale, unsigned seed);
 
+    /// <summary>advance seed and return a value in [0, 1]</summary>
+    static float unitSample(unsigned& seed);
+
 private:
     static unsigned advanceSeed(unsigned seed);
     static float sampleValue(unsigned& seed, float scale);

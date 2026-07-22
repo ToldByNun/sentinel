@@ -13,6 +13,10 @@ float UniformInit::sampleValue(unsigned& seed, float scale) {
     return (unit * 2.0f - 1.0f) * scale;
 }
 
+float UniformInit::unitSample(unsigned& seed) {
+    return (UniformInit::sampleValue(seed, 1.0f) + 1.0f) * 0.5f;
+}
+
 Matrix UniformInit::matrix(int rows, int columns, float scale, unsigned seed) {
     if (rows <= 0 || columns <= 0) throw std::invalid_argument("UniformInit::matrix invalid shape");
 

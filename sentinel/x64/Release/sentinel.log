@@ -1,7 +1,32 @@
-﻿  main.cpp
+﻿  ReLU.cpp
+  Softmax.cpp
+  ClassificationDataset.cpp
+  DatasetSplit.cpp
+  JsonlLoader.cpp
+  LanguageModelDataset.cpp
+  UniformInit.cpp
+  CausalSelfAttention.cpp
+  Dense.cpp
+  Dropout.cpp
+  Embedding.cpp
+  FeedForward.cpp
+  LayerNorm.cpp
+  MeanPool.cpp
+  TransformerBlock.cpp
+  CrossEntropy.cpp
+  MSE.cpp
+  Matrix.cpp
+  LanguageModel.cpp
+  Sequential.cpp
+  Kompilieren...
+  Adam.cpp
+  SGD.cpp
+  BPETokenizer.cpp
+  TextUtil.cpp
+  main.cpp
   Code wird generiert.
-  3 of 1747 functions ( 0.2%) were compiled, the rest were copied from previous compilation.
-    0 functions were new in current compilation
-    0 functions had inline decision re-evaluated but remain unchanged
+  57 of 1770 functions ( 3.2%) were compiled, the rest were copied from previous compilation.
+    10 functions were new in current compilation
+    112 functions had inline decision re-evaluated but remain unchanged
   Codegenerierung ist abgeschlossen.
   sentinel.vcxproj -> C:\Users\mikaj\source\repos\sentinel\x64\Release\sentinel.exe

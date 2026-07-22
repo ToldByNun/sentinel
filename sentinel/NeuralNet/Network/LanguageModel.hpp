@@ -81,12 +81,18 @@ public:
     /// <summary>train and also report testLoss every logEveryEpochs</summary>
     void train(const LanguageModelDataset& trainDataset, const LanguageModelDataset& testDataset, int epochs, int logEveryEpochs = 1, int batchSize = 32);
 
-    /// <summary>greedy next-token generation from a prompt</summary>
-    std::vector<int> generate(const std::vector<int>& promptTokenIds, int newTokenCount);
+    /// <summary>next-token generation temperature&lt;=0 is greedy otherwise sample with optional topK</summary>
+    std::vector<int> generate(const std::vector<int>& promptTokenIds, int newTokenCount, float temperature = 1.0f, int topK = 40, unsigned seed = 42u);
 
 private:
     /// <summary>position ids 0 .. sequenceLength-1</summary>
     static std::vector<int> positionIds(size_t sequenceLength);
+
+    /// <summary>token id with highest logit in the last column</summary>
+    static int argmaxLastColumn(const Matrix& logits);
+
+    /// <summary>sample one token from last-column logits with temperature and optional topK</summary>
+    static int sampleLastColumn(const Matrix& logits, float temperature, int topK, unsigned& seed);
 
     /// <summary>sum gradient columns into a bias column vector</summary>
     static Matrix sumColumns(const Matrix& gradient);
