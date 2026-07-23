@@ -41,6 +41,7 @@
     <ClCompile Include="NeuralNet\Losses\MSE.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="NeuralNet\Math\Matrix.cpp" />
+    <CudaCompile Include="NeuralNet\Cuda\CudaMatmul.cu" />
     <ClCompile Include="NeuralNet\Network\LanguageModel.cpp" />
     <ClCompile Include="NeuralNet\Network\Sequential.cpp" />
     <ClCompile Include="NeuralNet\Optimizers\Adam.cpp" />
@@ -70,6 +71,7 @@
     <ClInclude Include="NeuralNet\Losses\CrossEntropy.hpp" />
     <ClInclude Include="NeuralNet\Losses\MSE.hpp" />
     <ClInclude Include="NeuralNet\Math\Matrix.hpp" />
+    <ClInclude Include="NeuralNet\Cuda\CudaMatmul.hpp" />
     <ClInclude Include="NeuralNet\Network\LanguageModel.hpp" />
     <ClInclude Include="NeuralNet\Network\Sequential.hpp" />
     <ClInclude Include="NeuralNet\Optimizers\Adam.hpp" />
@@ -111,7 +113,12 @@
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <CudaToolkitDir>C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\</CudaToolkitDir>
+  </PropertyGroup>
   <ImportGroup Label="ExtensionSettings">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 13.3.props" Condition="Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 13.3.props')" />
+    <Import Project="C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\extras\visual_studio_integration\MSBuildExtensions\CUDA 13.3.props" Condition="!Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 13.3.props')" />
   </ImportGroup>
   <ImportGroup Label="Shared">
   </ImportGroup>
@@ -176,7 +183,12 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>cudart_static.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <CudaCompile>
+      <TargetMachinePlatform>64</TargetMachinePlatform>
+      <CodeGeneration>compute_120,sm_120</CodeGeneration>
+    </CudaCompile>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
     </Manifest>
@@ -195,12 +207,19 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>cudart_static.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <CudaCompile>
+      <TargetMachinePlatform>64</TargetMachinePlatform>
+      <CodeGeneration>compute_120,sm_120</CodeGeneration>
+    </CudaCompile>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
     </Manifest>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 13.3.targets" Condition="Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 13.3.targets')" />
+    <Import Project="C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\extras\visual_studio_integration\MSBuildExtensions\CUDA 13.3.targets" Condition="!Exists('$(VCTargetsPath)\BuildCustomizations\CUDA 13.3.targets')" />
   </ImportGroup>
 </Project>

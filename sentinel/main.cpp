@@ -1,3 +1,4 @@
+#include "NeuralNet/Cuda/CudaMatmul.hpp"
 #include "NeuralNet/Tokenizer/BPETokenizer.hpp"
 #include "NeuralNet/Data/DatasetSplit.hpp"
 #include "NeuralNet/Data/JsonlLoader.hpp"
@@ -31,6 +32,8 @@ int main() {
 #else
     std::cout << "OpenMP: disabled\n";
 #endif
+
+    CudaMatmul::runSmokeDemo(512);
 
     // 0 = load entire jsonl (sera_sample has 10000 rows)
     std::vector<JsonlRow> rows = JsonlLoader::load(samplePath, 0);
