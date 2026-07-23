@@ -33,7 +33,7 @@
     <ClCompile Include="NeuralNet\Layers\FeedForward.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
-    <ClCompile Include="NeuralNet\Layers\LayerNorm.cpp">
+    <ClCompile Include="NeuralNet\Layers\RMSNorm.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
     <ClCompile Include="NeuralNet\Layers\TransformerBlock.cpp">
@@ -116,7 +116,7 @@
     <ClInclude Include="NeuralNet\Layers\FeedForward.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
-    <ClInclude Include="NeuralNet\Layers\LayerNorm.hpp">
+    <ClInclude Include="NeuralNet\Layers\RMSNorm.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Layers\TransformerBlock.hpp">

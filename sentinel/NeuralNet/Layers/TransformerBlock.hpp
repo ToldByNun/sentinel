@@ -3,7 +3,7 @@
 
 #include "CausalSelfAttention.hpp"
 #include "FeedForward.hpp"
-#include "LayerNorm.hpp"
+#include "RMSNorm.hpp"
 #include "../Math/Matrix.hpp"
 #include "../Optimizers/Adam.hpp"
 
@@ -12,9 +12,9 @@ class TransformerBlock;
 /// <summary>thread local caches for one transformer block forward</summary>
 class TransformerBlockCache {
 public:
-    LayerNormCache attentionNormCache;
+    RMSNormCache attentionNormCache;
     CausalSelfAttentionCache attentionCache;
-    LayerNormCache feedForwardNormCache;
+    RMSNormCache feedForwardNormCache;
     FeedForwardCache feedForwardCache;
     Matrix input;
     Matrix afterAttention;
@@ -29,9 +29,7 @@ public:
     Matrix valueWeight;
     Matrix attentionOutputWeight;
     Matrix attentionNormGamma;
-    Matrix attentionNormBeta;
     Matrix feedForwardNormGamma;
-    Matrix feedForwardNormBeta;
     Matrix feedForwardGateWeight;
     Matrix feedForwardGateBias;
     Matrix feedForwardUpWeight;
@@ -54,13 +52,13 @@ public:
 
 /// <summary>
 /// pre-norm transformer block
-/// LN -> multi head Attn -> residual -> LN -> SwiGLU FFN -> residual
+/// RMSNorm -> multi head Attn -> residual -> RMSNorm -> SwiGLU FFN -> residual
 /// </summary>
 class TransformerBlock {
 public:
-    LayerNorm attentionNorm;
+    RMSNorm attentionNorm;
     CausalSelfAttention attention;
-    LayerNorm feedForwardNorm;
+    RMSNorm feedForwardNorm;
     FeedForward feedForward;
 
     AdamState queryWeightState;
@@ -68,9 +66,7 @@ public:
     AdamState valueWeightState;
     AdamState attentionOutputWeightState;
     AdamState attentionNormGammaState;
-    AdamState attentionNormBetaState;
     AdamState feedForwardNormGammaState;
-    AdamState feedForwardNormBetaState;
     AdamState feedForwardGateWeightState;
     AdamState feedForwardGateBiasState;
     AdamState feedForwardUpWeightState;

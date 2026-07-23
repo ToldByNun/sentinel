@@ -1,14 +1,10 @@
-﻿  SiLU.cpp
-  CausalSelfAttention.cpp
-  FeedForward.cpp
-  RotaryEmbedding.cpp
+﻿  RMSNorm.cpp
   TransformerBlock.cpp
   main.cpp
-  Matrix.cpp
   LanguageModel.cpp
   Code wird generiert.
-  273 of 1732 functions (15.8%) were compiled, the rest were copied from previous compilation.
-    24 functions were new in current compilation
-    125 functions had inline decision re-evaluated but remain unchanged
+  222 of 1732 functions (12.8%) were compiled, the rest were copied from previous compilation.
+    13 functions were new in current compilation
+    72 functions had inline decision re-evaluated but remain unchanged
   Codegenerierung ist abgeschlossen.
   sentinel.vcxproj -> C:\Users\mikaj\source\repos\sentinel\x64\Release\sentinel.exe

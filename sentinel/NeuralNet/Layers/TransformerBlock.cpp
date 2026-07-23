@@ -9,9 +9,7 @@ TransformerBlockGradients TransformerBlockGradients::zerosFrom(const Transformer
     gradients.valueWeight = Matrix::zerosLike(block.attention.valueWeight);
     gradients.attentionOutputWeight = Matrix::zerosLike(block.attention.outputWeight);
     gradients.attentionNormGamma = Matrix::zerosLike(block.attentionNorm.gamma);
-    gradients.attentionNormBeta = Matrix::zerosLike(block.attentionNorm.beta);
     gradients.feedForwardNormGamma = Matrix::zerosLike(block.feedForwardNorm.gamma);
-    gradients.feedForwardNormBeta = Matrix::zerosLike(block.feedForwardNorm.beta);
     gradients.feedForwardGateWeight = Matrix::zerosLike(block.feedForward.gateWeight);
     gradients.feedForwardGateBias = Matrix::zerosLike(block.feedForward.gateBias);
     gradients.feedForwardUpWeight = Matrix::zerosLike(block.feedForward.upWeight);
@@ -27,9 +25,7 @@ void TransformerBlockGradients::zeroInPlace() {
     Matrix::zeroInPlace(this->valueWeight);
     Matrix::zeroInPlace(this->attentionOutputWeight);
     Matrix::zeroInPlace(this->attentionNormGamma);
-    Matrix::zeroInPlace(this->attentionNormBeta);
     Matrix::zeroInPlace(this->feedForwardNormGamma);
-    Matrix::zeroInPlace(this->feedForwardNormBeta);
     Matrix::zeroInPlace(this->feedForwardGateWeight);
     Matrix::zeroInPlace(this->feedForwardGateBias);
     Matrix::zeroInPlace(this->feedForwardUpWeight);
@@ -44,9 +40,7 @@ void TransformerBlockGradients::addInPlace(const TransformerBlockGradients& othe
     Matrix::addInPlace(this->valueWeight, other.valueWeight);
     Matrix::addInPlace(this->attentionOutputWeight, other.attentionOutputWeight);
     Matrix::addInPlace(this->attentionNormGamma, other.attentionNormGamma);
-    Matrix::addInPlace(this->attentionNormBeta, other.attentionNormBeta);
     Matrix::addInPlace(this->feedForwardNormGamma, other.feedForwardNormGamma);
-    Matrix::addInPlace(this->feedForwardNormBeta, other.feedForwardNormBeta);
     Matrix::addInPlace(this->feedForwardGateWeight, other.feedForwardGateWeight);
     Matrix::addInPlace(this->feedForwardGateBias, other.feedForwardGateBias);
     Matrix::addInPlace(this->feedForwardUpWeight, other.feedForwardUpWeight);
@@ -61,9 +55,7 @@ void TransformerBlockGradients::scaleInPlace(float scalar) {
     Matrix::scaleInPlace(this->valueWeight, scalar);
     Matrix::scaleInPlace(this->attentionOutputWeight, scalar);
     Matrix::scaleInPlace(this->attentionNormGamma, scalar);
-    Matrix::scaleInPlace(this->attentionNormBeta, scalar);
     Matrix::scaleInPlace(this->feedForwardNormGamma, scalar);
-    Matrix::scaleInPlace(this->feedForwardNormBeta, scalar);
     Matrix::scaleInPlace(this->feedForwardGateWeight, scalar);
     Matrix::scaleInPlace(this->feedForwardGateBias, scalar);
     Matrix::scaleInPlace(this->feedForwardUpWeight, scalar);
@@ -81,9 +73,7 @@ TransformerBlock::TransformerBlock(int embeddingDim, int headCount, int maximumP
     this->valueWeightState = AdamState::zerosLike(this->attention.valueWeight);
     this->attentionOutputWeightState = AdamState::zerosLike(this->attention.outputWeight);
     this->attentionNormGammaState = AdamState::zerosLike(this->attentionNorm.gamma);
-    this->attentionNormBetaState = AdamState::zerosLike(this->attentionNorm.beta);
     this->feedForwardNormGammaState = AdamState::zerosLike(this->feedForwardNorm.gamma);
-    this->feedForwardNormBetaState = AdamState::zerosLike(this->feedForwardNorm.beta);
     this->feedForwardGateWeightState = AdamState::zerosLike(this->feedForward.gateWeight);
     this->feedForwardGateBiasState = AdamState::zerosLike(this->feedForward.gateBias);
     this->feedForwardUpWeightState = AdamState::zerosLike(this->feedForward.upWeight);
@@ -115,8 +105,7 @@ Matrix TransformerBlock::backward(const Matrix& outputGradient, TransformerBlock
     Matrix feedForwardInputGradient = this->feedForward.backward(outputGradient, cache.feedForwardCache, feedForwardGateWeightGradient, feedForwardGateBiasGradient, feedForwardUpWeightGradient, feedForwardUpBiasGradient, feedForwardDownWeightGradient, feedForwardDownBiasGradient);
 
     Matrix feedForwardNormGammaGradient;
-    Matrix feedForwardNormBetaGradient;
-    Matrix afterAttentionFromFeedForward = this->feedForwardNorm.backward(feedForwardInputGradient, cache.feedForwardNormCache, feedForwardNormGammaGradient, feedForwardNormBetaGradient);
+    Matrix afterAttentionFromFeedForward = this->feedForwardNorm.backward(feedForwardInputGradient, cache.feedForwardNormCache, feedForwardNormGammaGradient);
 
     Matrix afterAttentionGradient = Matrix::add(outputGradient, afterAttentionFromFeedForward);
 
@@ -127,8 +116,7 @@ Matrix TransformerBlock::backward(const Matrix& outputGradient, TransformerBlock
     Matrix attentionInputGradient = this->attention.backward(afterAttentionGradient, cache.attentionCache, queryWeightGradient, keyWeightGradient, valueWeightGradient, attentionOutputWeightGradient);
 
     Matrix attentionNormGammaGradient;
-    Matrix attentionNormBetaGradient;
-    Matrix inputFromAttention = this->attentionNorm.backward(attentionInputGradient, cache.attentionNormCache, attentionNormGammaGradient, attentionNormBetaGradient);
+    Matrix inputFromAttention = this->attentionNorm.backward(attentionInputGradient, cache.attentionNormCache, attentionNormGammaGradient);
 
     Matrix::addInPlace(gradients.feedForwardDownWeight, feedForwardDownWeightGradient);
     Matrix::addInPlace(gradients.feedForwardDownBias, feedForwardDownBiasGradient);
@@ -137,13 +125,11 @@ Matrix TransformerBlock::backward(const Matrix& outputGradient, TransformerBlock
     Matrix::addInPlace(gradients.feedForwardGateWeight, feedForwardGateWeightGradient);
     Matrix::addInPlace(gradients.feedForwardGateBias, feedForwardGateBiasGradient);
     Matrix::addInPlace(gradients.feedForwardNormGamma, feedForwardNormGammaGradient);
-    Matrix::addInPlace(gradients.feedForwardNormBeta, feedForwardNormBetaGradient);
     Matrix::addInPlace(gradients.attentionOutputWeight, attentionOutputWeightGradient);
     Matrix::addInPlace(gradients.valueWeight, valueWeightGradient);
     Matrix::addInPlace(gradients.keyWeight, keyWeightGradient);
     Matrix::addInPlace(gradients.queryWeight, queryWeightGradient);
     Matrix::addInPlace(gradients.attentionNormGamma, attentionNormGammaGradient);
-    Matrix::addInPlace(gradients.attentionNormBeta, attentionNormBetaGradient);
 
     return Matrix::add(afterAttentionGradient, inputFromAttention);
 }
@@ -156,11 +142,9 @@ void TransformerBlock::applyGradients(Adam& optimizer, const TransformerBlockGra
     optimizer.update(this->feedForward.gateWeight, this->feedForwardGateWeightState, gradients.feedForwardGateWeight);
     optimizer.update(this->feedForward.gateBias, this->feedForwardGateBiasState, gradients.feedForwardGateBias);
     optimizer.update(this->feedForwardNorm.gamma, this->feedForwardNormGammaState, gradients.feedForwardNormGamma);
-    optimizer.update(this->feedForwardNorm.beta, this->feedForwardNormBetaState, gradients.feedForwardNormBeta);
     optimizer.update(this->attention.outputWeight, this->attentionOutputWeightState, gradients.attentionOutputWeight);
     optimizer.update(this->attention.valueWeight, this->valueWeightState, gradients.valueWeight);
     optimizer.update(this->attention.keyWeight, this->keyWeightState, gradients.keyWeight);
     optimizer.update(this->attention.queryWeight, this->queryWeightState, gradients.queryWeight);
     optimizer.update(this->attentionNorm.gamma, this->attentionNormGammaState, gradients.attentionNormGamma);
-    optimizer.update(this->attentionNorm.beta, this->attentionNormBetaState, gradients.attentionNormBeta);
 }

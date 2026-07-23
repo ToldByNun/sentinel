@@ -16,7 +16,7 @@
 
 /// <summary>
 /// demo: causal LM on SERA text
-/// token embed + RoPE multi head attention + SwiGLU FFN + vocab projection
+/// token embed + RoPE multi head attention + RMSNorm + SwiGLU FFN + vocab projection
 /// </summary>
 int main() {
     const std::string samplePath = "../SERA-Data/sera_sample.jsonl";
@@ -49,7 +49,7 @@ int main() {
     DatasetSplit split = DatasetSplit::partitionTexts(texts, trainRatio, 42u);
 
     BPETokenizer tokenizer;
-    tokenizer.train(split.trainTexts, 2500);
+    tokenizer.train(split.trainTexts, 1000);
 
     LanguageModelDataset trainDataset = LanguageModelDataset::build(split.trainTexts, tokenizer, maximumTokenCount, false);
     LanguageModelDataset testDataset = LanguageModelDataset::build(split.testTexts, tokenizer, maximumTokenCount, false);
@@ -69,7 +69,7 @@ int main() {
 
     std::cout << "blocks: " << model.blocks.size() << " | heads: " << model.blocks[0].attention.headCount << '\n';
 
-    model.train(trainDataset, testDataset, 15, 1, 64);
+    model.train(trainDataset, testDataset, 5, 1, 64);
 
     std::cout << "final trainLoss: " << model.averageLoss(trainDataset) << '\n';
     if (!testDataset.examples.empty())

@@ -33,7 +33,7 @@
     <ClCompile Include="NeuralNet\Layers\CausalSelfAttention.cpp" />
     <ClCompile Include="NeuralNet\Layers\Embedding.cpp" />
     <ClCompile Include="NeuralNet\Layers\FeedForward.cpp" />
-    <ClCompile Include="NeuralNet\Layers\LayerNorm.cpp" />
+    <ClCompile Include="NeuralNet\Layers\RMSNorm.cpp" />
     <ClCompile Include="NeuralNet\Layers\RotaryEmbedding.cpp" />
     <ClCompile Include="NeuralNet\Layers\TransformerBlock.cpp" />
     <ClCompile Include="NeuralNet\Layers\MeanPool.cpp" />
@@ -63,7 +63,7 @@
     <ClInclude Include="NeuralNet\Layers\Embedding.hpp" />
     <ClInclude Include="NeuralNet\Layers\FeedForward.hpp" />
     <ClInclude Include="NeuralNet\Layers\Layer.hpp" />
-    <ClInclude Include="NeuralNet\Layers\LayerNorm.hpp" />
+    <ClInclude Include="NeuralNet\Layers\RMSNorm.hpp" />
     <ClInclude Include="NeuralNet\Layers\RotaryEmbedding.hpp" />
     <ClInclude Include="NeuralNet\Layers\TransformerBlock.hpp" />
     <ClInclude Include="NeuralNet\Layers\MeanPool.hpp" />

@@ -12,7 +12,7 @@ C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\Dropout.cpp;C:\Us
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\CausalSelfAttention.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\CausalSelfAttention.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\Embedding.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\Embedding.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\FeedForward.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\FeedForward.obj
-C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\LayerNorm.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\LayerNorm.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\RMSNorm.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\RMSNorm.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\RotaryEmbedding.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\RotaryEmbedding.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\TransformerBlock.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\TransformerBlock.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\MeanPool.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\MeanPool.obj

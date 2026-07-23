@@ -4,7 +4,7 @@
 #include "../Data/LanguageModelDataset.hpp"
 #include "../Layers/Dense.hpp"
 #include "../Layers/Embedding.hpp"
-#include "../Layers/LayerNorm.hpp"
+#include "../Layers/RMSNorm.hpp"
 #include "../Layers/TransformerBlock.hpp"
 #include "../Math/Matrix.hpp"
 #include "../Optimizers/Adam.hpp"
@@ -17,7 +17,7 @@ class LanguageModel;
 class LanguageModelCache {
 public:
     std::vector<TransformerBlockCache> blockCaches;
-    LayerNormCache finalNormCache;
+    RMSNormCache finalNormCache;
     Matrix blockOutput;
     Matrix probabilities;
 };
@@ -28,7 +28,6 @@ public:
     Matrix tokenEmbedding;
     std::vector<TransformerBlockGradients> blocks;
     Matrix finalNormGamma;
-    Matrix finalNormBeta;
     Matrix projectionWeight;
     Matrix projectionBias;
 
@@ -47,19 +46,18 @@ public:
 
 /// <summary>
 /// causal LM with stacked pre-norm transformer blocks and RoPE
-/// token embed -> (LN Attn FFN) x N -> final LN -> vocab
+/// token embed -> (RMSNorm Attn SwiGLU) x N -> final RMSNorm -> vocab
 /// </summary>
 class LanguageModel {
 public:
     Embedding tokenEmbedding;
     std::vector<TransformerBlock> blocks;
-    LayerNorm finalNorm;
+    RMSNorm finalNorm;
     Dense outputProjection;
     Adam optimizer;
 
     AdamState tokenEmbeddingState;
     AdamState finalNormGammaState;
-    AdamState finalNormBetaState;
     AdamState projectionWeightState;
     AdamState projectionBiasState;
 

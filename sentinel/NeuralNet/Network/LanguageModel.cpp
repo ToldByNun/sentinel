@@ -21,7 +21,6 @@ LanguageModelGradients LanguageModelGradients::zerosFrom(const LanguageModel& mo
     for (const TransformerBlock& block : model.blocks)
         gradients.blocks.push_back(TransformerBlockGradients::zerosFrom(block));
     gradients.finalNormGamma = Matrix::zerosLike(model.finalNorm.gamma);
-    gradients.finalNormBeta = Matrix::zerosLike(model.finalNorm.beta);
     gradients.projectionWeight = Matrix::zerosLike(model.outputProjection.weight);
     gradients.projectionBias = Matrix::zerosLike(model.outputProjection.bias);
     return gradients;
@@ -32,7 +31,6 @@ void LanguageModelGradients::zeroInPlace() {
     for (TransformerBlockGradients& block : this->blocks)
         block.zeroInPlace();
     Matrix::zeroInPlace(this->finalNormGamma);
-    Matrix::zeroInPlace(this->finalNormBeta);
     Matrix::zeroInPlace(this->projectionWeight);
     Matrix::zeroInPlace(this->projectionBias);
 }
@@ -42,7 +40,6 @@ void LanguageModelGradients::addInPlace(const LanguageModelGradients& other) {
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex)
         this->blocks[blockIndex].addInPlace(other.blocks[blockIndex]);
     Matrix::addInPlace(this->finalNormGamma, other.finalNormGamma);
-    Matrix::addInPlace(this->finalNormBeta, other.finalNormBeta);
     Matrix::addInPlace(this->projectionWeight, other.projectionWeight);
     Matrix::addInPlace(this->projectionBias, other.projectionBias);
 }
@@ -52,7 +49,6 @@ void LanguageModelGradients::scaleInPlace(float scalar) {
     for (TransformerBlockGradients& block : this->blocks)
         block.scaleInPlace(scalar);
     Matrix::scaleInPlace(this->finalNormGamma, scalar);
-    Matrix::scaleInPlace(this->finalNormBeta, scalar);
     Matrix::scaleInPlace(this->projectionWeight, scalar);
     Matrix::scaleInPlace(this->projectionBias, scalar);
 }
@@ -69,7 +65,6 @@ LanguageModel::LanguageModel(int vocabularySize, int embeddingDim, int maximumPo
 
     this->tokenEmbeddingState = AdamState::zerosLike(this->tokenEmbedding.weight);
     this->finalNormGammaState = AdamState::zerosLike(this->finalNorm.gamma);
-    this->finalNormBetaState = AdamState::zerosLike(this->finalNorm.beta);
     this->projectionWeightState = AdamState::zerosLike(this->outputProjection.weight);
     this->projectionBiasState = AdamState::zerosLike(this->outputProjection.bias);
 }
@@ -157,8 +152,7 @@ float LanguageModel::accumulateExample(const LanguageModelExample& example, Lang
     Matrix hiddenGradient = Matrix::multiply(this->outputProjection.weight, logitGradient, true, false);
 
     Matrix finalNormGammaGradient;
-    Matrix finalNormBetaGradient;
-    hiddenGradient = this->finalNorm.backward(hiddenGradient, cache.finalNormCache, finalNormGammaGradient, finalNormBetaGradient);
+    hiddenGradient = this->finalNorm.backward(hiddenGradient, cache.finalNormCache, finalNormGammaGradient);
 
     for (int blockIndex = static_cast<int>(this->blocks.size()) - 1; blockIndex >= 0; --blockIndex)
         hiddenGradient = this->blocks[static_cast<size_t>(blockIndex)].backward(hiddenGradient, cache.blockCaches[static_cast<size_t>(blockIndex)], gradients.blocks[static_cast<size_t>(blockIndex)]);
@@ -168,7 +162,6 @@ float LanguageModel::accumulateExample(const LanguageModelExample& example, Lang
     Matrix::addInPlace(gradients.projectionWeight, projectionWeightGradient);
     Matrix::addInPlace(gradients.projectionBias, projectionBiasGradient);
     Matrix::addInPlace(gradients.finalNormGamma, finalNormGammaGradient);
-    Matrix::addInPlace(gradients.finalNormBeta, finalNormBetaGradient);
     Matrix::addInPlace(gradients.tokenEmbedding, tokenEmbeddingGradient);
 
     return loss;
@@ -179,7 +172,6 @@ void LanguageModel::applyGradients(const LanguageModelGradients& gradients) {
     this->optimizer.update(this->outputProjection.weight, this->projectionWeightState, gradients.projectionWeight);
     this->optimizer.update(this->outputProjection.bias, this->projectionBiasState, gradients.projectionBias);
     this->optimizer.update(this->finalNorm.gamma, this->finalNormGammaState, gradients.finalNormGamma);
-    this->optimizer.update(this->finalNorm.beta, this->finalNormBetaState, gradients.finalNormBeta);
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex)
         this->blocks[blockIndex].applyGradients(this->optimizer, gradients.blocks[blockIndex]);
     this->optimizer.update(this->tokenEmbedding.weight, this->tokenEmbeddingState, gradients.tokenEmbedding);
