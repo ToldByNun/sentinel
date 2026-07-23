@@ -1,4 +1,5 @@
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Activations\ReLU.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\ReLU.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Activations\SiLU.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\SiLU.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Activations\Softmax.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\Softmax.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Data\ClassificationDataset.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\ClassificationDataset.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Data\DatasetSplit.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\DatasetSplit.obj
@@ -12,6 +13,7 @@ C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\CausalSelfAttenti
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\Embedding.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\Embedding.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\FeedForward.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\FeedForward.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\LayerNorm.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\LayerNorm.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\RotaryEmbedding.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\RotaryEmbedding.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\TransformerBlock.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\TransformerBlock.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\MeanPool.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\MeanPool.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Losses\CrossEntropy.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\CrossEntropy.obj

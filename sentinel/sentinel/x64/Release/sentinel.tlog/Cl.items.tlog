@@ -1,4 +1,5 @@
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Activations\ReLU.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\ReLU.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Activations\SiLU.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\SiLU.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Activations\Softmax.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\Softmax.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Data\ClassificationDataset.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\ClassificationDataset.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Data\DatasetSplit.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\DatasetSplit.obj

@@ -32,10 +32,12 @@ public:
     Matrix attentionNormBeta;
     Matrix feedForwardNormGamma;
     Matrix feedForwardNormBeta;
-    Matrix feedForwardFirstWeight;
-    Matrix feedForwardFirstBias;
-    Matrix feedForwardSecondWeight;
-    Matrix feedForwardSecondBias;
+    Matrix feedForwardGateWeight;
+    Matrix feedForwardGateBias;
+    Matrix feedForwardUpWeight;
+    Matrix feedForwardUpBias;
+    Matrix feedForwardDownWeight;
+    Matrix feedForwardDownBias;
 
     /// <summary>zero tensors matching block parameter shapes</summary>
     static TransformerBlockGradients zerosFrom(const TransformerBlock& block);
@@ -52,7 +54,7 @@ public:
 
 /// <summary>
 /// pre-norm transformer block
-/// LN -> multi head Attn -> residual -> LN -> FFN -> residual
+/// LN -> multi head Attn -> residual -> LN -> SwiGLU FFN -> residual
 /// </summary>
 class TransformerBlock {
 public:
@@ -69,10 +71,12 @@ public:
     AdamState attentionNormBetaState;
     AdamState feedForwardNormGammaState;
     AdamState feedForwardNormBetaState;
-    AdamState feedForwardFirstWeightState;
-    AdamState feedForwardFirstBiasState;
-    AdamState feedForwardSecondWeightState;
-    AdamState feedForwardSecondBiasState;
+    AdamState feedForwardGateWeightState;
+    AdamState feedForwardGateBiasState;
+    AdamState feedForwardUpWeightState;
+    AdamState feedForwardUpBiasState;
+    AdamState feedForwardDownWeightState;
+    AdamState feedForwardDownBiasState;
 
     TransformerBlock(int embeddingDim, int headCount, int maximumPositionCount, unsigned seed);
 

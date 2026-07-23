@@ -20,6 +20,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="NeuralNet\Activations\ReLU.cpp" />
+    <ClCompile Include="NeuralNet\Activations\SiLU.cpp" />
     <ClCompile Include="NeuralNet\Activations\Softmax.cpp" />
     <ClCompile Include="NeuralNet\Data\ClassificationDataset.cpp" />
     <ClCompile Include="NeuralNet\Data\DatasetSplit.cpp" />
@@ -48,6 +49,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="NeuralNet\Activations\ReLU.hpp" />
+    <ClInclude Include="NeuralNet\Activations\SiLU.hpp" />
     <ClInclude Include="NeuralNet\Activations\Softmax.hpp" />
     <ClInclude Include="NeuralNet\Data\ClassificationDataset.hpp" />
     <ClInclude Include="NeuralNet\Data\DatasetSplit.hpp" />

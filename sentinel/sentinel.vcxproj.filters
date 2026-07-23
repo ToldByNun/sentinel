@@ -18,6 +18,9 @@
     <ClCompile Include="NeuralNet\Activations\ReLU.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
+    <ClCompile Include="NeuralNet\Activations\SiLU.cpp">
+      <Filter>Quelldateien</Filter>
+    </ClCompile>
     <ClCompile Include="NeuralNet\Layers\Dense.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
@@ -96,6 +99,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="NeuralNet\Activations\ReLU.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Activations\SiLU.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Layers\Dense.hpp">
