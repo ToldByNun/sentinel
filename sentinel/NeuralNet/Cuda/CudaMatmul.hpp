@@ -30,6 +30,43 @@ public:
     void free();
 };
 
+/// <summary>row major float matrix that lives on the device</summary>
+class CudaMatrix {
+public:
+    size_t rows;
+    size_t cols;
+    CudaDeviceBuffer buffer;
+
+    CudaMatrix();
+
+    /// <summary>true if rows or cols is zero</summary>
+    bool empty() const;
+
+    /// <summary>rows * cols</summary>
+    size_t elementCount() const;
+
+    /// <summary>elementCount * sizeof float</summary>
+    size_t byteCount() const;
+
+    /// <summary>set shape and ensure device capacity</summary>
+    void ensureSize(size_t rowCount, size_t columnCount);
+
+    /// <summary>copy host matrix to device growing capacity if needed</summary>
+    void upload(const Matrix& host);
+
+    /// <summary>synchronize then copy device matrix to host</summary>
+    void downloadInto(Matrix& host) const;
+
+    /// <summary>synchronize then return host copy</summary>
+    Matrix download() const;
+
+    /// <summary>C = A * B entirely on device no host copies</summary>
+    static void multiplyInto(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& out);
+
+    /// <summary>C = A * B on device measuring kernel time with cuda events</summary>
+    static void multiplyIntoTimed(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& out, double& kernelMilliseconds);
+};
+
 /// <summary>split timings for one host driven multiply</summary>
 class CudaMatmulTiming {
 public:
@@ -43,7 +80,7 @@ public:
 
 /// <summary>
 /// CUDA row major GEMM C = A * B using shared memory tiling
-/// keeps device buffers across calls so malloc free is not the hot path
+/// host path reuses scratch buffers device path uses CudaMatrix
 /// </summary>
 class CudaMatmul {
 public:
@@ -71,11 +108,12 @@ public:
     /// <summary>C = A * B via sharedWorkspace</summary>
     static void multiplyIntoShared(const Matrix& left, const Matrix& right, Matrix& out);
 
-    /// <summary>compare CPU gemm vs CUDA with cold versus warm and stage timings</summary>
+    /// <summary>compare CPU gemm vs CUDA host path and device resident path</summary>
     static void runSmokeDemo(size_t matrixSize = 512);
 
 private:
     friend class CudaDeviceBuffer;
+    friend class CudaMatrix;
 
     static constexpr int tileSize = 16;
 
@@ -87,6 +125,9 @@ private:
 
     /// <summary>maximum absolute difference between same shape matrices</summary>
     static float maximumAbsoluteDifference(const Matrix& left, const Matrix& right);
+
+    /// <summary>launch shared memory matmul optionally filling kernelMilliseconds</summary>
+    static void launchSharedMemoryMatmul(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, double* kernelMilliseconds);
 
     /// <summary>grow owned buffers then copy launch and copy back optionally filling timing</summary>
     void multiplyIntoInternal(const Matrix& left, const Matrix& right, Matrix& out, CudaMatmulTiming* timing);
