@@ -1,3 +1,4 @@
+#include "NeuralNet/Cuda/CudaFeedForward.hpp"
 #include "NeuralNet/Cuda/CudaMatmul.hpp"
 #include "NeuralNet/Tokenizer/BPETokenizer.hpp"
 #include "NeuralNet/Data/DatasetSplit.hpp"
@@ -34,6 +35,7 @@ int main() {
 #endif
 
     CudaMatmul::runSmokeDemo(512);
+    CudaFeedForward::runSmokeDemo(128, 64);
 
     // 0 = load entire jsonl (sera_sample has 10000 rows)
     std::vector<JsonlRow> rows = JsonlLoader::load(samplePath, 0);

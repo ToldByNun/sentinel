@@ -7,11 +7,28 @@
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 CudaDeviceBuffer::CudaDeviceBuffer() : deviceData(nullptr), capacityBytes(0) {}
 
 CudaDeviceBuffer::~CudaDeviceBuffer() {
     this->free();
+}
+
+CudaDeviceBuffer::CudaDeviceBuffer(CudaDeviceBuffer&& other) noexcept : deviceData(other.deviceData), capacityBytes(other.capacityBytes) {
+    other.deviceData = nullptr;
+    other.capacityBytes = 0;
+}
+
+CudaDeviceBuffer& CudaDeviceBuffer::operator=(CudaDeviceBuffer&& other) noexcept {
+    if (this == &other) return *this;
+
+    this->free();
+    this->deviceData = other.deviceData;
+    this->capacityBytes = other.capacityBytes;
+    other.deviceData = nullptr;
+    other.capacityBytes = 0;
+    return *this;
 }
 
 void CudaDeviceBuffer::ensureCapacity(size_t requiredBytes) {
@@ -53,6 +70,22 @@ void CudaDeviceBuffer::free() {
 }
 
 CudaMatrix::CudaMatrix() : rows(0), cols(0) {}
+
+CudaMatrix::CudaMatrix(CudaMatrix&& other) noexcept : rows(other.rows), cols(other.cols), buffer(std::move(other.buffer)) {
+    other.rows = 0;
+    other.cols = 0;
+}
+
+CudaMatrix& CudaMatrix::operator=(CudaMatrix&& other) noexcept {
+    if (this == &other) return *this;
+
+    this->rows = other.rows;
+    this->cols = other.cols;
+    this->buffer = std::move(other.buffer);
+    other.rows = 0;
+    other.cols = 0;
+    return *this;
+}
 
 bool CudaMatrix::empty() const {
     return this->rows == 0 || this->cols == 0;

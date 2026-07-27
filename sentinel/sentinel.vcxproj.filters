@@ -51,6 +51,12 @@
     <CudaCompile Include="NeuralNet\Cuda\CudaMatmul.cu">
       <Filter>Quelldateien</Filter>
     </CudaCompile>
+    <CudaCompile Include="NeuralNet\Cuda\CudaOps.cu">
+      <Filter>Quelldateien</Filter>
+    </CudaCompile>
+    <CudaCompile Include="NeuralNet\Cuda\CudaFeedForward.cu">
+      <Filter>Quelldateien</Filter>
+    </CudaCompile>
     <ClCompile Include="NeuralNet\Network\Sequential.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
@@ -138,6 +144,12 @@
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Cuda\CudaMatmul.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Cuda\CudaOps.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Cuda\CudaFeedForward.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Network\Sequential.hpp">

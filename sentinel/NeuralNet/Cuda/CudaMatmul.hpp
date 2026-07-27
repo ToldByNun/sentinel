@@ -16,6 +16,8 @@ public:
 
     CudaDeviceBuffer(const CudaDeviceBuffer&) = delete;
     CudaDeviceBuffer& operator=(const CudaDeviceBuffer&) = delete;
+    CudaDeviceBuffer(CudaDeviceBuffer&& other) noexcept;
+    CudaDeviceBuffer& operator=(CudaDeviceBuffer&& other) noexcept;
 
     /// <summary>allocate when capacityBytes is below requiredBytes</summary>
     void ensureCapacity(size_t requiredBytes);
@@ -38,6 +40,10 @@ public:
     CudaDeviceBuffer buffer;
 
     CudaMatrix();
+    CudaMatrix(const CudaMatrix&) = delete;
+    CudaMatrix& operator=(const CudaMatrix&) = delete;
+    CudaMatrix(CudaMatrix&& other) noexcept;
+    CudaMatrix& operator=(CudaMatrix&& other) noexcept;
 
     /// <summary>true if rows or cols is zero</summary>
     bool empty() const;
@@ -114,6 +120,8 @@ public:
 private:
     friend class CudaDeviceBuffer;
     friend class CudaMatrix;
+    friend class CudaOps;
+    friend class CudaFeedForward;
 
     static constexpr int tileSize = 16;
 
