@@ -3,7 +3,7 @@
 
 #include "CudaMatmul.hpp"
 
-/// <summary>elementwise and broadcast ops on CudaMatrix</summary>
+/// <summary>elementwise broadcast attention and residual ops on CudaMatrix</summary>
 class CudaOps {
 public:
     /// <summary>add bias column across every sequence column in place</summary>
@@ -15,30 +15,72 @@ public:
     /// <summary>out = left * right element wise</summary>
     static void multiplyElementwiseInto(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& out);
 
+    /// <summary>out = left + right</summary>
+    static void addInto(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& out);
+
+    /// <summary>matrix *= scalar in place</summary>
+    static void scaleInPlace(CudaMatrix& matrix, float scalar);
+
+    /// <summary>set every element to zero</summary>
+    static void zeroInPlace(CudaMatrix& matrix);
+
+    /// <summary>copy one head block of rows from full into head</summary>
+    static void extractHeadInto(const CudaMatrix& full, int headIndex, int headDimension, CudaMatrix& head);
+
+    /// <summary>write one head block of rows into full</summary>
+    static void writeHead(CudaMatrix& full, int headIndex, int headDimension, const CudaMatrix& head);
+
+    /// <summary>set scores keyIndex greater than queryIndex to large negative</summary>
+    static void applyCausalMaskInPlace(CudaMatrix& scores);
+
+    /// <summary>column wise softmax writing into out</summary>
+    static void softmaxInto(const CudaMatrix& logits, CudaMatrix& out);
+
+    /// <summary>RoPE rotate Q or K in place using host built cos sin tables on device</summary>
+    static void rotaryRotateInPlace(CudaMatrix& tensor, int headCount, int headDimension, int pairCount, const CudaMatrix& cosTable, const CudaMatrix& sinTable);
+
 private:
     static constexpr int threadCount = 256;
 
 #ifdef __CUDACC__
-    /// <summary>device body for bias broadcast CUDA forbids __global__ members</summary>
     __device__ static void runBroadcastBiasAddInPlace(float* product, const float* bias, int rowCount, int columnCount);
-
-    /// <summary>device body for SiLU</summary>
     __device__ static void runSiluInto(const float* input, float* out, int elementCount);
-
-    /// <summary>device body for element wise multiply</summary>
     __device__ static void runMultiplyElementwiseInto(const float* left, const float* right, float* out, int elementCount);
+    __device__ static void runAddInto(const float* left, const float* right, float* out, int elementCount);
+    __device__ static void runScaleInPlace(float* matrix, float scalar, int elementCount);
+    __device__ static void runZeroInPlace(float* matrix, int elementCount);
+    __device__ static void runExtractHeadInto(const float* full, float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim);
+    __device__ static void runWriteHead(float* full, const float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim);
+    __device__ static void runApplyCausalMaskInPlace(float* scores, int sequenceLength);
+    __device__ static void runSoftmaxInto(const float* logits, float* out, int rowCount, int columnCount);
+    __device__ static void runRotaryRotateInPlace(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, const float* cosTable, const float* sinTable);
 
     friend __global__ void CudaOpsBroadcastBiasAddEntry(float* product, const float* bias, int rowCount, int columnCount);
     friend __global__ void CudaOpsSiluEntry(const float* input, float* out, int elementCount);
     friend __global__ void CudaOpsMultiplyElementwiseEntry(const float* left, const float* right, float* out, int elementCount);
+    friend __global__ void CudaOpsAddEntry(const float* left, const float* right, float* out, int elementCount);
+    friend __global__ void CudaOpsScaleEntry(float* matrix, float scalar, int elementCount);
+    friend __global__ void CudaOpsZeroEntry(float* matrix, int elementCount);
+    friend __global__ void CudaOpsExtractHeadEntry(const float* full, float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim);
+    friend __global__ void CudaOpsWriteHeadEntry(float* full, const float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim);
+    friend __global__ void CudaOpsCausalMaskEntry(float* scores, int sequenceLength);
+    friend __global__ void CudaOpsSoftmaxEntry(const float* logits, float* out, int rowCount, int columnCount);
+    friend __global__ void CudaOpsRotaryRotateEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, const float* cosTable, const float* sinTable);
 #endif
 };
 
 #ifdef __CUDACC__
-/// <summary>CUDA language requires free __global__ entry trampolines into CudaOps</summary>
 __global__ void CudaOpsBroadcastBiasAddEntry(float* product, const float* bias, int rowCount, int columnCount);
 __global__ void CudaOpsSiluEntry(const float* input, float* out, int elementCount);
 __global__ void CudaOpsMultiplyElementwiseEntry(const float* left, const float* right, float* out, int elementCount);
+__global__ void CudaOpsAddEntry(const float* left, const float* right, float* out, int elementCount);
+__global__ void CudaOpsScaleEntry(float* matrix, float scalar, int elementCount);
+__global__ void CudaOpsZeroEntry(float* matrix, int elementCount);
+__global__ void CudaOpsExtractHeadEntry(const float* full, float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim);
+__global__ void CudaOpsWriteHeadEntry(float* full, const float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim);
+__global__ void CudaOpsCausalMaskEntry(float* scores, int sequenceLength);
+__global__ void CudaOpsSoftmaxEntry(const float* logits, float* out, int rowCount, int columnCount);
+__global__ void CudaOpsRotaryRotateEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, const float* cosTable, const float* sinTable);
 #endif
 
 #endif // CUDAOPS_HPP

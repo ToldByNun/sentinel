@@ -66,11 +66,11 @@ public:
     /// <summary>synchronize then return host copy</summary>
     Matrix download() const;
 
-    /// <summary>C = A * B entirely on device no host copies</summary>
-    static void multiplyInto(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& out);
+    /// <summary>C = op(A) * op(B) entirely on device no host copies</summary>
+    static void multiplyInto(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& out, bool transposeLeft = false, bool transposeRight = false);
 
-    /// <summary>C = A * B on device measuring kernel time with cuda events</summary>
-    static void multiplyIntoTimed(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& out, double& kernelMilliseconds);
+    /// <summary>C = op(A) * op(B) on device measuring kernel time with cuda events</summary>
+    static void multiplyIntoTimed(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& out, double& kernelMilliseconds, bool transposeLeft = false, bool transposeRight = false);
 };
 
 /// <summary>split timings for one host driven multiply</summary>
@@ -122,6 +122,9 @@ private:
     friend class CudaMatrix;
     friend class CudaOps;
     friend class CudaFeedForward;
+    friend class CudaRMSNorm;
+    friend class CudaCausalSelfAttention;
+    friend class CudaTransformerBlock;
 
     static constexpr int tileSize = 16;
 
@@ -135,22 +138,22 @@ private:
     static float maximumAbsoluteDifference(const Matrix& left, const Matrix& right);
 
     /// <summary>launch shared memory matmul optionally filling kernelMilliseconds</summary>
-    static void launchSharedMemoryMatmul(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, double* kernelMilliseconds);
+    static void launchSharedMemoryMatmul(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds);
 
     /// <summary>grow owned buffers then copy launch and copy back optionally filling timing</summary>
     void multiplyIntoInternal(const Matrix& left, const Matrix& right, Matrix& out, CudaMatmulTiming* timing);
 
 #ifdef __CUDACC__
     /// <summary>device body for shared memory tiled matmul CUDA forbids __global__ members</summary>
-    __device__ static void runSharedMemoryMatmul(const float* left, const float* right, float* out, int rowCount, int columnCount, int sharedCount);
+    __device__ static void runSharedMemoryMatmul(const float* left, const float* right, float* out, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight);
 
-    friend __global__ void CudaMatmulSharedMemoryEntry(const float* left, const float* right, float* out, int rowCount, int columnCount, int sharedCount);
+    friend __global__ void CudaMatmulSharedMemoryEntry(const float* left, const float* right, float* out, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight);
 #endif
 };
 
 #ifdef __CUDACC__
 /// <summary>CUDA language requires a free __global__ entry trampoline into CudaMatmul</summary>
-__global__ void CudaMatmulSharedMemoryEntry(const float* left, const float* right, float* out, int rowCount, int columnCount, int sharedCount);
+__global__ void CudaMatmulSharedMemoryEntry(const float* left, const float* right, float* out, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight);
 #endif
 
 #endif // CUDAMATMUL_HPP

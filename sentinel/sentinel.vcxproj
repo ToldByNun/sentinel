@@ -44,6 +44,9 @@
     <CudaCompile Include="NeuralNet\Cuda\CudaMatmul.cu" />
     <CudaCompile Include="NeuralNet\Cuda\CudaOps.cu" />
     <CudaCompile Include="NeuralNet\Cuda\CudaFeedForward.cu" />
+    <CudaCompile Include="NeuralNet\Cuda\CudaRMSNorm.cu" />
+    <CudaCompile Include="NeuralNet\Cuda\CudaCausalSelfAttention.cu" />
+    <CudaCompile Include="NeuralNet\Cuda\CudaTransformerBlock.cu" />
     <ClCompile Include="NeuralNet\Network\LanguageModel.cpp" />
     <ClCompile Include="NeuralNet\Network\Sequential.cpp" />
     <ClCompile Include="NeuralNet\Optimizers\Adam.cpp" />
@@ -76,6 +79,9 @@
     <ClInclude Include="NeuralNet\Cuda\CudaMatmul.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaOps.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaFeedForward.hpp" />
+    <ClInclude Include="NeuralNet\Cuda\CudaRMSNorm.hpp" />
+    <ClInclude Include="NeuralNet\Cuda\CudaCausalSelfAttention.hpp" />
+    <ClInclude Include="NeuralNet\Cuda\CudaTransformerBlock.hpp" />
     <ClInclude Include="NeuralNet\Network\LanguageModel.hpp" />
     <ClInclude Include="NeuralNet\Network\Sequential.hpp" />
     <ClInclude Include="NeuralNet\Optimizers\Adam.hpp" />

@@ -1,5 +1,8 @@
 #include "NeuralNet/Cuda/CudaFeedForward.hpp"
 #include "NeuralNet/Cuda/CudaMatmul.hpp"
+#include "NeuralNet/Cuda/CudaRMSNorm.hpp"
+#include "NeuralNet/Cuda/CudaCausalSelfAttention.hpp"
+#include "NeuralNet/Cuda/CudaTransformerBlock.hpp"
 #include "NeuralNet/Tokenizer/BPETokenizer.hpp"
 #include "NeuralNet/Data/DatasetSplit.hpp"
 #include "NeuralNet/Data/JsonlLoader.hpp"
@@ -23,9 +26,9 @@
 int main() {
     const std::string samplePath = "../SERA-Data/sera_sample.jsonl";
     const size_t maximumTextCharacters = 400;
-    const size_t maximumTokenCount = 128;
+    const size_t maximumTokenCount = 64;
     const float trainRatio = 0.8f;
-    const int embeddingDim = 128;
+    const int embeddingDim = 64;
     const int maximumPositionCount = static_cast<int>(maximumTokenCount);
 
 #if defined(_OPENMP)
@@ -36,6 +39,9 @@ int main() {
 
     CudaMatmul::runSmokeDemo(512);
     CudaFeedForward::runSmokeDemo(128, 64);
+    CudaRMSNorm::runSmokeDemo(128, 64);
+    CudaCausalSelfAttention::runSmokeDemo(64, 4, 32, 64);
+    CudaTransformerBlock::runSmokeDemo(64, 4, 32, 64);
 
     // 0 = load entire jsonl (sera_sample has 10000 rows)
     std::vector<JsonlRow> rows = JsonlLoader::load(samplePath, 0);
