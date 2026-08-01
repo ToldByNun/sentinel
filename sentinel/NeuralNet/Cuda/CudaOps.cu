@@ -127,6 +127,22 @@ __device__ void CudaOps::runRotaryRotateInPlace(float* tensor, int headCount, in
     }
 }
 
+__device__ void CudaOps::runEmbeddingGatherInto(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize) {
+    const int elementCount = embeddingDim * tokenCount;
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+
+    const int dimensionIndex = index / tokenCount;
+    const int tokenIndex = index - dimensionIndex * tokenCount;
+    const int tokenId = tokenIds[tokenIndex];
+    if (tokenId < 0 || tokenId >= vocabularySize) {
+        out[index] = 0.0f;
+        return;
+    }
+
+    out[index] = weight[tokenId * embeddingDim + dimensionIndex];
+}
+
 __global__ void CudaOpsBroadcastBiasAddEntry(float* product, const float* bias, int rowCount, int columnCount) {
     CudaOps::runBroadcastBiasAddInPlace(product, bias, rowCount, columnCount);
 }
@@ -169,6 +185,10 @@ __global__ void CudaOpsSoftmaxEntry(const float* logits, float* out, int rowCoun
 
 __global__ void CudaOpsRotaryRotateEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, const float* cosTable, const float* sinTable) {
     CudaOps::runRotaryRotateInPlace(tensor, headCount, headDimension, pairCount, sequenceLength, cosTable, sinTable);
+}
+
+__global__ void CudaOpsEmbeddingGatherEntry(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize) {
+    CudaOps::runEmbeddingGatherInto(weight, tokenIds, out, embeddingDim, tokenCount, vocabularySize);
 }
 
 void CudaOps::broadcastBiasAddInPlace(CudaMatrix& product, const CudaMatrix& bias) {
@@ -301,4 +321,21 @@ void CudaOps::rotaryRotateInPlace(CudaMatrix& tensor, int headCount, int headDim
     const int blockCount = (sequenceLength + CudaOps::threadCount - 1) / CudaOps::threadCount;
     CudaOpsRotaryRotateEntry<<<blockCount, CudaOps::threadCount>>>(tensor.buffer.deviceData, headCount, headDimension, pairCount, sequenceLength, cosTable.buffer.deviceData, sinTable.buffer.deviceData);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsRotaryRotateEntry launch");
+}
+
+void CudaOps::embeddingGatherInto(const CudaMatrix& weight, const CudaIntBuffer& tokenIds, size_t tokenCount, CudaMatrix& out) {
+    if (weight.empty()) throw std::invalid_argument("CudaOps::embeddingGatherInto empty weight");
+    if (tokenCount == 0) throw std::invalid_argument("CudaOps::embeddingGatherInto empty tokenCount");
+    if (tokenIds.deviceData == nullptr) throw std::invalid_argument("CudaOps::embeddingGatherInto empty tokenIds");
+    if (tokenCount > tokenIds.capacityCount) throw std::invalid_argument("CudaOps::embeddingGatherInto tokenCount exceeds capacity");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::embeddingGatherInto no CUDA device");
+
+    const int vocabularySize = static_cast<int>(weight.rows);
+    const int embeddingDim = static_cast<int>(weight.cols);
+    out.ensureSize(static_cast<size_t>(embeddingDim), tokenCount);
+
+    const int elementCount = embeddingDim * static_cast<int>(tokenCount);
+    const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsEmbeddingGatherEntry<<<blockCount, CudaOps::threadCount>>>(weight.buffer.deviceData, tokenIds.deviceData, out.buffer.deviceData, embeddingDim, static_cast<int>(tokenCount), vocabularySize);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsEmbeddingGatherEntry launch");
 }

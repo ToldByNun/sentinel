@@ -32,6 +32,30 @@ public:
     void free();
 };
 
+/// <summary>reusable device int buffer grows only when capacity is too small</summary>
+class CudaIntBuffer {
+public:
+    int* deviceData;
+    size_t capacityCount;
+
+    CudaIntBuffer();
+    ~CudaIntBuffer();
+
+    CudaIntBuffer(const CudaIntBuffer&) = delete;
+    CudaIntBuffer& operator=(const CudaIntBuffer&) = delete;
+    CudaIntBuffer(CudaIntBuffer&& other) noexcept;
+    CudaIntBuffer& operator=(CudaIntBuffer&& other) noexcept;
+
+    /// <summary>allocate when capacityCount is below requiredCount</summary>
+    void ensureCapacity(size_t requiredCount);
+
+    /// <summary>host to device copy into already capacious buffer</summary>
+    void copyFromHost(const int* hostData, size_t count);
+
+    /// <summary>release device memory</summary>
+    void free();
+};
+
 /// <summary>row major float matrix that lives on the device</summary>
 class CudaMatrix {
 public:
@@ -119,12 +143,14 @@ public:
 
 private:
     friend class CudaDeviceBuffer;
+    friend class CudaIntBuffer;
     friend class CudaMatrix;
     friend class CudaOps;
     friend class CudaFeedForward;
     friend class CudaRMSNorm;
     friend class CudaCausalSelfAttention;
     friend class CudaTransformerBlock;
+    friend class CudaLanguageModel;
 
     static constexpr int tileSize = 16;
 

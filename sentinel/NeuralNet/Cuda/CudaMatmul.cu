@@ -69,6 +69,57 @@ void CudaDeviceBuffer::free() {
     this->capacityBytes = 0;
 }
 
+CudaIntBuffer::CudaIntBuffer() : deviceData(nullptr), capacityCount(0) {}
+
+CudaIntBuffer::~CudaIntBuffer() {
+    this->free();
+}
+
+CudaIntBuffer::CudaIntBuffer(CudaIntBuffer&& other) noexcept : deviceData(other.deviceData), capacityCount(other.capacityCount) {
+    other.deviceData = nullptr;
+    other.capacityCount = 0;
+}
+
+CudaIntBuffer& CudaIntBuffer::operator=(CudaIntBuffer&& other) noexcept {
+    if (this == &other) return *this;
+
+    this->free();
+    this->deviceData = other.deviceData;
+    this->capacityCount = other.capacityCount;
+    other.deviceData = nullptr;
+    other.capacityCount = 0;
+    return *this;
+}
+
+void CudaIntBuffer::ensureCapacity(size_t requiredCount) {
+    if (requiredCount == 0) return;
+    if (this->capacityCount >= requiredCount) return;
+
+    this->free();
+
+    int* allocated = nullptr;
+    CudaMatmul::throwIfCudaFailed(cudaMalloc(&allocated, requiredCount * sizeof(int)), "cudaMalloc ints");
+    this->deviceData = allocated;
+    this->capacityCount = requiredCount;
+}
+
+void CudaIntBuffer::copyFromHost(const int* hostData, size_t count) {
+    if (hostData == nullptr) throw std::invalid_argument("CudaIntBuffer::copyFromHost null hostData");
+    if (count == 0) return;
+    if (this->deviceData == nullptr) throw std::logic_error("CudaIntBuffer::copyFromHost empty buffer");
+    if (count > this->capacityCount) throw std::invalid_argument("CudaIntBuffer::copyFromHost exceeds capacity");
+
+    CudaMatmul::throwIfCudaFailed(cudaMemcpy(this->deviceData, hostData, count * sizeof(int), cudaMemcpyHostToDevice), "cudaMemcpy ints host to device");
+}
+
+void CudaIntBuffer::free() {
+    if (this->deviceData == nullptr) return;
+
+    cudaFree(this->deviceData);
+    this->deviceData = nullptr;
+    this->capacityCount = 0;
+}
+
 CudaMatrix::CudaMatrix() : rows(0), cols(0) {}
 
 CudaMatrix::CudaMatrix(CudaMatrix&& other) noexcept : rows(other.rows), cols(other.cols), buffer(std::move(other.buffer)) {

@@ -39,6 +39,9 @@ public:
     /// <summary>RoPE rotate Q or K in place using host built cos sin tables on device</summary>
     static void rotaryRotateInPlace(CudaMatrix& tensor, int headCount, int headDimension, int pairCount, const CudaMatrix& cosTable, const CudaMatrix& sinTable);
 
+    /// <summary>gather embedding rows into embedDim x tokenCount matrix</summary>
+    static void embeddingGatherInto(const CudaMatrix& weight, const CudaIntBuffer& tokenIds, size_t tokenCount, CudaMatrix& out);
+
 private:
     static constexpr int threadCount = 256;
 
@@ -54,6 +57,7 @@ private:
     __device__ static void runApplyCausalMaskInPlace(float* scores, int sequenceLength);
     __device__ static void runSoftmaxInto(const float* logits, float* out, int rowCount, int columnCount);
     __device__ static void runRotaryRotateInPlace(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, const float* cosTable, const float* sinTable);
+    __device__ static void runEmbeddingGatherInto(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);
 
     friend __global__ void CudaOpsBroadcastBiasAddEntry(float* product, const float* bias, int rowCount, int columnCount);
     friend __global__ void CudaOpsSiluEntry(const float* input, float* out, int elementCount);
@@ -66,6 +70,7 @@ private:
     friend __global__ void CudaOpsCausalMaskEntry(float* scores, int sequenceLength);
     friend __global__ void CudaOpsSoftmaxEntry(const float* logits, float* out, int rowCount, int columnCount);
     friend __global__ void CudaOpsRotaryRotateEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, const float* cosTable, const float* sinTable);
+    friend __global__ void CudaOpsEmbeddingGatherEntry(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);
 #endif
 };
 
@@ -81,6 +86,7 @@ __global__ void CudaOpsWriteHeadEntry(float* full, const float* head, int headIn
 __global__ void CudaOpsCausalMaskEntry(float* scores, int sequenceLength);
 __global__ void CudaOpsSoftmaxEntry(const float* logits, float* out, int rowCount, int columnCount);
 __global__ void CudaOpsRotaryRotateEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, const float* cosTable, const float* sinTable);
+__global__ void CudaOpsEmbeddingGatherEntry(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);
 #endif
 
 #endif // CUDAOPS_HPP
