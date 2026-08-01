@@ -24,6 +24,8 @@ public:
     int globalTokenCount;
     int activeSegmentLength;
     int activePackCount;
+    bool preferFlashAttention;
+    bool usedFlashAttention;
 
     CudaMatrix query;
     CudaMatrix key;
@@ -58,6 +60,7 @@ public:
     CudaMatrix keyHeadGradient;
     CudaMatrix temp;
     std::vector<CudaMatrix> cachedHeadProbabilities;
+    std::vector<CudaMatrix> flashLogSumExp;
 
     CudaCausalSelfAttention();
 
@@ -91,10 +94,14 @@ public:
     /// <summary>compare CPU sparse window+global forward vs CUDA</summary>
     static void runSparseSmokeDemo(int embeddingDim = 32, int headCount = 2, int sequenceLength = 16, int maximumPositionCount = 32, int windowSize = 4, int globalTokenCount = 2);
 
+    /// <summary>compare flash vs materialize dense causal forward and backward</summary>
+    static void runFlashParitySmokeDemo(int embeddingDim = 64, int headCount = 4, int sequenceLength = 48, int maximumPositionCount = 64);
+
 private:
     void projectAndRotate(const CudaMatrix& input, int positionOffset, int segmentLength = 0);
     void attendFullSequence(CudaMatrix& out, int segmentLength = -1);
     void attendCachedQuery(const CudaKvCache& cache, CudaMatrix& out);
+    bool canUseFlashAttention(int segmentLength) const;
 };
 
 #endif // CUDACAUSALSELFATTENTION_HPP

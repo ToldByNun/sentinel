@@ -1,5 +1,6 @@
 #include "CudaCausalSelfAttention.hpp"
 
+#include "CudaFlashAttention.hpp"
 #include "CudaOps.hpp"
 #include "../Utils/SmokeLog.hpp"
 
@@ -11,7 +12,15 @@
 #include <stdexcept>
 
 CudaCausalSelfAttention::CudaCausalSelfAttention()
-    : headCount(0), headDimension(0), pairCount(0), maximumPositionCount(0), windowSize(0), globalTokenCount(0), activeSegmentLength(0), activePackCount(0) {}
+    : headCount(0), headDimension(0), pairCount(0), maximumPositionCount(0), windowSize(0), globalTokenCount(0), activeSegmentLength(0), activePackCount(0), preferFlashAttention(true), usedFlashAttention(false) {}
+
+bool CudaCausalSelfAttention::canUseFlashAttention(int segmentLength) const {
+    if (!this->preferFlashAttention) return false;
+    if (this->headDimension <= 0 || this->headDimension > CudaFlashAttention::maxHeadDimension) return false;
+    if (segmentLength <= 0) return false;
+    if (this->windowSize < segmentLength) return false;
+    return true;
+}
 
 void CudaCausalSelfAttention::uploadFrom(const CausalSelfAttention& host) {
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaCausalSelfAttention::uploadFrom no CUDA device");
@@ -62,9 +71,52 @@ void CudaCausalSelfAttention::attendFullSequence(CudaMatrix& out, int segmentLen
     if (segmentLength <= 0) segmentLength = static_cast<int>(sequenceLength);
     const int packCount = static_cast<int>(sequenceLength) / segmentLength;
     this->activePackCount = packCount;
+    this->usedFlashAttention = false;
 
     this->attended.ensureSize(this->query.rows, sequenceLength);
     CudaOps::zeroInPlace(this->attended);
+
+    if (this->canUseFlashAttention(segmentLength)) {
+        this->usedFlashAttention = true;
+        const size_t logSumExpCount = static_cast<size_t>(this->headCount) * static_cast<size_t>(packCount);
+        if (this->flashLogSumExp.size() != logSumExpCount)
+            this->flashLogSumExp.resize(logSumExpCount);
+
+        if (packCount <= 1) {
+            for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
+                CudaOps::extractHeadInto(this->query, headIndex, this->headDimension, this->queryHead);
+                CudaOps::extractHeadInto(this->key, headIndex, this->headDimension, this->keyHead);
+                CudaOps::extractHeadInto(this->value, headIndex, this->headDimension, this->valueHead);
+                CudaFlashAttention::forward(this->queryHead, this->keyHead, this->valueHead, this->attendedHead, this->flashLogSumExp[static_cast<size_t>(headIndex)], scale, true);
+                CudaOps::writeHead(this->attended, headIndex, this->headDimension, this->attendedHead);
+            }
+            CudaMatrix::multiplyInto(this->outputWeight, this->attended, out);
+            return;
+        }
+
+        for (int segmentIndex = 0; segmentIndex < packCount; ++segmentIndex) {
+            const int columnStart = segmentIndex * segmentLength;
+            CudaOps::extractColumnsInto(this->query, columnStart, segmentLength, this->querySegment);
+            CudaOps::extractColumnsInto(this->key, columnStart, segmentLength, this->keySegment);
+            CudaOps::extractColumnsInto(this->value, columnStart, segmentLength, this->valueSegment);
+            this->attendedSegment.ensureSize(this->query.rows, static_cast<size_t>(segmentLength));
+            CudaOps::zeroInPlace(this->attendedSegment);
+
+            for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
+                CudaOps::extractHeadInto(this->querySegment, headIndex, this->headDimension, this->queryHead);
+                CudaOps::extractHeadInto(this->keySegment, headIndex, this->headDimension, this->keyHead);
+                CudaOps::extractHeadInto(this->valueSegment, headIndex, this->headDimension, this->valueHead);
+                const size_t logIndex = static_cast<size_t>(headIndex) * static_cast<size_t>(packCount) + static_cast<size_t>(segmentIndex);
+                CudaFlashAttention::forward(this->queryHead, this->keyHead, this->valueHead, this->attendedHead, this->flashLogSumExp[logIndex], scale, true);
+                CudaOps::writeHead(this->attendedSegment, headIndex, this->headDimension, this->attendedHead);
+            }
+
+            CudaOps::writeColumnsInto(this->attended, columnStart, this->attendedSegment);
+        }
+
+        CudaMatrix::multiplyInto(this->outputWeight, this->attended, out);
+        return;
+    }
 
     // prefer one dense scores GEMM when width is modest; segment loop for wide packs
     const bool useDensePack = packCount <= 1 || static_cast<int>(sequenceLength) <= 384;
@@ -171,11 +223,18 @@ void CudaCausalSelfAttention::backward(const CudaMatrix& outputGradient, CudaMat
 
     const int segmentLength = this->activeSegmentLength > 0 ? this->activeSegmentLength : static_cast<int>(this->query.cols);
     const int packCount = this->activePackCount > 0 ? this->activePackCount : 1;
-    const size_t expectedCacheCount = packCount <= 1
-        ? static_cast<size_t>(this->headCount)
-        : static_cast<size_t>(this->headCount) * static_cast<size_t>(packCount);
-    if (this->cachedHeadProbabilities.size() != expectedCacheCount)
-        throw std::invalid_argument("CudaCausalSelfAttention::backward head cache size mismatch");
+
+    if (this->usedFlashAttention) {
+        const size_t expectedLogCount = static_cast<size_t>(this->headCount) * static_cast<size_t>(packCount);
+        if (this->flashLogSumExp.size() != expectedLogCount)
+            throw std::invalid_argument("CudaCausalSelfAttention::backward flash logSumExp size mismatch");
+    } else {
+        const size_t expectedCacheCount = packCount <= 1
+            ? static_cast<size_t>(this->headCount)
+            : static_cast<size_t>(this->headCount) * static_cast<size_t>(packCount);
+        if (this->cachedHeadProbabilities.size() != expectedCacheCount)
+            throw std::invalid_argument("CudaCausalSelfAttention::backward head cache size mismatch");
+    }
 
     CudaMatrix::multiplyInto(outputGradient, this->attended, outputWeightGradient, false, true);
     CudaMatrix::multiplyInto(this->outputWeight, outputGradient, this->attendedGradient, true, false);
@@ -189,7 +248,78 @@ void CudaCausalSelfAttention::backward(const CudaMatrix& outputGradient, CudaMat
 
     const float scale = 1.0f / std::sqrt(static_cast<float>(this->headDimension));
 
-    if (packCount <= 1) {
+    if (this->usedFlashAttention) {
+        if (packCount <= 1) {
+            for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
+                CudaOps::extractHeadInto(this->attendedGradient, headIndex, this->headDimension, this->attendedHead);
+                CudaOps::extractHeadInto(this->query, headIndex, this->headDimension, this->queryHead);
+                CudaOps::extractHeadInto(this->key, headIndex, this->headDimension, this->keyHead);
+                CudaOps::extractHeadInto(this->value, headIndex, this->headDimension, this->valueHead);
+                CudaMatrix attendedOutputHead;
+                CudaOps::extractHeadInto(this->attended, headIndex, this->headDimension, attendedOutputHead);
+                CudaFlashAttention::backward(
+                    this->queryHead,
+                    this->keyHead,
+                    this->valueHead,
+                    attendedOutputHead,
+                    this->flashLogSumExp[static_cast<size_t>(headIndex)],
+                    this->attendedHead,
+                    this->queryHeadGradient,
+                    this->keyHeadGradient,
+                    this->valueHeadGradient,
+                    scale,
+                    true);
+                CudaOps::writeHead(this->queryGradient, headIndex, this->headDimension, this->queryHeadGradient);
+                CudaOps::writeHead(this->keyGradient, headIndex, this->headDimension, this->keyHeadGradient);
+                CudaOps::writeHead(this->valueGradient, headIndex, this->headDimension, this->valueHeadGradient);
+            }
+        } else {
+            for (int segmentIndex = 0; segmentIndex < packCount; ++segmentIndex) {
+                const int columnStart = segmentIndex * segmentLength;
+                CudaOps::extractColumnsInto(this->attendedGradient, columnStart, segmentLength, this->attendedGradientSegment);
+                CudaOps::extractColumnsInto(this->query, columnStart, segmentLength, this->querySegment);
+                CudaOps::extractColumnsInto(this->key, columnStart, segmentLength, this->keySegment);
+                CudaOps::extractColumnsInto(this->value, columnStart, segmentLength, this->valueSegment);
+                CudaOps::extractColumnsInto(this->attended, columnStart, segmentLength, this->attendedSegment);
+
+                this->queryGradientSegment.ensureSize(this->query.rows, static_cast<size_t>(segmentLength));
+                this->keyGradientSegment.ensureSize(this->key.rows, static_cast<size_t>(segmentLength));
+                this->valueGradientSegment.ensureSize(this->value.rows, static_cast<size_t>(segmentLength));
+                CudaOps::zeroInPlace(this->queryGradientSegment);
+                CudaOps::zeroInPlace(this->keyGradientSegment);
+                CudaOps::zeroInPlace(this->valueGradientSegment);
+
+                for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
+                    CudaOps::extractHeadInto(this->attendedGradientSegment, headIndex, this->headDimension, this->attendedHead);
+                    CudaOps::extractHeadInto(this->querySegment, headIndex, this->headDimension, this->queryHead);
+                    CudaOps::extractHeadInto(this->keySegment, headIndex, this->headDimension, this->keyHead);
+                    CudaOps::extractHeadInto(this->valueSegment, headIndex, this->headDimension, this->valueHead);
+                    CudaMatrix attendedOutputHead;
+                    CudaOps::extractHeadInto(this->attendedSegment, headIndex, this->headDimension, attendedOutputHead);
+                    const size_t logIndex = static_cast<size_t>(headIndex) * static_cast<size_t>(packCount) + static_cast<size_t>(segmentIndex);
+                    CudaFlashAttention::backward(
+                        this->queryHead,
+                        this->keyHead,
+                        this->valueHead,
+                        attendedOutputHead,
+                        this->flashLogSumExp[logIndex],
+                        this->attendedHead,
+                        this->queryHeadGradient,
+                        this->keyHeadGradient,
+                        this->valueHeadGradient,
+                        scale,
+                        true);
+                    CudaOps::writeHead(this->queryGradientSegment, headIndex, this->headDimension, this->queryHeadGradient);
+                    CudaOps::writeHead(this->keyGradientSegment, headIndex, this->headDimension, this->keyHeadGradient);
+                    CudaOps::writeHead(this->valueGradientSegment, headIndex, this->headDimension, this->valueHeadGradient);
+                }
+
+                CudaOps::addColumnsInPlace(this->queryGradient, columnStart, this->queryGradientSegment);
+                CudaOps::addColumnsInPlace(this->keyGradient, columnStart, this->keyGradientSegment);
+                CudaOps::addColumnsInPlace(this->valueGradient, columnStart, this->valueGradientSegment);
+            }
+        }
+    } else if (packCount <= 1) {
         for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
             CudaOps::extractHeadInto(this->attendedGradient, headIndex, this->headDimension, this->attendedHead);
             CudaOps::extractHeadInto(this->query, headIndex, this->headDimension, this->queryHead);
@@ -531,4 +661,83 @@ void CudaCausalSelfAttention::runSparseSmokeDemo(int embeddingDim, int headCount
 
     SmokeLog::result("Sparse Attn S4", "embed=%d heads=%d seq=%d W=%d G=%d  fwd=%.2e  kv=%.2e",
         embeddingDim, headCount, sequenceLength, windowSize, globalTokenCount, forwardDifference, decodeDifference);
+}
+
+void CudaCausalSelfAttention::runFlashParitySmokeDemo(int embeddingDim, int headCount, int sequenceLength, int maximumPositionCount) {
+    if (!CudaMatmul::isAvailable()) {
+        SmokeLog::skip("Attention flash");
+        return;
+    }
+    if (embeddingDim <= 0 || headCount <= 0 || sequenceLength <= 0 || maximumPositionCount < sequenceLength)
+        throw std::invalid_argument("CudaCausalSelfAttention::runFlashParitySmokeDemo invalid dims");
+    if (embeddingDim / headCount > CudaFlashAttention::maxHeadDimension)
+        throw std::invalid_argument("CudaCausalSelfAttention::runFlashParitySmokeDemo headDim exceeds flash max");
+
+    CausalSelfAttention host = CausalSelfAttention::create(embeddingDim, headCount, maximumPositionCount, 41u, maximumPositionCount, 0);
+    Matrix hostInput(static_cast<size_t>(embeddingDim), static_cast<size_t>(sequenceLength), 0.0f);
+    Matrix hostOutputGradient(static_cast<size_t>(embeddingDim), static_cast<size_t>(sequenceLength), 0.0f);
+    unsigned state = 271u;
+    for (size_t index = 0; index < hostInput.data.size(); ++index) {
+        state = state * 1664525u + 1013904223u;
+        hostInput.data[index] = (static_cast<float>(state >> 8) / 16777216.0f) * 2.0f - 1.0f;
+        state = state * 1664525u + 1013904223u;
+        hostOutputGradient.data[index] = (static_cast<float>(state >> 8) / 16777216.0f) * 2.0f - 1.0f;
+    }
+
+    CudaCausalSelfAttention flashDevice = CudaCausalSelfAttention::createFrom(host);
+    CudaCausalSelfAttention denseDevice = CudaCausalSelfAttention::createFrom(host);
+    flashDevice.preferFlashAttention = true;
+    denseDevice.preferFlashAttention = false;
+
+    CudaMatrix deviceInput;
+    deviceInput.upload(hostInput);
+    CudaMatrix flashOutput;
+    CudaMatrix denseOutput;
+    flashDevice.forward(deviceInput, flashOutput);
+    denseDevice.forward(deviceInput, denseOutput);
+    if (!flashDevice.usedFlashAttention)
+        throw std::logic_error("CudaCausalSelfAttention::runFlashParitySmokeDemo flash path not selected");
+    if (denseDevice.usedFlashAttention)
+        throw std::logic_error("CudaCausalSelfAttention::runFlashParitySmokeDemo dense path unexpectedly used flash");
+
+    Matrix flashHostOutput = flashOutput.download();
+    Matrix denseHostOutput = denseOutput.download();
+    float forwardDifference = 0.0f;
+    for (size_t index = 0; index < flashHostOutput.data.size(); ++index)
+        forwardDifference = (std::max)(forwardDifference, std::fabs(flashHostOutput.data[index] - denseHostOutput.data[index]));
+
+    CudaMatrix deviceOutputGradient;
+    deviceOutputGradient.upload(hostOutputGradient);
+    CudaMatrix flashInputGrad;
+    CudaMatrix denseInputGrad;
+    CudaMatrix flashQueryGrad;
+    CudaMatrix denseQueryGrad;
+    CudaMatrix flashKeyGrad;
+    CudaMatrix denseKeyGrad;
+    CudaMatrix flashValueGrad;
+    CudaMatrix denseValueGrad;
+    CudaMatrix flashOutputWeightGrad;
+    CudaMatrix denseOutputWeightGrad;
+    flashDevice.backward(deviceOutputGradient, flashInputGrad, flashQueryGrad, flashKeyGrad, flashValueGrad, flashOutputWeightGrad);
+    denseDevice.backward(deviceOutputGradient, denseInputGrad, denseQueryGrad, denseKeyGrad, denseValueGrad, denseOutputWeightGrad);
+    CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaCausalSelfAttention flash parity synchronize");
+
+    auto maxAbsDiff = [](const CudaMatrix& left, const CudaMatrix& right) -> float {
+        Matrix leftHost = left.download();
+        Matrix rightHost = right.download();
+        float maximumDifference = 0.0f;
+        for (size_t index = 0; index < leftHost.data.size(); ++index)
+            maximumDifference = (std::max)(maximumDifference, std::fabs(leftHost.data[index] - rightHost.data[index]));
+        return maximumDifference;
+    };
+
+    const float inputGradDiff = maxAbsDiff(flashInputGrad, denseInputGrad);
+    const float queryGradDiff = maxAbsDiff(flashQueryGrad, denseQueryGrad);
+    const float keyGradDiff = maxAbsDiff(flashKeyGrad, denseKeyGrad);
+    const float valueGradDiff = maxAbsDiff(flashValueGrad, denseValueGrad);
+    const float outputWeightGradDiff = maxAbsDiff(flashOutputWeightGrad, denseOutputWeightGrad);
+    const float backwardDifference = (std::max)({ inputGradDiff, queryGradDiff, keyGradDiff, valueGradDiff, outputWeightGradDiff });
+
+    SmokeLog::result("Attention flash", "embed=%d heads=%d seq=%d  fwdDiff=%.2e  bwdDiff=%.2e",
+        embeddingDim, headCount, sequenceLength, forwardDifference, backwardDifference);
 }

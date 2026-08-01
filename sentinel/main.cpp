@@ -63,6 +63,7 @@ int main() {
     CausalSelfAttention::runSparseComputeSmokeDemo(32, 2, 16, 32, 4, 2);
     CudaCausalSelfAttention::runSmokeDemo(64, 4, 32, 64);
     CudaCausalSelfAttention::runBackwardSmokeDemo(32, 2, 16, 32);
+    CudaCausalSelfAttention::runFlashParitySmokeDemo(64, 4, 48, 64);
     CudaCausalSelfAttention::runKvCacheSmokeDemo(64, 4, 32, 64);
     CudaCausalSelfAttention::runSparseSmokeDemo(32, 2, 16, 32, 4, 2);
 

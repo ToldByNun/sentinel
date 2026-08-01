@@ -31,6 +31,7 @@ C:\Program Files (x86)\Windows Kits\10\Include\10.0.28000.0\ucrt\sys\types.h
 C:\Program Files (x86)\Windows Kits\10\Include\10.0.28000.0\ucrt\time.h
 C:\Program Files (x86)\Windows Kits\10\Include\10.0.28000.0\ucrt\wchar.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\ammintrin.h
+C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\cctype
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\cfloat
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\climits
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\cmath
@@ -62,6 +63,7 @@ C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\smmintrin.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\stdexcept
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\stdint.h
+C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\string
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\tmmintrin.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\type_traits
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\use_ansi.h
@@ -132,4 +134,5 @@ C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\vector_function
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\vector_types.h
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaFlashAttention.hpp
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaMatmul.hpp
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaOps.hpp
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Math\Matrix.hpp
