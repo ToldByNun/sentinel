@@ -1,12 +1,15 @@
 #include "LanguageModel.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
 #include "../Activations/Softmax.hpp"
+#include "../Cuda/CudaLanguageModel.hpp"
+#include "../Cuda/CudaMatmul.hpp"
 #include "../Initializers/UniformInit.hpp"
 #include "../Losses/CrossEntropy.hpp"
 
@@ -69,6 +72,33 @@ LanguageModel::LanguageModel(int vocabularySize, int embeddingDim, int maximumPo
     this->projectionBiasState = AdamState::zerosLike(this->outputProjection.bias);
 }
 
+LanguageModel::~LanguageModel() = default;
+
+LanguageModel::LanguageModel(LanguageModel&&) noexcept = default;
+
+LanguageModel& LanguageModel::operator=(LanguageModel&&) noexcept = default;
+
+void LanguageModel::enableCuda() {
+    if (!CudaMatmul::isAvailable()) {
+        std::cout << "LanguageModel::enableCuda: no CUDA device\n";
+        this->device.reset();
+        return;
+    }
+
+    this->device = std::make_unique<CudaLanguageModel>();
+    this->device->uploadFrom(*this);
+    std::cout << "LanguageModel::enableCuda: device mirror active\n";
+}
+
+bool LanguageModel::cudaEnabled() const {
+    return this->device != nullptr;
+}
+
+void LanguageModel::syncDevice() {
+    if (this->device == nullptr) return;
+    this->device->uploadFrom(*this);
+}
+
 Matrix LanguageModel::sumColumns(const Matrix& gradient) {
     Matrix biasGradient(gradient.rows, 1, 0.0f);
     for (size_t row = 0; row < gradient.rows; ++row) {
@@ -109,18 +139,21 @@ Matrix LanguageModel::forwardLocal(const std::vector<int>& tokenIds, LanguageMod
 }
 
 Matrix LanguageModel::forward(const std::vector<int>& tokenIds) {
+    if (this->device != nullptr)
+        return this->device->forward(tokenIds);
+
     LanguageModelCache cache;
     return this->forwardLocal(tokenIds, cache);
 }
 
 float LanguageModel::exampleLoss(const LanguageModelExample& example) {
-    LanguageModelCache cache;
-    Matrix logits = this->forwardLocal(example.inputTokenIds, cache);
-    Softmax::applyInto(logits, cache.probabilities);
+    Matrix logits = this->forward(example.inputTokenIds);
+    Matrix probabilities;
+    Softmax::applyInto(logits, probabilities);
     Matrix target = example.targetOneHot.empty()
         ? LanguageModelDataset::makeOneHotSequence(example.targetTokenIds, this->tokenEmbedding.vocabSize())
         : example.targetOneHot;
-    return CrossEntropy::loss(cache.probabilities, target);
+    return CrossEntropy::loss(probabilities, target);
 }
 
 float LanguageModel::averageLoss(const LanguageModelDataset& dataset) {
@@ -128,6 +161,12 @@ float LanguageModel::averageLoss(const LanguageModelDataset& dataset) {
 
     float total = 0.0f;
     const int exampleCount = static_cast<int>(dataset.examples.size());
+
+    if (this->device != nullptr) {
+        for (int index = 0; index < exampleCount; ++index)
+            total += this->exampleLoss(dataset.examples[static_cast<size_t>(index)]);
+        return total / static_cast<float>(dataset.size());
+    }
 
 #if defined(_OPENMP)
     #pragma omp parallel for reduction(+:total) schedule(dynamic, 4)
@@ -175,6 +214,7 @@ void LanguageModel::applyGradients(const LanguageModelGradients& gradients) {
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex)
         this->blocks[blockIndex].applyGradients(this->optimizer, gradients.blocks[blockIndex]);
     this->optimizer.update(this->tokenEmbedding.weight, this->tokenEmbeddingState, gradients.tokenEmbedding);
+    this->syncDevice();
 }
 
 void LanguageModel::train(const LanguageModelDataset& dataset, int epochs, int logEveryEpochs) {

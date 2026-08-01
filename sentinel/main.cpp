@@ -12,6 +12,9 @@
 #include "NeuralNet/Optimizers/Adam.hpp"
 #include "NeuralNet/Utils/TextUtil.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -25,6 +28,8 @@
 /// token embed + RoPE multi head attention + RMSNorm + SwiGLU FFN + vocab projection
 /// </summary>
 int main() {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+
     const std::string samplePath = "../SERA-Data/sera_sample.jsonl";
     const size_t maximumTextCharacters = 400;
     const size_t maximumTokenCount = 64;
@@ -82,7 +87,20 @@ int main() {
 
     LanguageModel model(tokenizer.vocabSize(), embeddingDim, maximumPositionCount, Adam(0.001f), 2, 4);
 
-    std::cout << "blocks: " << model.blocks.size() << " | heads: " << model.blocks[0].attention.headCount << '\n';
+    const std::vector<int>& parityTokenIds = trainDataset.examples[0].inputTokenIds;
+    Matrix cpuLogits = model.forward(parityTokenIds);
+
+    model.enableCuda();
+    std::cout << "blocks: " << model.blocks.size() << " | heads: " << model.blocks[0].attention.headCount
+              << " | cuda: " << (model.cudaEnabled() ? "on" : "off") << '\n';
+
+    if (model.cudaEnabled()) {
+        Matrix deviceLogits = model.forward(parityTokenIds);
+        float maximumDifference = 0.0f;
+        for (size_t index = 0; index < cpuLogits.data.size(); ++index)
+            maximumDifference = (std::max)(maximumDifference, std::fabs(cpuLogits.data[index] - deviceLogits.data[index]));
+        std::cout << "CUDA framework parity (CPU vs enableCuda forward): maxAbsDiff=" << maximumDifference << '\n';
+    }
 
     model.train(trainDataset, testDataset, 5, 1, 64);
 

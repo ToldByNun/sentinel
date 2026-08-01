@@ -9,8 +9,10 @@
 #include "../Math/Matrix.hpp"
 #include "../Optimizers/Adam.hpp"
 
+#include <memory>
 #include <vector>
 
+class CudaLanguageModel;
 class LanguageModel;
 
 /// <summary>thread local caches for one LM forward/backward</summary>
@@ -47,6 +49,7 @@ public:
 /// <summary>
 /// causal LM with stacked pre-norm transformer blocks and RoPE
 /// token embed -> (RMSNorm Attn SwiGLU) x N -> final RMSNorm -> vocab
+/// optional CudaLanguageModel device mirror for inference forward
 /// </summary>
 class LanguageModel {
 public:
@@ -64,6 +67,21 @@ public:
     int maximumPositionCount;
 
     LanguageModel(int vocabularySize, int embeddingDim, int maximumPositionCount, Adam optimizer, int blockCount = 2, int headCount = 4);
+    ~LanguageModel();
+
+    LanguageModel(const LanguageModel&) = delete;
+    LanguageModel& operator=(const LanguageModel&) = delete;
+    LanguageModel(LanguageModel&&) noexcept;
+    LanguageModel& operator=(LanguageModel&&) noexcept;
+
+    /// <summary>upload host weights to optional CUDA device mirror</summary>
+    void enableCuda();
+
+    /// <summary>true when device mirror is active</summary>
+    bool cudaEnabled() const;
+
+    /// <summary>reupload host weights to device mirror if active</summary>
+    void syncDevice();
 
     /// <summary>logits vocabSize x sequenceLength</summary>
     Matrix forward(const std::vector<int>& tokenIds);
@@ -84,6 +102,8 @@ public:
     std::vector<int> generate(const std::vector<int>& promptTokenIds, int newTokenCount, float temperature = 1.0f, int topK = 40, unsigned seed = 42u);
 
 private:
+    std::unique_ptr<CudaLanguageModel> device;
+
     /// <summary>token id with highest logit in the last column</summary>
     static int argmaxLastColumn(const Matrix& logits);
 
