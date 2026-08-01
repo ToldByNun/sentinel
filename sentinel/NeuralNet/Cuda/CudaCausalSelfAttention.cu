@@ -78,40 +78,23 @@ void CudaCausalSelfAttention::attendFullSequence(CudaMatrix& out, int segmentLen
 
     if (this->canUseFlashAttention(segmentLength)) {
         this->usedFlashAttention = true;
-        const size_t logSumExpCount = static_cast<size_t>(this->headCount) * static_cast<size_t>(packCount);
-        if (this->flashLogSumExp.size() != logSumExpCount)
-            this->flashLogSumExp.resize(logSumExpCount);
-
-        if (packCount <= 1) {
-            for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
-                CudaOps::extractHeadInto(this->query, headIndex, this->headDimension, this->queryHead);
-                CudaOps::extractHeadInto(this->key, headIndex, this->headDimension, this->keyHead);
-                CudaOps::extractHeadInto(this->value, headIndex, this->headDimension, this->valueHead);
-                CudaFlashAttention::forward(this->queryHead, this->keyHead, this->valueHead, this->attendedHead, this->flashLogSumExp[static_cast<size_t>(headIndex)], scale, true);
-                CudaOps::writeHead(this->attended, headIndex, this->headDimension, this->attendedHead);
-            }
-            CudaMatrix::multiplyInto(this->outputWeight, this->attended, out);
-            return;
-        }
+        this->flashLogSumExp.ensureSize(static_cast<size_t>(this->headCount), sequenceLength);
+        this->attended.ensureSize(this->query.rows, sequenceLength);
 
         for (int segmentIndex = 0; segmentIndex < packCount; ++segmentIndex) {
             const int columnStart = segmentIndex * segmentLength;
-            CudaOps::extractColumnsInto(this->query, columnStart, segmentLength, this->querySegment);
-            CudaOps::extractColumnsInto(this->key, columnStart, segmentLength, this->keySegment);
-            CudaOps::extractColumnsInto(this->value, columnStart, segmentLength, this->valueSegment);
-            this->attendedSegment.ensureSize(this->query.rows, static_cast<size_t>(segmentLength));
-            CudaOps::zeroInPlace(this->attendedSegment);
-
-            for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
-                CudaOps::extractHeadInto(this->querySegment, headIndex, this->headDimension, this->queryHead);
-                CudaOps::extractHeadInto(this->keySegment, headIndex, this->headDimension, this->keyHead);
-                CudaOps::extractHeadInto(this->valueSegment, headIndex, this->headDimension, this->valueHead);
-                const size_t logIndex = static_cast<size_t>(headIndex) * static_cast<size_t>(packCount) + static_cast<size_t>(segmentIndex);
-                CudaFlashAttention::forward(this->queryHead, this->keyHead, this->valueHead, this->attendedHead, this->flashLogSumExp[logIndex], scale, true);
-                CudaOps::writeHead(this->attendedSegment, headIndex, this->headDimension, this->attendedHead);
-            }
-
-            CudaOps::writeColumnsInto(this->attended, columnStart, this->attendedSegment);
+            CudaFlashAttention::forwardMultiHead(
+                this->query,
+                this->key,
+                this->value,
+                this->attended,
+                this->flashLogSumExp,
+                this->headCount,
+                this->headDimension,
+                scale,
+                true,
+                columnStart,
+                segmentLength);
         }
 
         CudaMatrix::multiplyInto(this->outputWeight, this->attended, out);
@@ -225,9 +208,8 @@ void CudaCausalSelfAttention::backward(const CudaMatrix& outputGradient, CudaMat
     const int packCount = this->activePackCount > 0 ? this->activePackCount : 1;
 
     if (this->usedFlashAttention) {
-        const size_t expectedLogCount = static_cast<size_t>(this->headCount) * static_cast<size_t>(packCount);
-        if (this->flashLogSumExp.size() != expectedLogCount)
-            throw std::invalid_argument("CudaCausalSelfAttention::backward flash logSumExp size mismatch");
+        if (this->flashLogSumExp.rows != static_cast<size_t>(this->headCount) || this->flashLogSumExp.cols != this->query.cols)
+            throw std::invalid_argument("CudaCausalSelfAttention::backward flash logSumExp shape mismatch");
     } else {
         const size_t expectedCacheCount = packCount <= 1
             ? static_cast<size_t>(this->headCount)
@@ -249,75 +231,24 @@ void CudaCausalSelfAttention::backward(const CudaMatrix& outputGradient, CudaMat
     const float scale = 1.0f / std::sqrt(static_cast<float>(this->headDimension));
 
     if (this->usedFlashAttention) {
-        if (packCount <= 1) {
-            for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
-                CudaOps::extractHeadInto(this->attendedGradient, headIndex, this->headDimension, this->attendedHead);
-                CudaOps::extractHeadInto(this->query, headIndex, this->headDimension, this->queryHead);
-                CudaOps::extractHeadInto(this->key, headIndex, this->headDimension, this->keyHead);
-                CudaOps::extractHeadInto(this->value, headIndex, this->headDimension, this->valueHead);
-                CudaMatrix attendedOutputHead;
-                CudaOps::extractHeadInto(this->attended, headIndex, this->headDimension, attendedOutputHead);
-                CudaFlashAttention::backward(
-                    this->queryHead,
-                    this->keyHead,
-                    this->valueHead,
-                    attendedOutputHead,
-                    this->flashLogSumExp[static_cast<size_t>(headIndex)],
-                    this->attendedHead,
-                    this->queryHeadGradient,
-                    this->keyHeadGradient,
-                    this->valueHeadGradient,
-                    scale,
-                    true);
-                CudaOps::writeHead(this->queryGradient, headIndex, this->headDimension, this->queryHeadGradient);
-                CudaOps::writeHead(this->keyGradient, headIndex, this->headDimension, this->keyHeadGradient);
-                CudaOps::writeHead(this->valueGradient, headIndex, this->headDimension, this->valueHeadGradient);
-            }
-        } else {
-            for (int segmentIndex = 0; segmentIndex < packCount; ++segmentIndex) {
-                const int columnStart = segmentIndex * segmentLength;
-                CudaOps::extractColumnsInto(this->attendedGradient, columnStart, segmentLength, this->attendedGradientSegment);
-                CudaOps::extractColumnsInto(this->query, columnStart, segmentLength, this->querySegment);
-                CudaOps::extractColumnsInto(this->key, columnStart, segmentLength, this->keySegment);
-                CudaOps::extractColumnsInto(this->value, columnStart, segmentLength, this->valueSegment);
-                CudaOps::extractColumnsInto(this->attended, columnStart, segmentLength, this->attendedSegment);
-
-                this->queryGradientSegment.ensureSize(this->query.rows, static_cast<size_t>(segmentLength));
-                this->keyGradientSegment.ensureSize(this->key.rows, static_cast<size_t>(segmentLength));
-                this->valueGradientSegment.ensureSize(this->value.rows, static_cast<size_t>(segmentLength));
-                CudaOps::zeroInPlace(this->queryGradientSegment);
-                CudaOps::zeroInPlace(this->keyGradientSegment);
-                CudaOps::zeroInPlace(this->valueGradientSegment);
-
-                for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
-                    CudaOps::extractHeadInto(this->attendedGradientSegment, headIndex, this->headDimension, this->attendedHead);
-                    CudaOps::extractHeadInto(this->querySegment, headIndex, this->headDimension, this->queryHead);
-                    CudaOps::extractHeadInto(this->keySegment, headIndex, this->headDimension, this->keyHead);
-                    CudaOps::extractHeadInto(this->valueSegment, headIndex, this->headDimension, this->valueHead);
-                    CudaMatrix attendedOutputHead;
-                    CudaOps::extractHeadInto(this->attendedSegment, headIndex, this->headDimension, attendedOutputHead);
-                    const size_t logIndex = static_cast<size_t>(headIndex) * static_cast<size_t>(packCount) + static_cast<size_t>(segmentIndex);
-                    CudaFlashAttention::backward(
-                        this->queryHead,
-                        this->keyHead,
-                        this->valueHead,
-                        attendedOutputHead,
-                        this->flashLogSumExp[logIndex],
-                        this->attendedHead,
-                        this->queryHeadGradient,
-                        this->keyHeadGradient,
-                        this->valueHeadGradient,
-                        scale,
-                        true);
-                    CudaOps::writeHead(this->queryGradientSegment, headIndex, this->headDimension, this->queryHeadGradient);
-                    CudaOps::writeHead(this->keyGradientSegment, headIndex, this->headDimension, this->keyHeadGradient);
-                    CudaOps::writeHead(this->valueGradientSegment, headIndex, this->headDimension, this->valueHeadGradient);
-                }
-
-                CudaOps::addColumnsInPlace(this->queryGradient, columnStart, this->queryGradientSegment);
-                CudaOps::addColumnsInPlace(this->keyGradient, columnStart, this->keyGradientSegment);
-                CudaOps::addColumnsInPlace(this->valueGradient, columnStart, this->valueGradientSegment);
-            }
+        for (int segmentIndex = 0; segmentIndex < packCount; ++segmentIndex) {
+            const int columnStart = segmentIndex * segmentLength;
+            CudaFlashAttention::backwardMultiHead(
+                this->query,
+                this->key,
+                this->value,
+                this->attended,
+                this->flashLogSumExp,
+                this->attendedGradient,
+                this->queryGradient,
+                this->keyGradient,
+                this->valueGradient,
+                this->headCount,
+                this->headDimension,
+                scale,
+                true,
+                columnStart,
+                segmentLength);
         }
     } else if (packCount <= 1) {
         for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {

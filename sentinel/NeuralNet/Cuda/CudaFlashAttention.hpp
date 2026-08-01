@@ -6,7 +6,8 @@
 /// <summary>
 /// tiled causal attention with online softmax
 /// forward stores per-query log-sum-exp for backward
-/// single head tensors are headDim x sequenceLength
+/// multi-head tensors are (headCount * headDim) x sequenceLength
+/// single-head API is a thin wrapper with headCount = 1
 /// </summary>
 class CudaFlashAttention {
 public:
@@ -21,10 +22,20 @@ public:
     static void forward(const CudaMatrix& query, const CudaMatrix& key, const CudaMatrix& value, CudaMatrix& out, CudaMatrix& logSumExp, float scale, bool causal = true);
 
     /// <summary>
+    /// multi-head flash over columns [columnStart, columnStart + columnCount)
+    /// query/key/value/out are (headCount * headDim) x strideColumns
+    /// logSumExp is headCount x strideColumns
+    /// </summary>
+    static void forwardMultiHead(const CudaMatrix& query, const CudaMatrix& key, const CudaMatrix& value, CudaMatrix& out, CudaMatrix& logSumExp, int headCount, int headDimension, float scale, bool causal = true, int columnStart = 0, int columnCount = 0);
+
+    /// <summary>
     /// gradients dQ dK dV from dO using recomputed P = exp(S - LSE) and D = rowsum(dO odot O)
     /// key-tile outer keeps dK/dV atomic free; dQ uses sparse global atomics
     /// </summary>
     static void backward(const CudaMatrix& query, const CudaMatrix& key, const CudaMatrix& value, const CudaMatrix& out, const CudaMatrix& logSumExp, const CudaMatrix& outGradient, CudaMatrix& queryGradient, CudaMatrix& keyGradient, CudaMatrix& valueGradient, float scale, bool causal = true);
+
+    /// <summary>multi-head backward matching forwardMultiHead layout and column window</summary>
+    static void backwardMultiHead(const CudaMatrix& query, const CudaMatrix& key, const CudaMatrix& value, const CudaMatrix& out, const CudaMatrix& logSumExp, const CudaMatrix& outGradient, CudaMatrix& queryGradient, CudaMatrix& keyGradient, CudaMatrix& valueGradient, int headCount, int headDimension, float scale, bool causal = true, int columnStart = 0, int columnCount = 0);
 };
 
 #endif // CUDAFLASHATTENTION_HPP

@@ -60,7 +60,7 @@ public:
     CudaMatrix keyHeadGradient;
     CudaMatrix temp;
     std::vector<CudaMatrix> cachedHeadProbabilities;
-    std::vector<CudaMatrix> flashLogSumExp;
+    CudaMatrix flashLogSumExp;
 
     CudaCausalSelfAttention();
 
