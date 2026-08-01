@@ -86,6 +86,7 @@ public:
     /// <summary>logits vocabSize x sequenceLength</summary>
     Matrix forward(const std::vector<int>& tokenIds);
 
+
     /// <summary>mean CrossEntropy over positions for one example</summary>
     float exampleLoss(const LanguageModelExample& example);
 
@@ -103,6 +104,10 @@ public:
 
 private:
     std::unique_ptr<CudaLanguageModel> device;
+    bool deviceStale;
+
+    /// <summary>upload host weights when device mirror is stale</summary>
+    void syncDeviceIfStale();
 
     /// <summary>token id with highest logit in the last column</summary>
     static int argmaxLastColumn(const Matrix& logits);

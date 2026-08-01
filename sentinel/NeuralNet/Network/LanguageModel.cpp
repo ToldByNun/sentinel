@@ -57,7 +57,7 @@ void LanguageModelGradients::scaleInPlace(float scalar) {
 }
 
 LanguageModel::LanguageModel(int vocabularySize, int embeddingDim, int maximumPositionCount, Adam optimizer, int blockCount, int headCount)
-    : tokenEmbedding(vocabularySize, embeddingDim), finalNorm(embeddingDim), outputProjection(UniformInit::matrix(vocabularySize, embeddingDim, 0.1f, 31u), UniformInit::matrix(vocabularySize, 1, 0.01f, 32u)), optimizer(optimizer), maximumPositionCount(maximumPositionCount) {
+    : tokenEmbedding(vocabularySize, embeddingDim), finalNorm(embeddingDim), outputProjection(UniformInit::matrix(vocabularySize, embeddingDim, 0.1f, 31u), UniformInit::matrix(vocabularySize, 1, 0.01f, 32u)), optimizer(optimizer), maximumPositionCount(maximumPositionCount), deviceStale(false) {
     if (maximumPositionCount <= 0) throw std::invalid_argument("LanguageModel maximumPositionCount must be > 0");
     if (blockCount <= 0) throw std::invalid_argument("LanguageModel blockCount must be > 0");
     if (headCount <= 0) throw std::invalid_argument("LanguageModel headCount must be > 0");
@@ -82,11 +82,13 @@ void LanguageModel::enableCuda() {
     if (!CudaMatmul::isAvailable()) {
         std::cout << "LanguageModel::enableCuda: no CUDA device\n";
         this->device.reset();
+        this->deviceStale = false;
         return;
     }
 
     this->device = std::make_unique<CudaLanguageModel>();
     this->device->uploadFrom(*this);
+    this->deviceStale = false;
     std::cout << "LanguageModel::enableCuda: device mirror active\n";
 }
 
@@ -97,6 +99,13 @@ bool LanguageModel::cudaEnabled() const {
 void LanguageModel::syncDevice() {
     if (this->device == nullptr) return;
     this->device->uploadFrom(*this);
+    this->deviceStale = false;
+}
+
+void LanguageModel::syncDeviceIfStale() {
+    if (this->device == nullptr) return;
+    if (!this->deviceStale) return;
+    this->syncDevice();
 }
 
 Matrix LanguageModel::sumColumns(const Matrix& gradient) {
@@ -139,8 +148,10 @@ Matrix LanguageModel::forwardLocal(const std::vector<int>& tokenIds, LanguageMod
 }
 
 Matrix LanguageModel::forward(const std::vector<int>& tokenIds) {
-    if (this->device != nullptr)
+    if (this->device != nullptr) {
+        this->syncDeviceIfStale();
         return this->device->forward(tokenIds);
+    }
 
     LanguageModelCache cache;
     return this->forwardLocal(tokenIds, cache);
@@ -214,7 +225,8 @@ void LanguageModel::applyGradients(const LanguageModelGradients& gradients) {
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex)
         this->blocks[blockIndex].applyGradients(this->optimizer, gradients.blocks[blockIndex]);
     this->optimizer.update(this->tokenEmbedding.weight, this->tokenEmbeddingState, gradients.tokenEmbedding);
-    this->syncDevice();
+    if (this->device != nullptr)
+        this->deviceStale = true;
 }
 
 void LanguageModel::train(const LanguageModelDataset& dataset, int epochs, int logEveryEpochs) {
