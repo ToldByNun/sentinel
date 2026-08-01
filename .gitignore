@@ -12,3 +12,10 @@ sentinel/_smoke_opt.txt
 sentinel/fa_fast_out.txt
 sentinel/fa_mh_out.txt
 sentinel/fa_pool_out.txt
+sentinel/_train_out.txt
+sentinel/_train_out2.txt
+sentinel/_train_out3.txt
+sentinel/_train_out4.txt
+sentinel/_train_out5.txt
+sentinel/_train_out6.txt
+sentinel/_train_out7.txt

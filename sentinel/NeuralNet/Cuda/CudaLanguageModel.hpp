@@ -310,7 +310,7 @@ public:
 
     /// <summary>chunked projection CE loss and grads into gradients using logitChunkRows</summary>
 
-    void accumulateChunkedProjection(size_t tokenCount, int meanDivisor, CudaLanguageModelGradients& gradients);
+    void accumulateChunkedProjection(size_t tokenCount, int segmentLength, int exampleCountInPack, CudaLanguageModelGradients& gradients);
 
 
 

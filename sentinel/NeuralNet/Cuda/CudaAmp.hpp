@@ -56,7 +56,16 @@ public:
     /// <summary>when true multiplyInto prefers FP16 tensor core GEMM</summary>
     static bool preferMixedPrecision;
 
+    /// <summary>when true scale CE grads and skip Adam on nonfinite (only useful if FP16 GEMMs can run)</summary>
+    static bool useLossScaling;
+
     static CudaLossScaler lossScaler;
+
+    /// <summary>preferMixedPrecision and useLossScaling</summary>
+    static bool lossScalingActive();
+
+    /// <summary>reset dynamic loss scaler to a consumer-safe start</summary>
+    static void resetLossScaler();
 
     /// <summary>cast float matrix to half matrix</summary>
     static void castToHalf(const CudaMatrix& source, CudaHalfMatrix& destination);

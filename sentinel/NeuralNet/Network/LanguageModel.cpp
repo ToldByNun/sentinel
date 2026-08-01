@@ -10,6 +10,7 @@
 #include "../Activations/Softmax.hpp"
 #include "../Cuda/CudaLanguageModel.hpp"
 #include "../Cuda/CudaAmp.hpp"
+#include "../Cuda/CudaAdam.hpp"
 #include "../Cuda/CudaMatmul.hpp"
 #include "../Initializers/UniformInit.hpp"
 #include "../Losses/CrossEntropy.hpp"
@@ -104,8 +105,16 @@ void LanguageModel::enableCudaTrain() {
     this->deviceTrainEnabled = true;
     this->device->activationCheckpointing = true;
     CudaAmp::preferMixedPrecision = true;
+    // loss scaling only helps when FP16 GEMMs can run (shared dim gate is 256)
+    CudaAmp::useLossScaling = this->tokenEmbedding.embeddingDim() >= 256;
+    CudaAmp::resetLossScaler();
+    // int8 moments stay opt-in until multi-step parity is solid on full models
+    CudaAdam::preferInt8Moments = false;
     this->device->ensureTrainState();
-    std::cout << "LanguageModel::enableCudaTrain: device training enabled (packed batches, checkpointing on, FP16 amp on)\n";
+    std::cout << "LanguageModel::enableCudaTrain: device training enabled (packed batches, checkpointing on, FP16 amp "
+              << (CudaAmp::preferMixedPrecision ? "on" : "off")
+              << ", lossScale=" << (CudaAmp::useLossScaling ? "on" : "off")
+              << ", int8 adam " << (CudaAdam::preferInt8Moments ? "on" : "off") << ")\n";
 }
 
 void LanguageModel::enableActivationCheckpointing(bool enabled) {
@@ -123,10 +132,14 @@ void LanguageModel::setCudaPreferMixedPrecision(bool enabled) {
     if (this->device == nullptr) this->enableCuda();
     if (this->device == nullptr) return;
     CudaAmp::preferMixedPrecision = enabled;
+    CudaAmp::useLossScaling = enabled && this->tokenEmbedding.embeddingDim() >= 256;
+    if (enabled)
+        CudaAmp::resetLossScaler();
     if (this->deviceTrainEnabled)
         this->device->ensureTrainWorkspaces();
     std::cout << "LanguageModel::setCudaPreferMixedPrecision: " << (enabled ? "on" : "off")
-              << "  lossScale=" << CudaAmp::lossScaler.scale << '\n';
+              << "  lossScale=" << (CudaAmp::useLossScaling ? "on" : "off")
+              << "  scale=" << CudaAmp::lossScaler.scale << '\n';
 }
 
 void LanguageModel::setCudaMaxPackedColumns(int columns) {
@@ -146,6 +159,14 @@ void LanguageModel::setCudaLogitChunkRows(int rows) {
     if (this->deviceTrainEnabled)
         this->device->ensureTrainWorkspaces();
     std::cout << "LanguageModel::setCudaLogitChunkRows: " << rows << '\n';
+}
+
+void LanguageModel::setCudaPreferInt8AdamMoments(bool enabled) {
+    if (this->device == nullptr) this->enableCuda();
+    if (this->device == nullptr) return;
+    CudaAdam::preferInt8Moments = enabled;
+    std::cout << "LanguageModel::setCudaPreferInt8AdamMoments: " << (enabled ? "on" : "off")
+              << "  blockSize=" << CudaAdam::int8BlockSize << '\n';
 }
 
 void LanguageModel::setCudaPreferFlashAttention(bool enabled) {

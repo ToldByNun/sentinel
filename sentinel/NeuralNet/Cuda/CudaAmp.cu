@@ -12,13 +12,22 @@
 #include <utility>
 
 bool CudaAmp::preferMixedPrecision = false;
+bool CudaAmp::useLossScaling = false;
 CudaLossScaler CudaAmp::lossScaler = CudaLossScaler();
 CudaDeviceBuffer CudaAmp::halfScratchLeft = CudaDeviceBuffer();
 CudaDeviceBuffer CudaAmp::halfScratchRight = CudaDeviceBuffer();
 CudaDeviceBuffer CudaAmp::nonFiniteFlag = CudaDeviceBuffer();
 
+bool CudaAmp::lossScalingActive() {
+    return CudaAmp::preferMixedPrecision && CudaAmp::useLossScaling;
+}
+
+void CudaAmp::resetLossScaler() {
+    CudaAmp::lossScaler = CudaLossScaler();
+}
+
 CudaLossScaler::CudaLossScaler()
-    : scale(1024.0f), growthFactor(2.0f), backoffFactor(0.5f), minScale(1.0f), maxScale(16777216.0f), growthInterval(2000), successfulSteps(0) {}
+    : scale(64.0f), growthFactor(2.0f), backoffFactor(0.5f), minScale(1.0f), maxScale(16777216.0f), growthInterval(2000), successfulSteps(0) {}
 
 void CudaLossScaler::updateOnOverflow() {
     this->successfulSteps = 0;
@@ -199,6 +208,8 @@ bool CudaAmp::launchCublasLtMatmulFp16(const float* deviceLeft, const float* dev
     if (!CudaAmp::preferMixedPrecision) return false;
     if (deviceLeft == nullptr || deviceRight == nullptr || deviceOut == nullptr) return false;
     if (rowCount <= 0 || columnCount <= 0 || sharedCount <= 0) return false;
+    // tiny GEMMs (consumer toy dims / attention head pieces) are numerically worse in FP16
+    if (sharedCount < 256 || rowCount < 32 || columnCount < 32) return false;
 
     struct LocalLt {
         cublasLtHandle_t handle;

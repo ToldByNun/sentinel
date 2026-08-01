@@ -12,12 +12,53 @@
 #include <stdexcept>
 #include <vector>
 
+bool CudaAdam::preferInt8Moments = false;
+int CudaAdam::int8BlockSize = 256;
+
+CudaAdamState::CudaAdamState() : elementCount(0), scaleCount(0) {}
+
+bool CudaAdamState::empty() const {
+    return this->firstMoment.empty() && this->firstMomentQ.deviceData == nullptr;
+}
+
+void CudaAdamState::ensureFp32(const CudaMatrix& parameter) {
+    if (!this->firstMoment.empty()) return;
+    this->firstMomentQ.free();
+    this->secondMomentQ.free();
+    this->firstMomentScales.free();
+    this->secondMomentScales.free();
+    this->scaleCount = 0;
+    this->elementCount = static_cast<int>(parameter.elementCount());
+    this->firstMoment.ensureSize(parameter.rows, parameter.cols);
+    this->secondMoment.ensureSize(parameter.rows, parameter.cols);
+    CudaOps::zeroInPlace(this->firstMoment);
+    CudaOps::zeroInPlace(this->secondMoment);
+}
+
+void CudaAdamState::ensureInt8(const CudaMatrix& parameter, int blockSize) {
+    if (this->firstMomentQ.deviceData != nullptr) return;
+    if (blockSize <= 0) throw std::invalid_argument("CudaAdamState::ensureInt8 blockSize must be > 0");
+
+    this->firstMoment.free();
+    this->secondMoment.free();
+    this->elementCount = static_cast<int>(parameter.elementCount());
+    this->scaleCount = (this->elementCount + blockSize - 1) / blockSize;
+    this->firstMomentQ.ensureCapacity(static_cast<size_t>(this->elementCount));
+    this->secondMomentQ.ensureCapacity(static_cast<size_t>(this->elementCount));
+    this->firstMomentScales.ensureCapacity(static_cast<size_t>(this->scaleCount) * sizeof(float));
+    this->secondMomentScales.ensureCapacity(static_cast<size_t>(this->scaleCount) * sizeof(float));
+    this->firstMomentQ.zeroInPlace();
+    this->secondMomentQ.zeroInPlace();
+    CudaMatmul::throwIfCudaFailed(cudaMemset(this->firstMomentScales.deviceData, 0, static_cast<size_t>(this->scaleCount) * sizeof(float)), "CudaAdamState::ensureInt8 clear m scales");
+    CudaMatmul::throwIfCudaFailed(cudaMemset(this->secondMomentScales.deviceData, 0, static_cast<size_t>(this->scaleCount) * sizeof(float)), "CudaAdamState::ensureInt8 clear v scales");
+}
+
 CudaAdamState CudaAdamState::zerosLike(const CudaMatrix& parameter) {
     CudaAdamState state;
-    state.firstMoment.ensureSize(parameter.rows, parameter.cols);
-    state.secondMoment.ensureSize(parameter.rows, parameter.cols);
-    CudaOps::zeroInPlace(state.firstMoment);
-    CudaOps::zeroInPlace(state.secondMoment);
+    if (CudaAdam::preferInt8Moments)
+        state.ensureInt8(parameter, CudaAdam::int8BlockSize);
+    else
+        state.ensureFp32(parameter);
     return state;
 }
 
@@ -38,14 +79,20 @@ __device__ void CudaAdam::runUpdate(float* parameter, float* firstMoment, float*
     if (index >= elementCount) return;
 
     const float gradientValue = gradient[index] * gradientScale;
+    if (!isfinite(gradientValue)) return;
+
     float updatedFirstMoment = beta1 * firstMoment[index] + (1.0f - beta1) * gradientValue;
     float updatedSecondMoment = beta2 * secondMoment[index] + (1.0f - beta2) * gradientValue * gradientValue;
+    if (!isfinite(updatedFirstMoment) || !isfinite(updatedSecondMoment)) return;
+
     firstMoment[index] = updatedFirstMoment;
     secondMoment[index] = updatedSecondMoment;
 
     const float correctedFirst = updatedFirstMoment * inverseFirstCorrection;
     const float correctedSecond = updatedSecondMoment * inverseSecondCorrection;
-    parameter[index] -= learningRate * correctedFirst / (sqrtf(correctedSecond) + epsilon);
+    const float delta = learningRate * correctedFirst / (sqrtf(correctedSecond) + epsilon);
+    if (!isfinite(delta)) return;
+    parameter[index] -= delta;
 }
 
 __device__ void CudaAdam::runUpdateMany(const CudaAdamUpdateItem* items, int itemCount, float learningRate, float beta1, float beta2, float epsilon, float inverseFirstCorrection, float inverseSecondCorrection, float gradientScale) {
@@ -55,14 +102,20 @@ __device__ void CudaAdam::runUpdateMany(const CudaAdamUpdateItem* items, int ite
     const CudaAdamUpdateItem item = items[tensorIndex];
     for (int index = static_cast<int>(threadIdx.x); index < item.elementCount; index += static_cast<int>(blockDim.x)) {
         const float gradientValue = item.gradient[index] * gradientScale;
+        if (!isfinite(gradientValue)) continue;
+
         float updatedFirstMoment = beta1 * item.firstMoment[index] + (1.0f - beta1) * gradientValue;
         float updatedSecondMoment = beta2 * item.secondMoment[index] + (1.0f - beta2) * gradientValue * gradientValue;
+        if (!isfinite(updatedFirstMoment) || !isfinite(updatedSecondMoment)) continue;
+
         item.firstMoment[index] = updatedFirstMoment;
         item.secondMoment[index] = updatedSecondMoment;
 
         const float correctedFirst = updatedFirstMoment * inverseFirstCorrection;
         const float correctedSecond = updatedSecondMoment * inverseSecondCorrection;
-        item.parameter[index] -= learningRate * correctedFirst / (sqrtf(correctedSecond) + epsilon);
+        const float delta = learningRate * correctedFirst / (sqrtf(correctedSecond) + epsilon);
+        if (!isfinite(delta)) continue;
+        item.parameter[index] -= delta;
     }
 }
 
@@ -74,19 +127,137 @@ __global__ void CudaAdamUpdateManyEntry(const CudaAdamUpdateItem* items, int ite
     CudaAdam::runUpdateMany(items, itemCount, learningRate, beta1, beta2, epsilon, inverseFirstCorrection, inverseSecondCorrection, gradientScale);
 }
 
+__global__ void CudaAdamUpdateInt8TensorEntry(
+    float* parameter,
+    signed char* firstMomentQ,
+    signed char* secondMomentQ,
+    float* firstMomentScales,
+    float* secondMomentScales,
+    const float* gradient,
+    int elementCount,
+    int blockSize,
+    float learningRate,
+    float beta1,
+    float beta2,
+    float epsilon,
+    float inverseFirstCorrection,
+    float inverseSecondCorrection,
+    float gradientScale) {
+    const int quantBlock = static_cast<int>(blockIdx.x);
+    const int start = quantBlock * blockSize;
+    if (start >= elementCount) return;
+    const int count = (start + blockSize <= elementCount) ? blockSize : (elementCount - start);
+    const int threadCount = static_cast<int>(blockDim.x);
+
+    // all scratch in dynamic shared: first[blockSize] second[blockSize] reduceFirst[threads] reduceSecond[threads]
+    extern __shared__ float shared[];
+    float* firstFp = shared;
+    float* secondFp = shared + blockSize;
+    float* reduceFirst = shared + 2 * blockSize;
+    float* reduceSecond = reduceFirst + threadCount;
+
+    const float oldFirstScale = firstMomentScales[quantBlock];
+    const float oldSecondScale = secondMomentScales[quantBlock];
+
+    for (int local = static_cast<int>(threadIdx.x); local < count; local += threadCount) {
+        const int index = start + local;
+        float first = (oldFirstScale == 0.0f) ? 0.0f : static_cast<float>(firstMomentQ[index]) * oldFirstScale;
+        float second = (oldSecondScale == 0.0f) ? 0.0f : static_cast<float>(secondMomentQ[index]) * oldSecondScale;
+        const float gradientValue = gradient[index] * gradientScale;
+        if (!isfinite(gradientValue) || !isfinite(first) || !isfinite(second)) {
+            firstFp[local] = isfinite(first) ? first : 0.0f;
+            secondFp[local] = isfinite(second) ? second : 0.0f;
+            continue;
+        }
+        first = beta1 * first + (1.0f - beta1) * gradientValue;
+        second = beta2 * second + (1.0f - beta2) * gradientValue * gradientValue;
+        if (!isfinite(first)) first = 0.0f;
+        if (!isfinite(second) || second < 0.0f) second = 0.0f;
+        firstFp[local] = first;
+        secondFp[local] = second;
+
+        const float correctedFirst = first * inverseFirstCorrection;
+        const float correctedSecond = second * inverseSecondCorrection;
+        const float denom = sqrtf(correctedSecond) + epsilon;
+        const float delta = learningRate * correctedFirst / denom;
+        if (isfinite(delta))
+            parameter[index] -= delta;
+    }
+    __syncthreads();
+
+    float localMaxFirst = 0.0f;
+    float localMaxSecond = 0.0f;
+    for (int local = static_cast<int>(threadIdx.x); local < count; local += threadCount) {
+        localMaxFirst = fmaxf(localMaxFirst, fabsf(firstFp[local]));
+        localMaxSecond = fmaxf(localMaxSecond, fabsf(secondFp[local]));
+    }
+    reduceFirst[threadIdx.x] = localMaxFirst;
+    reduceSecond[threadIdx.x] = localMaxSecond;
+    __syncthreads();
+
+    for (int stride = threadCount / 2; stride > 0; stride >>= 1) {
+        if (static_cast<int>(threadIdx.x) < stride) {
+            reduceFirst[threadIdx.x] = fmaxf(reduceFirst[threadIdx.x], reduceFirst[threadIdx.x + stride]);
+            reduceSecond[threadIdx.x] = fmaxf(reduceSecond[threadIdx.x], reduceSecond[threadIdx.x + stride]);
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        float maxFirst = reduceFirst[0];
+        float maxSecond = reduceSecond[0];
+        if (!isfinite(maxFirst) || maxFirst < 1e-12f) maxFirst = 1e-12f;
+        if (!isfinite(maxSecond) || maxSecond < 1e-12f) maxSecond = 1e-12f;
+        if (maxFirst > 1e8f) maxFirst = 1e8f;
+        if (maxSecond > 1e8f) maxSecond = 1e8f;
+        firstMomentScales[quantBlock] = maxFirst / 127.0f;
+        secondMomentScales[quantBlock] = maxSecond / 127.0f;
+    }
+    __syncthreads();
+
+    const float newFirstScale = firstMomentScales[quantBlock];
+    const float newSecondScale = secondMomentScales[quantBlock];
+    for (int local = static_cast<int>(threadIdx.x); local < count; local += threadCount) {
+        float quantizedFirst = rintf(firstFp[local] / newFirstScale);
+        quantizedFirst = fminf(127.0f, fmaxf(-127.0f, quantizedFirst));
+        if (!isfinite(quantizedFirst)) quantizedFirst = 0.0f;
+        firstMomentQ[start + local] = static_cast<signed char>(quantizedFirst);
+
+        float quantizedSecond = rintf(secondFp[local] / newSecondScale);
+        quantizedSecond = fminf(127.0f, fmaxf(-127.0f, quantizedSecond));
+        if (!isfinite(quantizedSecond)) quantizedSecond = 0.0f;
+        secondMomentQ[start + local] = static_cast<signed char>(quantizedSecond);
+    }
+}
+
 void CudaAdam::update(CudaMatrix& parameter, CudaAdamState& state, const CudaMatrix& gradient, float gradientScale) const {
+    if (CudaAdam::preferInt8Moments)
+        state.ensureInt8(parameter, CudaAdam::int8BlockSize);
+    else
+        state.ensureFp32(parameter);
+
     CudaAdamUpdateItem item;
     item.parameter = parameter.buffer.deviceData;
-    if (state.firstMoment.empty()) {
-        state.firstMoment.ensureSize(parameter.rows, parameter.cols);
-        state.secondMoment.ensureSize(parameter.rows, parameter.cols);
-        CudaOps::zeroInPlace(state.firstMoment);
-        CudaOps::zeroInPlace(state.secondMoment);
-    }
-    item.firstMoment = state.firstMoment.buffer.deviceData;
-    item.secondMoment = state.secondMoment.buffer.deviceData;
     item.gradient = gradient.buffer.deviceData;
     item.elementCount = static_cast<int>(parameter.elementCount());
+    item.useInt8 = CudaAdam::preferInt8Moments;
+    if (item.useInt8) {
+        item.firstMoment = nullptr;
+        item.secondMoment = nullptr;
+        item.firstMomentQ = state.firstMomentQ.deviceData;
+        item.secondMomentQ = state.secondMomentQ.deviceData;
+        item.firstMomentScales = state.firstMomentScales.deviceData;
+        item.secondMomentScales = state.secondMomentScales.deviceData;
+        item.scaleCount = state.scaleCount;
+    } else {
+        item.firstMoment = state.firstMoment.buffer.deviceData;
+        item.secondMoment = state.secondMoment.buffer.deviceData;
+        item.firstMomentQ = nullptr;
+        item.secondMomentQ = nullptr;
+        item.firstMomentScales = nullptr;
+        item.secondMomentScales = nullptr;
+        item.scaleCount = 0;
+    }
     this->updateMany(&item, 1, gradientScale);
 }
 
@@ -95,19 +266,64 @@ void CudaAdam::updateMany(const CudaAdamUpdateItem* items, int itemCount, float 
     if (items == nullptr || itemCount <= 0) throw std::invalid_argument("CudaAdam::updateMany empty items");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaAdam::updateMany no CUDA device");
 
+    bool anyInt8 = false;
+    bool anyFp32 = false;
     for (int itemIndex = 0; itemIndex < itemCount; ++itemIndex) {
-        if (items[itemIndex].parameter == nullptr || items[itemIndex].firstMoment == nullptr || items[itemIndex].secondMoment == nullptr || items[itemIndex].gradient == nullptr)
+        const CudaAdamUpdateItem& item = items[itemIndex];
+        if (item.parameter == nullptr || item.gradient == nullptr)
             throw std::invalid_argument("CudaAdam::updateMany null pointer");
-        if (items[itemIndex].elementCount <= 0) throw std::invalid_argument("CudaAdam::updateMany invalid elementCount");
+        if (item.elementCount <= 0) throw std::invalid_argument("CudaAdam::updateMany invalid elementCount");
+        if (item.useInt8) {
+            anyInt8 = true;
+            if (item.firstMomentQ == nullptr || item.secondMomentQ == nullptr || item.firstMomentScales == nullptr || item.secondMomentScales == nullptr)
+                throw std::invalid_argument("CudaAdam::updateMany null int8 moments");
+            if (item.scaleCount <= 0) throw std::invalid_argument("CudaAdam::updateMany invalid scaleCount");
+        } else {
+            anyFp32 = true;
+            if (item.firstMoment == nullptr || item.secondMoment == nullptr)
+                throw std::invalid_argument("CudaAdam::updateMany null fp32 moments");
+        }
     }
+    if (anyInt8 && anyFp32)
+        throw std::invalid_argument("CudaAdam::updateMany mixed int8/fp32 items not supported");
 
     const float firstMomentCorrection = 1.0f - std::pow(this->beta1, static_cast<float>(this->timeStep));
     const float secondMomentCorrection = 1.0f - std::pow(this->beta2, static_cast<float>(this->timeStep));
     const float inverseFirstCorrection = 1.0f / firstMomentCorrection;
     const float inverseSecondCorrection = 1.0f / secondMomentCorrection;
 
+    if (anyInt8) {
+        constexpr int threadCount = 256;
+        const int blockSize = CudaAdam::int8BlockSize;
+        if (blockSize > 1024)
+            throw std::invalid_argument("CudaAdam::updateMany int8BlockSize too large for shared memory");
+        const size_t sharedBytes = (static_cast<size_t>(blockSize) * 2u + static_cast<size_t>(threadCount) * 2u) * sizeof(float);
+        for (int itemIndex = 0; itemIndex < itemCount; ++itemIndex) {
+            const CudaAdamUpdateItem& item = items[itemIndex];
+            if (item.scaleCount != (item.elementCount + blockSize - 1) / blockSize)
+                throw std::invalid_argument("CudaAdam::updateMany int8 scaleCount mismatch with int8BlockSize");
+            CudaAdamUpdateInt8TensorEntry<<<item.scaleCount, threadCount, sharedBytes>>>(
+                item.parameter,
+                item.firstMomentQ,
+                item.secondMomentQ,
+                item.firstMomentScales,
+                item.secondMomentScales,
+                item.gradient,
+                item.elementCount,
+                blockSize,
+                this->learningRate,
+                this->beta1,
+                this->beta2,
+                this->epsilon,
+                inverseFirstCorrection,
+                inverseSecondCorrection,
+                gradientScale);
+            CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaAdamUpdateInt8TensorEntry launch");
+        }
+        return;
+    }
+
     const size_t byteCount = static_cast<size_t>(itemCount) * sizeof(CudaAdamUpdateItem);
-    // const method but buffer is mutable workspace; cast away for pooled reuse
     CudaDeviceBuffer& buffer = const_cast<CudaAdam*>(this)->itemBuffer;
     buffer.ensureCapacity(byteCount);
     buffer.copyBytesFromHost(items, byteCount);
@@ -149,13 +365,17 @@ void CudaAdam::runSmokeDemo(int parameterRows, int parameterCols) {
     AdamState hostState = AdamState::zerosLike(hostParameterCopy);
     hostAdam.update(hostParameterCopy, hostState, hostGradient);
 
+    const bool previousInt8 = CudaAdam::preferInt8Moments;
+    CudaAdam::preferInt8Moments = false;
+
     CudaAdam deviceAdam(0.001f);
     deviceAdam.step();
     CudaMatrix deviceParameter;
     deviceParameter.upload(hostParameter);
     CudaMatrix deviceGradient;
     deviceGradient.upload(hostGradient);
-    CudaAdamState deviceState = CudaAdamState::zerosLike(deviceParameter);
+    CudaAdamState deviceState;
+    deviceState.ensureFp32(deviceParameter);
     deviceAdam.update(deviceParameter, deviceState, deviceGradient);
     CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaAdam smoke synchronize");
 
@@ -164,5 +384,38 @@ void CudaAdam::runSmokeDemo(int parameterRows, int parameterCols) {
     for (size_t index = 0; index < hostParameterCopy.data.size(); ++index)
         maximumDifference = (std::max)(maximumDifference, std::fabs(hostParameterCopy.data[index] - deviceHostParameter.data[index]));
 
-    SmokeLog::result("Adam", "rows=%d cols=%d  diff=%.2e", parameterRows, parameterCols, maximumDifference);
+    SmokeLog::result("Adam", "rows=%d cols=%d  diff=%.2e  int8Moments=off", parameterRows, parameterCols, maximumDifference);
+
+    CudaMatrix fp32RefParameter;
+    fp32RefParameter.upload(hostParameter);
+    CudaAdamState fp32RefState;
+    fp32RefState.ensureFp32(fp32RefParameter);
+    CudaAdam fp32RefAdam(0.001f);
+
+    CudaMatrix int8Parameter;
+    int8Parameter.upload(hostParameter);
+    CudaAdamState int8State;
+    int8State.ensureInt8(int8Parameter, CudaAdam::int8BlockSize);
+    CudaAdam int8Adam(0.001f);
+
+    CudaMatrix stepGradient;
+    stepGradient.upload(hostGradient);
+    for (int step = 0; step < 32; ++step) {
+        fp32RefAdam.step();
+        int8Adam.step();
+        CudaAdam::preferInt8Moments = false;
+        fp32RefAdam.update(fp32RefParameter, fp32RefState, stepGradient);
+        CudaAdam::preferInt8Moments = true;
+        int8Adam.update(int8Parameter, int8State, stepGradient);
+    }
+    CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaAdam int8 multi-step synchronize");
+
+    Matrix fp32RefHost = fp32RefParameter.download();
+    Matrix int8HostParameter = int8Parameter.download();
+    float int8Difference = 0.0f;
+    for (size_t index = 0; index < fp32RefHost.data.size(); ++index)
+        int8Difference = (std::max)(int8Difference, std::fabs(fp32RefHost.data[index] - int8HostParameter.data[index]));
+    SmokeLog::result("Adam int8", "rows=%d cols=%d  steps=32  diff=%.2e  block=%d", parameterRows, parameterCols, int8Difference, CudaAdam::int8BlockSize);
+
+    CudaAdam::preferInt8Moments = previousInt8;
 }

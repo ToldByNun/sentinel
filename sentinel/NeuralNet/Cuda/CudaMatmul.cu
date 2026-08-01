@@ -160,6 +160,53 @@ void CudaIntBuffer::free() {
     this->capacityCount = 0;
 }
 
+CudaByteBuffer::CudaByteBuffer() : deviceData(nullptr), capacityCount(0) {}
+
+CudaByteBuffer::~CudaByteBuffer() {
+    this->free();
+}
+
+CudaByteBuffer::CudaByteBuffer(CudaByteBuffer&& other) noexcept : deviceData(other.deviceData), capacityCount(other.capacityCount) {
+    other.deviceData = nullptr;
+    other.capacityCount = 0;
+}
+
+CudaByteBuffer& CudaByteBuffer::operator=(CudaByteBuffer&& other) noexcept {
+    if (this == &other) return *this;
+
+    this->free();
+    this->deviceData = other.deviceData;
+    this->capacityCount = other.capacityCount;
+    other.deviceData = nullptr;
+    other.capacityCount = 0;
+    return *this;
+}
+
+void CudaByteBuffer::ensureCapacity(size_t requiredCount) {
+    if (requiredCount == 0) return;
+    if (this->capacityCount >= requiredCount) return;
+
+    this->free();
+
+    signed char* allocated = nullptr;
+    CudaMatmul::throwIfCudaFailed(cudaMalloc(&allocated, requiredCount * sizeof(signed char)), "cudaMalloc bytes");
+    this->deviceData = allocated;
+    this->capacityCount = requiredCount;
+}
+
+void CudaByteBuffer::zeroInPlace() {
+    if (this->deviceData == nullptr || this->capacityCount == 0) return;
+    CudaMatmul::throwIfCudaFailed(cudaMemset(this->deviceData, 0, this->capacityCount * sizeof(signed char)), "CudaByteBuffer::zeroInPlace");
+}
+
+void CudaByteBuffer::free() {
+    if (this->deviceData == nullptr) return;
+
+    cudaFree(this->deviceData);
+    this->deviceData = nullptr;
+    this->capacityCount = 0;
+}
+
 CudaMatrix::CudaMatrix() : rows(0), cols(0) {}
 
 CudaMatrix::CudaMatrix(CudaMatrix&& other) noexcept : rows(other.rows), cols(other.cols), buffer(std::move(other.buffer)) {

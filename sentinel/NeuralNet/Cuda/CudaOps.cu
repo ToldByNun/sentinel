@@ -970,15 +970,28 @@ __global__ void CudaOpsOnlineSoftmaxUpdateEntry(const float* logitChunk, int chu
         if (value > chunkMax)
             chunkMax = value;
     }
+    if (!isfinite(chunkMax))
+        chunkMax = 0.0f;
 
     float chunkSum = 0.0f;
     for (int row = 0; row < chunkRows; ++row)
         chunkSum += expf(logitChunk[row * tokenCount + column] - chunkMax);
 
     const float oldMax = maximumLogits[column];
-    const float newMax = (chunkMax > oldMax) ? chunkMax : oldMax;
     const float oldSum = sumExp[column];
-    sumExp[column] = oldSum * expf(oldMax - newMax) + chunkSum * expf(chunkMax - newMax);
+    float newMax = chunkMax;
+    if (isfinite(oldMax) && oldMax > newMax)
+        newMax = oldMax;
+
+    float combined = chunkSum;
+    if (isfinite(oldMax) && oldSum > 0.0f)
+        combined = oldSum * expf(oldMax - newMax) + chunkSum * expf(chunkMax - newMax);
+    else if (chunkMax != newMax)
+        combined = chunkSum * expf(chunkMax - newMax);
+
+    if (!isfinite(combined) || combined < 0.0f)
+        combined = 0.0f;
+    sumExp[column] = combined;
     maximumLogits[column] = newMax;
 }
 
@@ -994,10 +1007,12 @@ __global__ void CudaOpsCaptureTargetLogitEntry(const float* logitChunk, const in
 __global__ void CudaOpsOnlineSoftmaxAddCeEntry(const float* targetLogits, const float* maximumLogits, const float* sumExp, float* lossSum, int tokenCount, float lossScale, int meanDivisor) {
     const int column = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
     if (column >= tokenCount) return;
+    if (!isfinite(targetLogits[column]) || !isfinite(maximumLogits[column]) || !isfinite(sumExp[column])) return;
     const float inverseMeanDivisor = 1.0f / static_cast<float>(meanDivisor);
     float safeSum = sumExp[column];
     if (safeSum < 1e-20f) safeSum = 1e-20f;
     const float loss = (-targetLogits[column] + maximumLogits[column] + logf(safeSum)) * inverseMeanDivisor * lossScale;
+    if (!isfinite(loss)) return;
     atomicAdd(lossSum, loss);
 }
 

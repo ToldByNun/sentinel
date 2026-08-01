@@ -94,6 +94,9 @@ public:
     /// <summary>vocab rows per chunked CE/LM-head pass</summary>
     void setCudaLogitChunkRows(int rows);
 
+    /// <summary>store Adam m/v as int8 block scales for low VRAM</summary>
+    void setCudaPreferInt8AdamMoments(bool enabled);
+
     /// <summary>toggle flash attention on device blocks</summary>
     void setCudaPreferFlashAttention(bool enabled);
 

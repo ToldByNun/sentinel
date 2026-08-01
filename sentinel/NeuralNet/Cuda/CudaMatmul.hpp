@@ -59,6 +59,30 @@ public:
     void free();
 };
 
+/// <summary>reusable device byte buffer for int8 storage</summary>
+class CudaByteBuffer {
+public:
+    signed char* deviceData;
+    size_t capacityCount;
+
+    CudaByteBuffer();
+    ~CudaByteBuffer();
+
+    CudaByteBuffer(const CudaByteBuffer&) = delete;
+    CudaByteBuffer& operator=(const CudaByteBuffer&) = delete;
+    CudaByteBuffer(CudaByteBuffer&& other) noexcept;
+    CudaByteBuffer& operator=(CudaByteBuffer&& other) noexcept;
+
+    /// <summary>allocate when capacityCount is below requiredCount</summary>
+    void ensureCapacity(size_t requiredCount);
+
+    /// <summary>set every byte to zero</summary>
+    void zeroInPlace();
+
+    /// <summary>release device memory</summary>
+    void free();
+};
+
 /// <summary>row major float matrix that lives on the device</summary>
 class CudaMatrix {
 public:
@@ -153,6 +177,7 @@ public:
 private:
     friend class CudaDeviceBuffer;
     friend class CudaIntBuffer;
+    friend class CudaByteBuffer;
     friend class CudaMatrix;
     friend class CudaOps;
     friend class CudaFeedForward;
@@ -162,6 +187,7 @@ private:
     friend class CudaTransformerBlock;
     friend class CudaLanguageModel;
     friend class CudaAdam;
+    friend class CudaAdamState;
     friend class CudaAmp;
 
     static constexpr int tileSize = 16;
