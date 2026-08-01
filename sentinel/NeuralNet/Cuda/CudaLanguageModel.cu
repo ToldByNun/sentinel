@@ -16,7 +16,7 @@
 #include "../Optimizers/Adam.hpp"
 
 CudaLanguageModel::CudaLanguageModel()
-    : maximumPositionCount(0), maxPackedColumns(1024), gradientAccumulationSteps(4), activationCheckpointing(true), adam(0.001f), trainStateReady(false) {}
+    : maximumPositionCount(0), maxPackedColumns(1024), logitChunkRows(2048), gradientAccumulationSteps(4), activationCheckpointing(true), adam(0.001f), trainStateReady(false) {}
 
 void CudaTransformerBlockAdamStates::ensureFrom(const CudaTransformerBlock& block) {
     // moments stay empty until first Adam update (lazy allocation for low VRAM before train)
@@ -72,8 +72,6 @@ void CudaLanguageModel::ensureTrainState() {
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex)
         this->blockAdamStates[blockIndex].ensureFrom(this->blocks[blockIndex]);
 
-    this->projectionWeightGradient.ensureSize(this->projectionWeight.rows, this->projectionWeight.cols);
-    this->projectionBiasGradient.ensureSize(this->projectionBias.rows, this->projectionBias.cols);
     this->finalNormGammaGradient.ensureSize(this->finalNorm.gamma.rows, this->finalNorm.gamma.cols);
 
     this->ensureTrainWorkspaces();
@@ -83,22 +81,36 @@ void CudaLanguageModel::ensureTrainState() {
 void CudaLanguageModel::ensureTrainWorkspaces() {
     if (this->tokenEmbeddingWeight.empty()) throw std::logic_error("CudaLanguageModel::ensureTrainWorkspaces weights not uploaded");
     if (this->maxPackedColumns <= 0) throw std::invalid_argument("CudaLanguageModel::ensureTrainWorkspaces maxPackedColumns must be > 0");
+    if (this->logitChunkRows <= 0) throw std::invalid_argument("CudaLanguageModel::ensureTrainWorkspaces logitChunkRows must be > 0");
 
     const size_t embeddingDim = this->tokenEmbeddingWeight.cols;
     const size_t vocabularySize = this->tokenEmbeddingWeight.rows;
     const size_t maxColumns = static_cast<size_t>(this->maxPackedColumns);
+    const size_t chunkRows = static_cast<size_t>((std::min)(this->logitChunkRows, static_cast<int>(vocabularySize)));
 
     this->hidden.ensureSize(embeddingDim, maxColumns);
     this->normalized.ensureSize(embeddingDim, maxColumns);
-    this->logits.ensureSize(vocabularySize, maxColumns);
-    this->probabilities.ensureSize(vocabularySize, maxColumns);
-    this->logitGradient.ensureSize(vocabularySize, maxColumns);
     this->hiddenGradient.ensureSize(embeddingDim, maxColumns);
     this->blockInputGradientScratch.ensureSize(embeddingDim, maxColumns);
     this->normInputGradientScratch.ensureSize(embeddingDim, maxColumns);
     this->epochLossSum.ensureSize(1, 1);
     this->tokenIdsBuffer.ensureCapacity(maxColumns);
     this->targetTokenIdsBuffer.ensureCapacity(maxColumns);
+
+    // full vocab x seq tensors are not needed for chunked train head
+    this->logits.free();
+    this->probabilities.free();
+    this->logitGradient.free();
+    this->projectionWeightGradient.free();
+    this->projectionBiasGradient.free();
+
+    this->logitChunk.ensureSize(chunkRows, maxColumns);
+    this->logitGradientChunk.ensureSize(chunkRows, maxColumns);
+    this->projectionWeightGradientChunk.ensureSize(chunkRows, embeddingDim);
+    this->hiddenGradientChunk.ensureSize(embeddingDim, maxColumns);
+    this->onlineSoftmaxMax.ensureSize(1, maxColumns);
+    this->onlineSoftmaxSumExp.ensureSize(1, maxColumns);
+    this->targetLogits.ensureSize(1, maxColumns);
 
     if (this->activationCheckpointing) {
         if (CudaAmp::preferMixedPrecision) {
@@ -189,24 +201,15 @@ float CudaLanguageModel::accumulatePackedExamples(const LanguageModelExample* co
 
     const size_t tokenCount = this->packedInputTokenIds.size();
     const int meanDivisor = static_cast<int>(segmentLength);
-    this->forwardInto(this->packedInputTokenIds, this->logits, meanDivisor);
+    this->forwardTrunkInto(this->packedInputTokenIds, meanDivisor);
 
     this->targetTokenIdsBuffer.ensureCapacity(tokenCount);
     this->targetTokenIdsBuffer.copyFromHost(this->packedTargetTokenIds.data(), tokenCount);
 
     if (this->epochLossSum.rows != 1 || this->epochLossSum.cols != 1)
         this->epochLossSum.ensureSize(1, 1);
-    CudaOps::softmaxCrossEntropyFromLogitsInto(this->logits, this->targetTokenIdsBuffer, tokenCount, this->probabilities, this->logitGradient, this->epochLossSum, 1.0f, meanDivisor);
+    this->accumulateChunkedProjection(tokenCount, meanDivisor, gradients);
 
-    if (CudaAmp::preferMixedPrecision)
-        CudaOps::scaleInPlace(this->logitGradient, CudaAmp::lossScaler.scale);
-
-    CudaMatrix::multiplyInto(this->logitGradient, this->normalized, this->projectionWeightGradient, false, true);
-    CudaOps::addInPlace(gradients.projectionWeight, this->projectionWeightGradient);
-    CudaOps::sumColumnsInto(this->logitGradient, this->projectionBiasGradient);
-    CudaOps::addInPlace(gradients.projectionBias, this->projectionBiasGradient);
-
-    CudaMatrix::multiplyInto(this->projectionWeight, this->logitGradient, this->hiddenGradient, true, false);
     this->finalNorm.backward(this->hiddenGradient, this->normInputGradientScratch, this->finalNormGammaGradient);
     CudaOps::addInPlace(gradients.finalNormGamma, this->finalNormGammaGradient);
     std::swap(this->hiddenGradient, this->normInputGradientScratch);
@@ -229,6 +232,115 @@ float CudaLanguageModel::accumulatePackedExamples(const LanguageModelExample* co
 
     CudaOps::embeddingScatterAddInto(gradients.tokenEmbedding, this->tokenIdsBuffer, tokenCount, this->hiddenGradient);
     return 0.0f;
+}
+
+void CudaLanguageModel::forwardTrunkInto(const std::vector<int>& tokenIds, int segmentLength) {
+    if (tokenIds.empty()) throw std::invalid_argument("CudaLanguageModel::forwardTrunkInto empty tokenIds");
+    if (this->tokenEmbeddingWeight.empty()) throw std::logic_error("CudaLanguageModel::forwardTrunkInto weights not uploaded");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaLanguageModel::forwardTrunkInto no CUDA device");
+
+    if (segmentLength > 0) {
+        if (static_cast<int>(tokenIds.size()) % segmentLength != 0)
+            throw std::invalid_argument("CudaLanguageModel::forwardTrunkInto tokenCount not divisible by segmentLength");
+        if (segmentLength > this->maximumPositionCount)
+            throw std::invalid_argument("CudaLanguageModel::forwardTrunkInto segmentLength exceeds maximumPositionCount");
+    } else if (static_cast<int>(tokenIds.size()) > this->maximumPositionCount) {
+        throw std::invalid_argument("CudaLanguageModel::forwardTrunkInto sequence longer than maximumPositionCount");
+    }
+
+    this->tokenIdsBuffer.ensureCapacity(tokenIds.size());
+    this->tokenIdsBuffer.copyFromHost(tokenIds.data(), tokenIds.size());
+    CudaOps::embeddingGatherInto(this->tokenEmbeddingWeight, this->tokenIdsBuffer, tokenIds.size(), this->hidden);
+
+    if (this->activationCheckpointing) {
+        if (CudaAmp::preferMixedPrecision) {
+            if (this->blockInputCheckpointsHalf.size() != this->blocks.size())
+                this->blockInputCheckpointsHalf.resize(this->blocks.size());
+            for (CudaHalfMatrix& checkpoint : this->blockInputCheckpointsHalf)
+                checkpoint.ensureSize(this->tokenEmbeddingWeight.cols, tokenIds.size());
+        } else {
+            if (this->blockInputCheckpoints.size() != this->blocks.size())
+                this->blockInputCheckpoints.resize(this->blocks.size());
+            for (CudaMatrix& checkpoint : this->blockInputCheckpoints)
+                checkpoint.ensureSize(this->tokenEmbeddingWeight.cols, tokenIds.size());
+        }
+    }
+
+    for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+        if (this->activationCheckpointing) {
+            if (CudaAmp::preferMixedPrecision)
+                CudaAmp::castToHalf(this->hidden, this->blockInputCheckpointsHalf[blockIndex]);
+            else
+                CudaOps::copyInto(this->hidden, this->blockInputCheckpoints[blockIndex]);
+        }
+        this->blocks[blockIndex].forward(this->hidden, this->normalized, segmentLength);
+        CudaMatrix swapBuffer = std::move(this->hidden);
+        this->hidden = std::move(this->normalized);
+        this->normalized = std::move(swapBuffer);
+    }
+
+    this->finalNorm.forward(this->hidden, this->normalized);
+}
+
+void CudaLanguageModel::accumulateChunkedProjection(size_t tokenCount, int meanDivisor, CudaLanguageModelGradients& gradients) {
+    if (tokenCount == 0) throw std::invalid_argument("CudaLanguageModel::accumulateChunkedProjection empty tokenCount");
+    if (meanDivisor <= 0) meanDivisor = static_cast<int>(tokenCount);
+    if (this->projectionWeight.empty()) throw std::logic_error("CudaLanguageModel::accumulateChunkedProjection missing projection");
+
+    const int vocabularySize = static_cast<int>(this->projectionWeight.rows);
+    const int embeddingDim = static_cast<int>(this->projectionWeight.cols);
+    const int chunkCap = (std::min)(this->logitChunkRows, vocabularySize);
+    const float gradScale = CudaAmp::preferMixedPrecision ? CudaAmp::lossScaler.scale : 1.0f;
+
+    this->targetLogits.ensureSize(1, tokenCount);
+    this->hiddenGradient.ensureSize(static_cast<size_t>(embeddingDim), tokenCount);
+    this->hiddenGradientChunk.ensureSize(static_cast<size_t>(embeddingDim), tokenCount);
+    CudaOps::onlineSoftmaxReset(this->onlineSoftmaxMax, this->onlineSoftmaxSumExp, tokenCount);
+    CudaOps::zeroInPlace(this->targetLogits);
+    CudaOps::zeroInPlace(this->hiddenGradient);
+
+    auto projectChunk = [&](int rowStart, int chunkRows) {
+        this->logitChunk.ensureSize(static_cast<size_t>(chunkRows), tokenCount);
+        const float* weightRows = this->projectionWeight.buffer.deviceData + static_cast<size_t>(rowStart) * static_cast<size_t>(embeddingDim);
+        CudaMatrix::multiplyPointersInto(
+            weightRows, static_cast<size_t>(chunkRows), static_cast<size_t>(embeddingDim),
+            this->normalized.buffer.deviceData, static_cast<size_t>(embeddingDim), tokenCount,
+            this->logitChunk.buffer.deviceData,
+            false, false);
+        CudaOps::broadcastBiasRowsAddInPlace(this->logitChunk, this->projectionBias, rowStart, chunkRows);
+    };
+
+    for (int rowStart = 0; rowStart < vocabularySize; rowStart += chunkCap) {
+        const int chunkRows = (std::min)(chunkCap, vocabularySize - rowStart);
+        projectChunk(rowStart, chunkRows);
+        CudaOps::onlineSoftmaxUpdateFromChunk(this->logitChunk, chunkRows, tokenCount, this->onlineSoftmaxMax, this->onlineSoftmaxSumExp);
+        CudaOps::captureTargetLogitFromChunk(this->logitChunk, this->targetTokenIdsBuffer, rowStart, chunkRows, tokenCount, this->targetLogits);
+    }
+
+    CudaOps::onlineSoftmaxAddMeanCrossEntropy(this->targetLogits, this->onlineSoftmaxMax, this->onlineSoftmaxSumExp, tokenCount, this->epochLossSum, 1.0f, meanDivisor);
+
+    for (int rowStart = 0; rowStart < vocabularySize; rowStart += chunkCap) {
+        const int chunkRows = (std::min)(chunkCap, vocabularySize - rowStart);
+        projectChunk(rowStart, chunkRows);
+        CudaOps::onlineSoftmaxLogitGradientChunkInto(
+            this->logitChunk, this->targetTokenIdsBuffer, rowStart, chunkRows, tokenCount,
+            this->onlineSoftmaxMax, this->onlineSoftmaxSumExp, this->logitGradientChunk, gradScale, meanDivisor);
+
+        this->projectionWeightGradientChunk.ensureSize(static_cast<size_t>(chunkRows), static_cast<size_t>(embeddingDim));
+        CudaMatrix::multiplyInto(this->logitGradientChunk, this->normalized, this->projectionWeightGradientChunk, false, true);
+        CudaOps::addRowsInPlace(gradients.projectionWeight, rowStart, this->projectionWeightGradientChunk);
+        CudaOps::sumColumnsAddIntoRows(this->logitGradientChunk, gradients.projectionBias, rowStart);
+
+        const float* weightRows = this->projectionWeight.buffer.deviceData + static_cast<size_t>(rowStart) * static_cast<size_t>(embeddingDim);
+        CudaMatrix::multiplyPointersInto(
+            weightRows, static_cast<size_t>(chunkRows), static_cast<size_t>(embeddingDim),
+            this->logitGradientChunk.buffer.deviceData, static_cast<size_t>(chunkRows), tokenCount,
+            this->hiddenGradientChunk.buffer.deviceData,
+            true, false);
+        this->hiddenGradientChunk.rows = static_cast<size_t>(embeddingDim);
+        this->hiddenGradientChunk.cols = tokenCount;
+        CudaOps::addInPlace(this->hiddenGradient, this->hiddenGradientChunk);
+    }
 }
 
 void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, float gradientScale) {

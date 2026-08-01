@@ -99,6 +99,9 @@ public:
     /// <summary>C = op(A) * op(B) entirely on device no host copies</summary>
     static void multiplyInto(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& out, bool transposeLeft = false, bool transposeRight = false);
 
+    /// <summary>C = op(A) * op(B) from raw device pointers row major shapes are physical before transpose flags</summary>
+    static void multiplyPointersInto(const float* left, size_t leftRows, size_t leftCols, const float* right, size_t rightRows, size_t rightCols, float* out, bool transposeLeft = false, bool transposeRight = false);
+
     /// <summary>C = op(A) * op(B) on device measuring kernel time with cuda events</summary>
     static void multiplyIntoTimed(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& out, double& kernelMilliseconds, bool transposeLeft = false, bool transposeRight = false);
 };

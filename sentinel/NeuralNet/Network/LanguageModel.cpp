@@ -138,6 +138,16 @@ void LanguageModel::setCudaMaxPackedColumns(int columns) {
         this->device->ensureTrainWorkspaces();
 }
 
+void LanguageModel::setCudaLogitChunkRows(int rows) {
+    if (this->device == nullptr) this->enableCuda();
+    if (this->device == nullptr) return;
+    if (rows <= 0) throw std::invalid_argument("LanguageModel::setCudaLogitChunkRows rows must be > 0");
+    this->device->logitChunkRows = rows;
+    if (this->deviceTrainEnabled)
+        this->device->ensureTrainWorkspaces();
+    std::cout << "LanguageModel::setCudaLogitChunkRows: " << rows << '\n';
+}
+
 void LanguageModel::setCudaPreferFlashAttention(bool enabled) {
     if (this->device == nullptr) this->enableCuda();
     if (this->device == nullptr) return;

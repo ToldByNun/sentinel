@@ -152,6 +152,10 @@ public:
 
     int maxPackedColumns;
 
+    /// <summary>vocab rows per CE chunk for low VRAM LM head default 2048</summary>
+
+    int logitChunkRows;
+
     /// <summary>Adam every N microbatches of batchSize</summary>
 
     int gradientAccumulationSteps;
@@ -199,6 +203,22 @@ public:
     CudaMatrix normInputGradientScratch;
 
     CudaMatrix epochLossSum;
+
+    /// <summary>chunked LM-head workspaces</summary>
+
+    CudaMatrix logitChunk;
+
+    CudaMatrix logitGradientChunk;
+
+    CudaMatrix projectionWeightGradientChunk;
+
+    CudaMatrix hiddenGradientChunk;
+
+    CudaMatrix onlineSoftmaxMax;
+
+    CudaMatrix onlineSoftmaxSumExp;
+
+    CudaMatrix targetLogits;
 
     bool trainStateReady;
 
@@ -279,6 +299,18 @@ public:
     /// <summary>free block input checkpoints when checkpointing is off</summary>
 
     void releaseActivationCheckpoints();
+
+
+
+    /// <summary>forward trunk embed blocks finalNorm without vocab projection</summary>
+
+    void forwardTrunkInto(const std::vector<int>& tokenIds, int segmentLength = 0);
+
+
+
+    /// <summary>chunked projection CE loss and grads into gradients using logitChunkRows</summary>
+
+    void accumulateChunkedProjection(size_t tokenCount, int meanDivisor, CudaLanguageModelGradients& gradients);
 
 
 

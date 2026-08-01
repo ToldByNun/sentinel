@@ -96,6 +96,33 @@ public:
     /// <summary>softmax + CE loss accumulate + logit grad meanDivisor defaults to tokenCount</summary>
     static void softmaxCrossEntropyFromLogitsInto(const CudaMatrix& logits, const CudaIntBuffer& targetTokenIds, size_t tokenCount, CudaMatrix& probabilities, CudaMatrix& logitGradient, CudaMatrix& lossSum, float lossScale = 1.0f, int meanDivisor = 0);
 
+    /// <summary>set every element to value</summary>
+    static void fillInPlace(CudaMatrix& matrix, float value);
+
+    /// <summary>add bias rows [rowStart, rowStart+rowCount) across columns of product rowCount x cols</summary>
+    static void broadcastBiasRowsAddInPlace(CudaMatrix& product, const CudaMatrix& bias, int rowStart, int rowCount);
+
+    /// <summary>destination rows [rowStart, ...) += source</summary>
+    static void addRowsInPlace(CudaMatrix& destination, int rowStart, const CudaMatrix& source);
+
+    /// <summary>init online softmax max to -inf and sumExp to 0 for tokenCount columns</summary>
+    static void onlineSoftmaxReset(CudaMatrix& maximumLogits, CudaMatrix& sumExp, size_t tokenCount);
+
+    /// <summary>fold logit chunk into running max and sumExp one column per thread</summary>
+    static void onlineSoftmaxUpdateFromChunk(const CudaMatrix& logitChunk, int chunkRows, size_t tokenCount, CudaMatrix& maximumLogits, CudaMatrix& sumExp);
+
+    /// <summary>if target id falls in chunk write that logit into targetLogits</summary>
+    static void captureTargetLogitFromChunk(const CudaMatrix& logitChunk, const CudaIntBuffer& targetTokenIds, int rowStart, int chunkRows, size_t tokenCount, CudaMatrix& targetLogits);
+
+    /// <summary>add mean CE from online softmax stats into lossSum 1x1</summary>
+    static void onlineSoftmaxAddMeanCrossEntropy(const CudaMatrix& targetLogits, const CudaMatrix& maximumLogits, const CudaMatrix& sumExp, size_t tokenCount, CudaMatrix& lossSum, float lossScale, int meanDivisor);
+
+    /// <summary>write chunk logit grads (p - onehot) / meanDivisor * gradScale</summary>
+    static void onlineSoftmaxLogitGradientChunkInto(const CudaMatrix& logitChunk, const CudaIntBuffer& targetTokenIds, int rowStart, int chunkRows, size_t tokenCount, const CudaMatrix& maximumLogits, const CudaMatrix& sumExp, CudaMatrix& logitGradientChunk, float gradScale, int meanDivisor);
+
+    /// <summary>sum gradient columns into biasGradient rows starting at rowStart</summary>
+    static void sumColumnsAddIntoRows(const CudaMatrix& gradient, CudaMatrix& biasGradient, int rowStart);
+
 private:
     static constexpr int threadCount = 256;
 

@@ -91,6 +91,9 @@ public:
     /// <summary>cap packed token columns on device train</summary>
     void setCudaMaxPackedColumns(int columns);
 
+    /// <summary>vocab rows per chunked CE/LM-head pass</summary>
+    void setCudaLogitChunkRows(int rows);
+
     /// <summary>toggle flash attention on device blocks</summary>
     void setCudaPreferFlashAttention(bool enabled);
 
