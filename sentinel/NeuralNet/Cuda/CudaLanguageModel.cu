@@ -10,6 +10,7 @@
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 #include "../Optimizers/Adam.hpp"
 
@@ -124,16 +125,13 @@ float CudaLanguageModel::accumulateExample(const LanguageModelExample& example, 
 
     const size_t tokenCount = example.inputTokenIds.size();
     this->forwardInto(example.inputTokenIds, this->logits);
-    CudaOps::softmaxInto(this->logits, this->probabilities);
 
     this->targetTokenIdsBuffer.ensureCapacity(tokenCount);
     this->targetTokenIdsBuffer.copyFromHost(example.targetTokenIds.data(), tokenCount);
 
     if (this->epochLossSum.rows != 1 || this->epochLossSum.cols != 1)
         this->epochLossSum.ensureSize(1, 1);
-    CudaOps::crossEntropyAddMeanLossFromIds(this->probabilities, this->targetTokenIdsBuffer, tokenCount, this->epochLossSum);
-
-    CudaOps::crossEntropyLogitGradientFromIdsInto(this->probabilities, this->targetTokenIdsBuffer, tokenCount, this->logitGradient);
+    CudaOps::softmaxCrossEntropyFromLogitsInto(this->logits, this->targetTokenIdsBuffer, tokenCount, this->probabilities, this->logitGradient, this->epochLossSum);
 
     CudaMatrix::multiplyInto(this->logitGradient, this->normalized, this->projectionWeightGradient, false, true);
     CudaOps::addInPlace(gradients.projectionWeight, this->projectionWeightGradient);
@@ -159,30 +157,54 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients) {
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaLanguageModel::applyGradients no CUDA device");
 
     this->adam.step();
-    this->adam.update(this->projectionWeight, this->projectionWeightState, gradients.projectionWeight);
-    this->adam.update(this->projectionBias, this->projectionBiasState, gradients.projectionBias);
-    this->adam.update(this->finalNorm.gamma, this->finalNormGammaState, gradients.finalNormGamma);
+
+    auto ensureMoments = [](CudaAdamState& state, const CudaMatrix& parameter) {
+        if (!state.firstMoment.empty()) return;
+        state.firstMoment.ensureSize(parameter.rows, parameter.cols);
+        state.secondMoment.ensureSize(parameter.rows, parameter.cols);
+        CudaOps::zeroInPlace(state.firstMoment);
+        CudaOps::zeroInPlace(state.secondMoment);
+    };
+
+    std::vector<CudaAdamUpdateItem> items;
+    items.reserve(16 + this->blocks.size() * 12);
+
+    auto pushItem = [&items, &ensureMoments](CudaMatrix& parameter, CudaAdamState& state, const CudaMatrix& gradient) {
+        ensureMoments(state, parameter);
+        CudaAdamUpdateItem item;
+        item.parameter = parameter.buffer.deviceData;
+        item.firstMoment = state.firstMoment.buffer.deviceData;
+        item.secondMoment = state.secondMoment.buffer.deviceData;
+        item.gradient = gradient.buffer.deviceData;
+        item.elementCount = static_cast<int>(parameter.elementCount());
+        items.push_back(item);
+    };
+
+    pushItem(this->projectionWeight, this->projectionWeightState, gradients.projectionWeight);
+    pushItem(this->projectionBias, this->projectionBiasState, gradients.projectionBias);
+    pushItem(this->finalNorm.gamma, this->finalNormGammaState, gradients.finalNormGamma);
 
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
         CudaTransformerBlock& block = this->blocks[blockIndex];
         CudaTransformerBlockGradients& blockGradients = gradients.blocks[blockIndex];
         CudaTransformerBlockAdamStates& blockStates = this->blockAdamStates[blockIndex];
 
-        this->adam.update(block.attention.queryWeight, blockStates.queryWeight, blockGradients.queryWeight);
-        this->adam.update(block.attention.keyWeight, blockStates.keyWeight, blockGradients.keyWeight);
-        this->adam.update(block.attention.valueWeight, blockStates.valueWeight, blockGradients.valueWeight);
-        this->adam.update(block.attention.outputWeight, blockStates.attentionOutputWeight, blockGradients.attentionOutputWeight);
-        this->adam.update(block.attentionNorm.gamma, blockStates.attentionNormGamma, blockGradients.attentionNormGamma);
-        this->adam.update(block.feedForwardNorm.gamma, blockStates.feedForwardNormGamma, blockGradients.feedForwardNormGamma);
-        this->adam.update(block.feedForward.gateWeight, blockStates.feedForwardGateWeight, blockGradients.feedForwardGateWeight);
-        this->adam.update(block.feedForward.gateBias, blockStates.feedForwardGateBias, blockGradients.feedForwardGateBias);
-        this->adam.update(block.feedForward.upWeight, blockStates.feedForwardUpWeight, blockGradients.feedForwardUpWeight);
-        this->adam.update(block.feedForward.upBias, blockStates.feedForwardUpBias, blockGradients.feedForwardUpBias);
-        this->adam.update(block.feedForward.downWeight, blockStates.feedForwardDownWeight, blockGradients.feedForwardDownWeight);
-        this->adam.update(block.feedForward.downBias, blockStates.feedForwardDownBias, blockGradients.feedForwardDownBias);
+        pushItem(block.attention.queryWeight, blockStates.queryWeight, blockGradients.queryWeight);
+        pushItem(block.attention.keyWeight, blockStates.keyWeight, blockGradients.keyWeight);
+        pushItem(block.attention.valueWeight, blockStates.valueWeight, blockGradients.valueWeight);
+        pushItem(block.attention.outputWeight, blockStates.attentionOutputWeight, blockGradients.attentionOutputWeight);
+        pushItem(block.attentionNorm.gamma, blockStates.attentionNormGamma, blockGradients.attentionNormGamma);
+        pushItem(block.feedForwardNorm.gamma, blockStates.feedForwardNormGamma, blockGradients.feedForwardNormGamma);
+        pushItem(block.feedForward.gateWeight, blockStates.feedForwardGateWeight, blockGradients.feedForwardGateWeight);
+        pushItem(block.feedForward.gateBias, blockStates.feedForwardGateBias, blockGradients.feedForwardGateBias);
+        pushItem(block.feedForward.upWeight, blockStates.feedForwardUpWeight, blockGradients.feedForwardUpWeight);
+        pushItem(block.feedForward.upBias, blockStates.feedForwardUpBias, blockGradients.feedForwardUpBias);
+        pushItem(block.feedForward.downWeight, blockStates.feedForwardDownWeight, blockGradients.feedForwardDownWeight);
+        pushItem(block.feedForward.downBias, blockStates.feedForwardDownBias, blockGradients.feedForwardDownBias);
     }
 
-    this->adam.update(this->tokenEmbeddingWeight, this->tokenEmbeddingState, gradients.tokenEmbedding);
+    pushItem(this->tokenEmbeddingWeight, this->tokenEmbeddingState, gradients.tokenEmbedding);
+    this->adam.updateMany(items.data(), static_cast<int>(items.size()));
 }
 
 float CudaLanguageModel::averageLoss(const LanguageModelDataset& dataset) {
@@ -301,15 +323,22 @@ void CudaLanguageModel::runTrainSmokeDemo(int vocabularySize, int embeddingDim, 
     for (size_t index = 0; index < hostGradients.projectionWeight.data.size(); ++index)
         maximumDifference = (std::max)(maximumDifference, std::fabs(hostGradients.projectionWeight.data[index] - deviceProjectionWeightGrad.data[index]));
 
-    const int stepCount = 5;
+    const int warmupStepCount = 3;
+    const int timedStepCount = 40;
+    for (int step = 0; step < warmupStepCount; ++step) {
+        device.trainGradients.zeroInPlace();
+        device.accumulateExample(example, device.trainGradients);
+        device.applyGradients(device.trainGradients);
+    }
+    CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaLanguageModel train smoke warmup synchronize");
+
     const auto trainStart = std::chrono::steady_clock::now();
     int totalTokens = 0;
-    for (int step = 0; step < stepCount; ++step) {
+    for (int step = 0; step < timedStepCount; ++step) {
         device.trainGradients.zeroInPlace();
-        const float stepLoss = device.accumulateExample(example, device.trainGradients);
+        device.accumulateExample(example, device.trainGradients);
         device.applyGradients(device.trainGradients);
         totalTokens += sequenceLength;
-        (void)stepLoss;
     }
     CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaLanguageModel train smoke steps synchronize");
     const double trainSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - trainStart).count();

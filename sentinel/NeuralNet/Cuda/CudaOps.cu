@@ -315,6 +315,44 @@ __device__ void CudaOps::runCrossEntropyLogitGradientFromIds(const float* probab
     logitGradient[index] = gradient;
 }
 
+__device__ void CudaOps::runSoftmaxCrossEntropyFromLogits(const float* logits, const int* targetTokenIds, float* probabilities, float* logitGradient, float* lossSum, int vocabularySize, int tokenCount) {
+    const int column = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (column >= tokenCount) return;
+
+    float maximumLogit = logits[column];
+    for (int row = 1; row < vocabularySize; ++row) {
+        const float value = logits[row * tokenCount + column];
+        if (value > maximumLogit)
+            maximumLogit = value;
+    }
+
+    float exponentialSum = 0.0f;
+    for (int row = 0; row < vocabularySize; ++row) {
+        const float value = expf(logits[row * tokenCount + column] - maximumLogit);
+        probabilities[row * tokenCount + column] = value;
+        exponentialSum += value;
+    }
+
+    const float inverseSum = 1.0f / exponentialSum;
+    const float inverseTokenCount = 1.0f / static_cast<float>(tokenCount);
+    const int targetId = targetTokenIds[column];
+
+    for (int row = 0; row < vocabularySize; ++row) {
+        const float probability = probabilities[row * tokenCount + column] * inverseSum;
+        probabilities[row * tokenCount + column] = probability;
+        float gradient = probability * inverseTokenCount;
+        if (row == targetId)
+            gradient -= inverseTokenCount;
+        logitGradient[row * tokenCount + column] = gradient;
+    }
+
+    if (lossSum == nullptr) return;
+    if (targetId < 0 || targetId >= vocabularySize) return;
+    float targetProbability = probabilities[targetId * tokenCount + column];
+    if (targetProbability < 1e-7f) targetProbability = 1e-7f;
+    atomicAdd(lossSum, (-logf(targetProbability)) * inverseTokenCount);
+}
+
 __global__ void CudaOpsCrossEntropyLossFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* columnLosses, int vocabularySize, int tokenCount) {
     CudaOps::runCrossEntropyLossFromIds(probabilities, targetTokenIds, columnLosses, vocabularySize, tokenCount);
 }
@@ -325,6 +363,10 @@ __global__ void CudaOpsCrossEntropyAddMeanLossFromIdsEntry(const float* probabil
 
 __global__ void CudaOpsCrossEntropyLogitGradientFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* logitGradient, int vocabularySize, int tokenCount) {
     CudaOps::runCrossEntropyLogitGradientFromIds(probabilities, targetTokenIds, logitGradient, vocabularySize, tokenCount);
+}
+
+__global__ void CudaOpsSoftmaxCrossEntropyFromLogitsEntry(const float* logits, const int* targetTokenIds, float* probabilities, float* logitGradient, float* lossSum, int vocabularySize, int tokenCount) {
+    CudaOps::runSoftmaxCrossEntropyFromLogits(logits, targetTokenIds, probabilities, logitGradient, lossSum, vocabularySize, tokenCount);
 }
 
 __global__ void CudaOpsBroadcastBiasAddEntry(float* product, const float* bias, int rowCount, int columnCount) {
@@ -532,10 +574,7 @@ void CudaOps::zeroInPlace(CudaMatrix& matrix) {
     if (matrix.empty()) return;
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::zeroInPlace no CUDA device");
 
-    const int elementCount = static_cast<int>(matrix.elementCount());
-    const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsZeroEntry<<<blockCount, CudaOps::threadCount>>>(matrix.buffer.deviceData, elementCount);
-    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsZeroEntry launch");
+    CudaMatmul::throwIfCudaFailed(cudaMemset(matrix.buffer.deviceData, 0, matrix.byteCount()), "CudaOps::zeroInPlace memset");
 }
 
 void CudaOps::extractHeadInto(const CudaMatrix& full, int headIndex, int headDimension, CudaMatrix& head) {
@@ -768,4 +807,23 @@ void CudaOps::crossEntropyLogitGradientFromIdsInto(const CudaMatrix& probabiliti
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
     CudaOpsCrossEntropyLogitGradientFromIdsEntry<<<blockCount, CudaOps::threadCount>>>(probabilities.buffer.deviceData, targetTokenIds.deviceData, logitGradient.buffer.deviceData, vocabularySize, tokenCountInt);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsCrossEntropyLogitGradientFromIdsEntry launch");
+}
+
+void CudaOps::softmaxCrossEntropyFromLogitsInto(const CudaMatrix& logits, const CudaIntBuffer& targetTokenIds, size_t tokenCount, CudaMatrix& probabilities, CudaMatrix& logitGradient, CudaMatrix& lossSum) {
+    if (logits.empty()) throw std::invalid_argument("CudaOps::softmaxCrossEntropyFromLogitsInto empty logits");
+    if (tokenCount == 0) throw std::invalid_argument("CudaOps::softmaxCrossEntropyFromLogitsInto empty tokenCount");
+    if (logits.cols != tokenCount) throw std::invalid_argument("CudaOps::softmaxCrossEntropyFromLogitsInto tokenCount mismatch");
+    if (targetTokenIds.deviceData == nullptr) throw std::invalid_argument("CudaOps::softmaxCrossEntropyFromLogitsInto empty targetTokenIds");
+    if (tokenCount > targetTokenIds.capacityCount) throw std::invalid_argument("CudaOps::softmaxCrossEntropyFromLogitsInto tokenCount exceeds capacity");
+    if (lossSum.rows != 1 || lossSum.cols != 1) throw std::invalid_argument("CudaOps::softmaxCrossEntropyFromLogitsInto lossSum must be 1x1");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::softmaxCrossEntropyFromLogitsInto no CUDA device");
+
+    probabilities.ensureSize(logits.rows, logits.cols);
+    logitGradient.ensureSize(logits.rows, logits.cols);
+
+    const int vocabularySize = static_cast<int>(logits.rows);
+    const int tokenCountInt = static_cast<int>(tokenCount);
+    const int blockCount = (tokenCountInt + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsSoftmaxCrossEntropyFromLogitsEntry<<<blockCount, CudaOps::threadCount>>>(logits.buffer.deviceData, targetTokenIds.deviceData, probabilities.buffer.deviceData, logitGradient.buffer.deviceData, lossSum.buffer.deviceData, vocabularySize, tokenCountInt);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSoftmaxCrossEntropyFromLogitsEntry launch");
 }

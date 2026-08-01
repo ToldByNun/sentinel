@@ -79,10 +79,14 @@ void CudaDeviceBuffer::ensureCapacity(size_t requiredBytes) {
 }
 
 void CudaDeviceBuffer::copyFromHost(const float* hostData, size_t byteCount) {
-    if (hostData == nullptr) throw std::invalid_argument("CudaDeviceBuffer::copyFromHost null hostData");
+    this->copyBytesFromHost(hostData, byteCount);
+}
+
+void CudaDeviceBuffer::copyBytesFromHost(const void* hostData, size_t byteCount) {
+    if (hostData == nullptr) throw std::invalid_argument("CudaDeviceBuffer::copyBytesFromHost null hostData");
     if (byteCount == 0) return;
-    if (this->deviceData == nullptr) throw std::logic_error("CudaDeviceBuffer::copyFromHost empty buffer");
-    if (byteCount > this->capacityBytes) throw std::invalid_argument("CudaDeviceBuffer::copyFromHost exceeds capacity");
+    if (this->deviceData == nullptr) throw std::logic_error("CudaDeviceBuffer::copyBytesFromHost empty buffer");
+    if (byteCount > this->capacityBytes) throw std::invalid_argument("CudaDeviceBuffer::copyBytesFromHost exceeds capacity");
 
     CudaMatmul::throwIfCudaFailed(cudaMemcpy(this->deviceData, hostData, byteCount, cudaMemcpyHostToDevice), "cudaMemcpy host to device");
 }

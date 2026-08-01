@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cuda_runtime.h>
 #include <stdexcept>
+#include <vector>
 
 CudaAdamState CudaAdamState::zerosLike(const CudaMatrix& parameter) {
     CudaAdamState state;
@@ -47,35 +48,72 @@ __device__ void CudaAdam::runUpdate(float* parameter, float* firstMoment, float*
     parameter[index] -= learningRate * correctedFirst / (sqrtf(correctedSecond) + epsilon);
 }
 
+__device__ void CudaAdam::runUpdateMany(const CudaAdamUpdateItem* items, int itemCount, float learningRate, float beta1, float beta2, float epsilon, float inverseFirstCorrection, float inverseSecondCorrection) {
+    const int tensorIndex = static_cast<int>(blockIdx.x);
+    if (tensorIndex >= itemCount) return;
+
+    const CudaAdamUpdateItem item = items[tensorIndex];
+    for (int index = static_cast<int>(threadIdx.x); index < item.elementCount; index += static_cast<int>(blockDim.x)) {
+        const float gradientValue = item.gradient[index];
+        float updatedFirstMoment = beta1 * item.firstMoment[index] + (1.0f - beta1) * gradientValue;
+        float updatedSecondMoment = beta2 * item.secondMoment[index] + (1.0f - beta2) * gradientValue * gradientValue;
+        item.firstMoment[index] = updatedFirstMoment;
+        item.secondMoment[index] = updatedSecondMoment;
+
+        const float correctedFirst = updatedFirstMoment * inverseFirstCorrection;
+        const float correctedSecond = updatedSecondMoment * inverseSecondCorrection;
+        item.parameter[index] -= learningRate * correctedFirst / (sqrtf(correctedSecond) + epsilon);
+    }
+}
+
 __global__ void CudaAdamUpdateEntry(float* parameter, float* firstMoment, float* secondMoment, const float* gradient, int elementCount, float learningRate, float beta1, float beta2, float epsilon, float inverseFirstCorrection, float inverseSecondCorrection) {
     CudaAdam::runUpdate(parameter, firstMoment, secondMoment, gradient, elementCount, learningRate, beta1, beta2, epsilon, inverseFirstCorrection, inverseSecondCorrection);
 }
 
-void CudaAdam::update(CudaMatrix& parameter, CudaAdamState& state, const CudaMatrix& gradient) const {
-    if (this->timeStep <= 0) throw std::invalid_argument("CudaAdam::update requires step() before update");
-    if (parameter.rows != gradient.rows || parameter.cols != gradient.cols)
-        throw std::invalid_argument("CudaAdam::update parameter/gradient shape mismatch");
-    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaAdam::update no CUDA device");
+__global__ void CudaAdamUpdateManyEntry(const CudaAdamUpdateItem* items, int itemCount, float learningRate, float beta1, float beta2, float epsilon, float inverseFirstCorrection, float inverseSecondCorrection) {
+    CudaAdam::runUpdateMany(items, itemCount, learningRate, beta1, beta2, epsilon, inverseFirstCorrection, inverseSecondCorrection);
+}
 
+void CudaAdam::update(CudaMatrix& parameter, CudaAdamState& state, const CudaMatrix& gradient) const {
+    CudaAdamUpdateItem item;
+    item.parameter = parameter.buffer.deviceData;
     if (state.firstMoment.empty()) {
         state.firstMoment.ensureSize(parameter.rows, parameter.cols);
         state.secondMoment.ensureSize(parameter.rows, parameter.cols);
         CudaOps::zeroInPlace(state.firstMoment);
         CudaOps::zeroInPlace(state.secondMoment);
     }
-    if (state.firstMoment.rows != parameter.rows || state.firstMoment.cols != parameter.cols)
-        throw std::invalid_argument("CudaAdam::update moment shape mismatch");
+    item.firstMoment = state.firstMoment.buffer.deviceData;
+    item.secondMoment = state.secondMoment.buffer.deviceData;
+    item.gradient = gradient.buffer.deviceData;
+    item.elementCount = static_cast<int>(parameter.elementCount());
+    this->updateMany(&item, 1);
+}
+
+void CudaAdam::updateMany(const CudaAdamUpdateItem* items, int itemCount) const {
+    if (this->timeStep <= 0) throw std::invalid_argument("CudaAdam::updateMany requires step() before update");
+    if (items == nullptr || itemCount <= 0) throw std::invalid_argument("CudaAdam::updateMany empty items");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaAdam::updateMany no CUDA device");
+
+    for (int itemIndex = 0; itemIndex < itemCount; ++itemIndex) {
+        if (items[itemIndex].parameter == nullptr || items[itemIndex].firstMoment == nullptr || items[itemIndex].secondMoment == nullptr || items[itemIndex].gradient == nullptr)
+            throw std::invalid_argument("CudaAdam::updateMany null pointer");
+        if (items[itemIndex].elementCount <= 0) throw std::invalid_argument("CudaAdam::updateMany invalid elementCount");
+    }
 
     const float firstMomentCorrection = 1.0f - std::pow(this->beta1, static_cast<float>(this->timeStep));
     const float secondMomentCorrection = 1.0f - std::pow(this->beta2, static_cast<float>(this->timeStep));
     const float inverseFirstCorrection = 1.0f / firstMomentCorrection;
     const float inverseSecondCorrection = 1.0f / secondMomentCorrection;
 
-    const int elementCount = static_cast<int>(parameter.elementCount());
+    static CudaDeviceBuffer itemBuffer;
+    const size_t byteCount = static_cast<size_t>(itemCount) * sizeof(CudaAdamUpdateItem);
+    itemBuffer.ensureCapacity(byteCount);
+    itemBuffer.copyBytesFromHost(items, byteCount);
+
     constexpr int threadCount = 256;
-    const int blockCount = (elementCount + threadCount - 1) / threadCount;
-    CudaAdamUpdateEntry<<<blockCount, threadCount>>>(parameter.buffer.deviceData, state.firstMoment.buffer.deviceData, state.secondMoment.buffer.deviceData, gradient.buffer.deviceData, elementCount, this->learningRate, this->beta1, this->beta2, this->epsilon, inverseFirstCorrection, inverseSecondCorrection);
-    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaAdamUpdateEntry launch");
+    CudaAdamUpdateManyEntry<<<itemCount, threadCount>>>(reinterpret_cast<const CudaAdamUpdateItem*>(itemBuffer.deviceData), itemCount, this->learningRate, this->beta1, this->beta2, this->epsilon, inverseFirstCorrection, inverseSecondCorrection);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaAdamUpdateManyEntry launch");
 }
 
 void CudaAdam::runSmokeDemo(int parameterRows, int parameterCols) {

@@ -25,6 +25,9 @@ public:
     /// <summary>host to device copy into already capacious buffer</summary>
     void copyFromHost(const float* hostData, size_t byteCount);
 
+    /// <summary>host to device raw byte copy into already capacious buffer</summary>
+    void copyBytesFromHost(const void* hostData, size_t byteCount);
+
     /// <summary>device to host copy from already capacious buffer</summary>
     void copyToHost(float* hostData, size_t byteCount) const;
 
