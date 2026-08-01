@@ -87,12 +87,12 @@ CudaTransformerBlock CudaTransformerBlock::createFrom(const TransformerBlock& ho
     return device;
 }
 
-void CudaTransformerBlock::forward(const CudaMatrix& input, CudaMatrix& out) {
+void CudaTransformerBlock::forward(const CudaMatrix& input, CudaMatrix& out, int segmentLength) {
     if (input.empty()) throw std::invalid_argument("CudaTransformerBlock::forward empty input");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaTransformerBlock::forward no CUDA device");
 
     this->attentionNorm.forward(input, this->attentionInput);
-    this->attention.forward(this->attentionInput, this->attended);
+    this->attention.forward(this->attentionInput, this->attended, segmentLength);
     CudaOps::addInto(input, this->attended, this->afterAttention);
 
     this->feedForwardNorm.forward(this->afterAttention, this->feedForwardInput);

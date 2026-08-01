@@ -101,7 +101,7 @@ void LanguageModel::enableCudaTrain() {
     }
 
     this->deviceTrainEnabled = true;
-    std::cout << "LanguageModel::enableCudaTrain: device training enabled (sequential; OpenMP host is usually faster until packed batches)\n";
+    std::cout << "LanguageModel::enableCudaTrain: device training enabled (packed equal-length batches)\n";
 }
 
 bool LanguageModel::cudaEnabled() const {

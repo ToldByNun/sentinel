@@ -55,7 +55,7 @@ public:
     static void applyCausalMaskInPlace(CudaMatrix& scores);
 
     /// <summary>causal window plus global token mask queryAbsolute = queryPositionStart + queryCol</summary>
-    static void applySparseAttentionMaskInPlace(CudaMatrix& scores, int windowSize, int globalTokenCount, int queryPositionStart = 0);
+    static void applySparseAttentionMaskInPlace(CudaMatrix& scores, int windowSize, int globalTokenCount, int queryPositionStart = 0, int segmentLength = 0);
 
     /// <summary>column wise softmax writing into out</summary>
     static void softmaxInto(const CudaMatrix& logits, CudaMatrix& out);
@@ -64,13 +64,13 @@ public:
     static void softmaxBackwardInto(const CudaMatrix& probabilities, const CudaMatrix& probabilityGradient, CudaMatrix& scoreGradient);
 
     /// <summary>zero score gradients at sparse attention forbidden positions</summary>
-    static void zeroForbiddenScoreGradientsInPlace(CudaMatrix& scoresGrad, int windowSize, int globalTokenCount, int queryPositionStart = 0);
+    static void zeroForbiddenScoreGradientsInPlace(CudaMatrix& scoresGrad, int windowSize, int globalTokenCount, int queryPositionStart = 0, int segmentLength = 0);
 
     /// <summary>RoPE rotate Q or K in place column c uses position positionOffset + c</summary>
-    static void rotaryRotateInPlace(CudaMatrix& tensor, int headCount, int headDimension, int pairCount, const CudaMatrix& cosTable, const CudaMatrix& sinTable, int positionOffset = 0);
+    static void rotaryRotateInPlace(CudaMatrix& tensor, int headCount, int headDimension, int pairCount, const CudaMatrix& cosTable, const CudaMatrix& sinTable, int positionOffset = 0, int segmentLength = 0);
 
     /// <summary>inverse RoPE rotate Q or K in place</summary>
-    static void rotaryRotateInverseInPlace(CudaMatrix& tensor, int headCount, int headDimension, int pairCount, const CudaMatrix& cosTable, const CudaMatrix& sinTable, int positionOffset = 0);
+    static void rotaryRotateInverseInPlace(CudaMatrix& tensor, int headCount, int headDimension, int pairCount, const CudaMatrix& cosTable, const CudaMatrix& sinTable, int positionOffset = 0, int segmentLength = 0);
 
     /// <summary>gather embedding rows into embedDim x tokenCount matrix</summary>
     static void embeddingGatherInto(const CudaMatrix& weight, const CudaIntBuffer& tokenIds, size_t tokenCount, CudaMatrix& out);
@@ -87,8 +87,8 @@ public:
     /// <summary>logit grad (softmax - onehot) / columns from index targets</summary>
     static void crossEntropyLogitGradientFromIdsInto(const CudaMatrix& probabilities, const CudaIntBuffer& targetTokenIds, size_t tokenCount, CudaMatrix& logitGradient);
 
-    /// <summary>softmax + CE mean loss accumulate + logit grad from logits in one launch</summary>
-    static void softmaxCrossEntropyFromLogitsInto(const CudaMatrix& logits, const CudaIntBuffer& targetTokenIds, size_t tokenCount, CudaMatrix& probabilities, CudaMatrix& logitGradient, CudaMatrix& lossSum);
+    /// <summary>softmax + CE loss accumulate + logit grad meanDivisor defaults to tokenCount</summary>
+    static void softmaxCrossEntropyFromLogitsInto(const CudaMatrix& logits, const CudaIntBuffer& targetTokenIds, size_t tokenCount, CudaMatrix& probabilities, CudaMatrix& logitGradient, CudaMatrix& lossSum, float lossScale = 1.0f, int meanDivisor = 0);
 
 private:
     static constexpr int threadCount = 256;
@@ -108,18 +108,18 @@ private:
     __device__ static void runWriteHead(float* full, const float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim);
     __device__ static void runWriteColumnsInto(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount);
     __device__ static void runApplyCausalMaskInPlace(float* scores, int sequenceLength);
-    __device__ static void runApplySparseAttentionMaskInPlace(float* scores, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount);
+    __device__ static void runApplySparseAttentionMaskInPlace(float* scores, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount, int segmentLength);
     __device__ static void runSoftmaxInto(const float* logits, float* out, int rowCount, int columnCount);
     __device__ static void runSoftmaxBackwardInto(const float* probabilities, const float* probabilityGradient, float* scoreGradient, int rowCount, int columnCount);
-    __device__ static void runZeroForbiddenScoreGradientsInPlace(float* scoresGrad, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount);
-    __device__ static void runRotaryRotateInPlace(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable);
-    __device__ static void runRotaryRotateInverseInPlace(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable);
+    __device__ static void runZeroForbiddenScoreGradientsInPlace(float* scoresGrad, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount, int segmentLength);
+    __device__ static void runRotaryRotateInPlace(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, int segmentLength, const float* cosTable, const float* sinTable);
+    __device__ static void runRotaryRotateInverseInPlace(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, int segmentLength, const float* cosTable, const float* sinTable);
     __device__ static void runEmbeddingGatherInto(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);
     __device__ static void runEmbeddingScatterAddInto(float* weightGradient, const int* tokenIds, const float* outputGradient, int embeddingDim, int tokenCount, int vocabularySize);
     __device__ static void runCrossEntropyLossFromIds(const float* probabilities, const int* targetTokenIds, float* columnLosses, int vocabularySize, int tokenCount);
     __device__ static void runCrossEntropyAddMeanLossFromIds(const float* probabilities, const int* targetTokenIds, float* lossSum, int vocabularySize, int tokenCount);
     __device__ static void runCrossEntropyLogitGradientFromIds(const float* probabilities, const int* targetTokenIds, float* logitGradient, int vocabularySize, int tokenCount);
-    __device__ static void runSoftmaxCrossEntropyFromLogits(const float* logits, const int* targetTokenIds, float* probabilities, float* logitGradient, float* lossSum, int vocabularySize, int tokenCount);
+    __device__ static void runSoftmaxCrossEntropyFromLogits(const float* logits, const int* targetTokenIds, float* probabilities, float* logitGradient, float* lossSum, int vocabularySize, int tokenCount, float lossScale, int meanDivisor);
 
     friend __global__ void CudaOpsBroadcastBiasAddEntry(float* product, const float* bias, int rowCount, int columnCount);
     friend __global__ void CudaOpsSiluEntry(const float* input, float* out, int elementCount);
@@ -135,18 +135,18 @@ private:
     friend __global__ void CudaOpsWriteHeadEntry(float* full, const float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim);
     friend __global__ void CudaOpsWriteColumnsEntry(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount);
     friend __global__ void CudaOpsCausalMaskEntry(float* scores, int sequenceLength);
-    friend __global__ void CudaOpsSparseAttentionMaskEntry(float* scores, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount);
+    friend __global__ void CudaOpsSparseAttentionMaskEntry(float* scores, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount, int segmentLength);
     friend __global__ void CudaOpsSoftmaxEntry(const float* logits, float* out, int rowCount, int columnCount);
     friend __global__ void CudaOpsSoftmaxBackwardEntry(const float* probabilities, const float* probabilityGradient, float* scoreGradient, int rowCount, int columnCount);
-    friend __global__ void CudaOpsZeroForbiddenScoreGradientsEntry(float* scoresGrad, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount);
-    friend __global__ void CudaOpsRotaryRotateEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable);
-    friend __global__ void CudaOpsRotaryRotateInverseEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable);
+    friend __global__ void CudaOpsZeroForbiddenScoreGradientsEntry(float* scoresGrad, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount, int segmentLength);
+    friend __global__ void CudaOpsRotaryRotateEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, int segmentLength, const float* cosTable, const float* sinTable);
+    friend __global__ void CudaOpsRotaryRotateInverseEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, int segmentLength, const float* cosTable, const float* sinTable);
     friend __global__ void CudaOpsEmbeddingGatherEntry(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);
     friend __global__ void CudaOpsEmbeddingScatterAddEntry(float* weightGradient, const int* tokenIds, const float* outputGradient, int embeddingDim, int tokenCount, int vocabularySize);
     friend __global__ void CudaOpsCrossEntropyLossFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* columnLosses, int vocabularySize, int tokenCount);
     friend __global__ void CudaOpsCrossEntropyAddMeanLossFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* lossSum, int vocabularySize, int tokenCount);
     friend __global__ void CudaOpsCrossEntropyLogitGradientFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* logitGradient, int vocabularySize, int tokenCount);
-    friend __global__ void CudaOpsSoftmaxCrossEntropyFromLogitsEntry(const float* logits, const int* targetTokenIds, float* probabilities, float* logitGradient, float* lossSum, int vocabularySize, int tokenCount);
+    friend __global__ void CudaOpsSoftmaxCrossEntropyFromLogitsEntry(const float* logits, const int* targetTokenIds, float* probabilities, float* logitGradient, float* lossSum, int vocabularySize, int tokenCount, float lossScale, int meanDivisor);
 #endif
 };
 
@@ -165,18 +165,18 @@ __global__ void CudaOpsExtractHeadEntry(const float* full, float* head, int head
 __global__ void CudaOpsWriteHeadEntry(float* full, const float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim);
 __global__ void CudaOpsWriteColumnsEntry(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount);
 __global__ void CudaOpsCausalMaskEntry(float* scores, int sequenceLength);
-__global__ void CudaOpsSparseAttentionMaskEntry(float* scores, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount);
+__global__ void CudaOpsSparseAttentionMaskEntry(float* scores, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount, int segmentLength);
 __global__ void CudaOpsSoftmaxEntry(const float* logits, float* out, int rowCount, int columnCount);
 __global__ void CudaOpsSoftmaxBackwardEntry(const float* probabilities, const float* probabilityGradient, float* scoreGradient, int rowCount, int columnCount);
-__global__ void CudaOpsZeroForbiddenScoreGradientsEntry(float* scoresGrad, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount);
-__global__ void CudaOpsRotaryRotateEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable);
-__global__ void CudaOpsRotaryRotateInverseEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable);
+__global__ void CudaOpsZeroForbiddenScoreGradientsEntry(float* scoresGrad, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount, int segmentLength);
+__global__ void CudaOpsRotaryRotateEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, int segmentLength, const float* cosTable, const float* sinTable);
+__global__ void CudaOpsRotaryRotateInverseEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, int segmentLength, const float* cosTable, const float* sinTable);
 __global__ void CudaOpsEmbeddingGatherEntry(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);
 __global__ void CudaOpsEmbeddingScatterAddEntry(float* weightGradient, const int* tokenIds, const float* outputGradient, int embeddingDim, int tokenCount, int vocabularySize);
 __global__ void CudaOpsCrossEntropyLossFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* columnLosses, int vocabularySize, int tokenCount);
 __global__ void CudaOpsCrossEntropyAddMeanLossFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* lossSum, int vocabularySize, int tokenCount);
 __global__ void CudaOpsCrossEntropyLogitGradientFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* logitGradient, int vocabularySize, int tokenCount);
-__global__ void CudaOpsSoftmaxCrossEntropyFromLogitsEntry(const float* logits, const int* targetTokenIds, float* probabilities, float* logitGradient, float* lossSum, int vocabularySize, int tokenCount);
+__global__ void CudaOpsSoftmaxCrossEntropyFromLogitsEntry(const float* logits, const int* targetTokenIds, float* probabilities, float* logitGradient, float* lossSum, int vocabularySize, int tokenCount, float lossScale, int meanDivisor);
 #endif
 
 #endif // CUDAOPS_HPP

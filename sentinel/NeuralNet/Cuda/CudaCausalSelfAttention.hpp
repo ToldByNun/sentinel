@@ -22,6 +22,7 @@ public:
     int maximumPositionCount;
     int windowSize;
     int globalTokenCount;
+    int activeSegmentLength;
 
     CudaMatrix query;
     CudaMatrix key;
@@ -57,7 +58,7 @@ public:
     static CudaCausalSelfAttention createFrom(const CausalSelfAttention& host);
 
     /// <summary>causal multi head attention writing into out</summary>
-    void forward(const CudaMatrix& input, CudaMatrix& out);
+    void forward(const CudaMatrix& input, CudaMatrix& out, int segmentLength = 0);
 
     /// <summary>backprop through multi head attention fills weight gradients via out params</summary>
     void backward(const CudaMatrix& outputGradient, CudaMatrix& inputGradient, CudaMatrix& queryWeightGradient, CudaMatrix& keyWeightGradient, CudaMatrix& valueWeightGradient, CudaMatrix& outputWeightGradient);
@@ -81,8 +82,8 @@ public:
     static void runSparseSmokeDemo(int embeddingDim = 32, int headCount = 2, int sequenceLength = 16, int maximumPositionCount = 32, int windowSize = 4, int globalTokenCount = 2);
 
 private:
-    void projectAndRotate(const CudaMatrix& input, int positionOffset);
-    void attendFullSequence(CudaMatrix& out);
+    void projectAndRotate(const CudaMatrix& input, int positionOffset, int segmentLength = 0);
+    void attendFullSequence(CudaMatrix& out, int segmentLength = -1);
     void attendCachedQuery(const CudaKvCache& cache, CudaMatrix& out);
 };
 

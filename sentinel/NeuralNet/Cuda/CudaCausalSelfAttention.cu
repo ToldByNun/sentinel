@@ -11,7 +11,7 @@
 #include <stdexcept>
 
 CudaCausalSelfAttention::CudaCausalSelfAttention()
-    : headCount(0), headDimension(0), pairCount(0), maximumPositionCount(0), windowSize(0), globalTokenCount(0) {}
+    : headCount(0), headDimension(0), pairCount(0), maximumPositionCount(0), windowSize(0), globalTokenCount(0), activeSegmentLength(0) {}
 
 void CudaCausalSelfAttention::uploadFrom(const CausalSelfAttention& host) {
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaCausalSelfAttention::uploadFrom no CUDA device");
@@ -46,18 +46,19 @@ CudaCausalSelfAttention CudaCausalSelfAttention::createFrom(const CausalSelfAtte
     return device;
 }
 
-void CudaCausalSelfAttention::projectAndRotate(const CudaMatrix& input, int positionOffset) {
+void CudaCausalSelfAttention::projectAndRotate(const CudaMatrix& input, int positionOffset, int segmentLength) {
     CudaOps::copyInto(input, this->inputCache);
     CudaMatrix::multiplyInto(this->queryWeight, input, this->query);
     CudaMatrix::multiplyInto(this->keyWeight, input, this->key);
     CudaMatrix::multiplyInto(this->valueWeight, input, this->value);
-    CudaOps::rotaryRotateInPlace(this->query, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, positionOffset);
-    CudaOps::rotaryRotateInPlace(this->key, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, positionOffset);
+    CudaOps::rotaryRotateInPlace(this->query, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, positionOffset, segmentLength);
+    CudaOps::rotaryRotateInPlace(this->key, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, positionOffset, segmentLength);
 }
 
-void CudaCausalSelfAttention::attendFullSequence(CudaMatrix& out) {
+void CudaCausalSelfAttention::attendFullSequence(CudaMatrix& out, int segmentLength) {
     const size_t sequenceLength = this->query.cols;
     const float scale = 1.0f / std::sqrt(static_cast<float>(this->headDimension));
+    if (segmentLength < 0) segmentLength = this->activeSegmentLength;
 
     this->attended.ensureSize(this->query.rows, sequenceLength);
     CudaOps::zeroInPlace(this->attended);
@@ -72,7 +73,7 @@ void CudaCausalSelfAttention::attendFullSequence(CudaMatrix& out) {
 
         CudaMatrix::multiplyInto(this->keyHead, this->queryHead, this->scores, true, false);
         CudaOps::scaleInPlace(this->scores, scale);
-        CudaOps::applySparseAttentionMaskInPlace(this->scores, this->windowSize, this->globalTokenCount, 0);
+        CudaOps::applySparseAttentionMaskInPlace(this->scores, this->windowSize, this->globalTokenCount, 0, segmentLength);
         CudaOps::softmaxInto(this->scores, this->probabilities);
         CudaOps::copyInto(this->probabilities, this->cachedHeadProbabilities[static_cast<size_t>(headIndex)]);
         CudaMatrix::multiplyInto(this->valueHead, this->probabilities, this->attendedHead);
@@ -106,14 +107,17 @@ void CudaCausalSelfAttention::attendCachedQuery(const CudaKvCache& cache, CudaMa
     CudaMatrix::multiplyInto(this->outputWeight, this->attended, out);
 }
 
-void CudaCausalSelfAttention::forward(const CudaMatrix& input, CudaMatrix& out) {
+void CudaCausalSelfAttention::forward(const CudaMatrix& input, CudaMatrix& out, int segmentLength) {
     if (input.empty()) throw std::invalid_argument("CudaCausalSelfAttention::forward empty input");
     if (this->queryWeight.empty()) throw std::logic_error("CudaCausalSelfAttention::forward weights not uploaded");
     if (this->queryWeight.cols != input.rows) throw std::invalid_argument("CudaCausalSelfAttention::forward embedding dim mismatch");
-    if (static_cast<int>(input.cols) > this->maximumPositionCount) throw std::invalid_argument("CudaCausalSelfAttention::forward sequence longer than maximumPositionCount");
+    if (segmentLength <= 0) segmentLength = static_cast<int>(input.cols);
+    if (static_cast<int>(input.cols) % segmentLength != 0) throw std::invalid_argument("CudaCausalSelfAttention::forward cols not divisible by segmentLength");
+    if (segmentLength > this->maximumPositionCount) throw std::invalid_argument("CudaCausalSelfAttention::forward segmentLength exceeds maximumPositionCount");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaCausalSelfAttention::forward no CUDA device");
 
-    this->projectAndRotate(input, 0);
+    this->activeSegmentLength = segmentLength;
+    this->projectAndRotate(input, 0, segmentLength);
     this->attendFullSequence(out);
 }
 
@@ -147,7 +151,7 @@ void CudaCausalSelfAttention::backward(const CudaMatrix& outputGradient, CudaMat
         CudaMatrix::multiplyInto(this->attendedHead, headProbabilities, this->valueHeadGradient, false, true);
         CudaMatrix::multiplyInto(this->valueHead, this->attendedHead, this->probabilityGradient, true, false);
         CudaOps::softmaxBackwardInto(headProbabilities, this->probabilityGradient, this->scoreGradient);
-        CudaOps::zeroForbiddenScoreGradientsInPlace(this->scoreGradient, this->windowSize, this->globalTokenCount, 0);
+        CudaOps::zeroForbiddenScoreGradientsInPlace(this->scoreGradient, this->windowSize, this->globalTokenCount, 0, this->activeSegmentLength);
         CudaOps::scaleInPlace(this->scoreGradient, scale);
         CudaMatrix::multiplyInto(this->keyHead, this->scoreGradient, this->queryHeadGradient);
         CudaMatrix::multiplyInto(this->queryHead, this->scoreGradient, this->keyHeadGradient, false, true);
@@ -157,8 +161,8 @@ void CudaCausalSelfAttention::backward(const CudaMatrix& outputGradient, CudaMat
         CudaOps::writeHead(this->valueGradient, headIndex, this->headDimension, this->valueHeadGradient);
     }
 
-    CudaOps::rotaryRotateInverseInPlace(this->queryGradient, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, 0);
-    CudaOps::rotaryRotateInverseInPlace(this->keyGradient, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, 0);
+    CudaOps::rotaryRotateInverseInPlace(this->queryGradient, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, 0, this->activeSegmentLength);
+    CudaOps::rotaryRotateInverseInPlace(this->keyGradient, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, 0, this->activeSegmentLength);
 
     CudaMatrix::multiplyInto(this->queryGradient, this->inputCache, queryWeightGradient, false, true);
     CudaMatrix::multiplyInto(this->keyGradient, this->inputCache, keyWeightGradient, false, true);
@@ -181,7 +185,7 @@ void CudaCausalSelfAttention::prefill(const CudaMatrix& input, CudaKvCache& cach
     cache.ensureCapacity(static_cast<int>(input.rows), this->maximumPositionCount);
     this->projectAndRotate(input, 0);
     cache.append(this->key, this->value);
-    this->attendFullSequence(out);
+    this->attendFullSequence(out, 0);
 }
 
 void CudaCausalSelfAttention::decode(const CudaMatrix& input, CudaKvCache& cache, CudaMatrix& out) {

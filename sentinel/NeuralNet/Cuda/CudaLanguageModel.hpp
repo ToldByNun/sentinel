@@ -188,6 +188,10 @@ public:
 
     bool trainStateReady;
 
+    std::vector<int> packedInputTokenIds;
+
+    std::vector<int> packedTargetTokenIds;
+
 
 
     CudaLanguageModel();
@@ -206,9 +210,9 @@ public:
 
 
 
-    /// <summary>logits vocabSize x sequenceLength staying on device</summary>
+    /// <summary>logits vocabSize x sequenceLength staying on device segmentLength packs equal-length sequences</summary>
 
-    void forwardInto(const std::vector<int>& tokenIds, CudaMatrix& outLogits);
+    void forwardInto(const std::vector<int>& tokenIds, CudaMatrix& outLogits, int segmentLength = 0);
 
 
 
@@ -251,6 +255,12 @@ public:
     /// <summary>forward backward one example accumulating into gradients returns mean loss</summary>
 
     float accumulateExample(const LanguageModelExample& example, CudaLanguageModelGradients& gradients);
+
+
+
+    /// <summary>forward backward one packed batch of equal-length examples</summary>
+
+    float accumulatePackedExamples(const LanguageModelExample* const* examples, int exampleCount, CudaLanguageModelGradients& gradients);
 
 
 

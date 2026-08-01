@@ -124,7 +124,7 @@ int main() {
         SmokeLog::result("framework parity", "diff=%.2e", maximumDifference);
     }
 
-    // Device train is opt-in via enableCudaTrain(); tiny models are faster on OpenMP until packed batches (P2)
+    // Device train is opt-in via enableCudaTrain(); packing is on for equal-length batches
     model.train(trainDataset, testDataset, 5, 1, 64);
 
     SmokeLog::result("final", "trainLoss=%.6f", model.averageLoss(trainDataset));
