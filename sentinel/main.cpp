@@ -42,8 +42,10 @@ int main() {
     CudaFeedForward::runSmokeDemo(128, 64);
     CudaRMSNorm::runSmokeDemo(128, 64);
     CudaCausalSelfAttention::runSmokeDemo(64, 4, 32, 64);
+    CudaCausalSelfAttention::runKvCacheSmokeDemo(64, 4, 32, 64);
     CudaTransformerBlock::runSmokeDemo(64, 4, 32, 64);
     CudaLanguageModel::runSmokeDemo(128, 64, 32, 2, 4);
+    CudaLanguageModel::runKvCacheSmokeDemo(128, 64, 32, 2, 4);
 
     // 0 = load entire jsonl (sera_sample has 10000 rows)
     std::vector<JsonlRow> rows = JsonlLoader::load(samplePath, 0);

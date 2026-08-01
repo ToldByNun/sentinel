@@ -141,6 +141,7 @@ C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\vector_function
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\vector_types.h
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaCausalSelfAttention.hpp
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaFeedForward.hpp
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaKvCache.hpp
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaMatmul.hpp
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaOps.hpp
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaRMSNorm.hpp

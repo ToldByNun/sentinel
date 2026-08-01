@@ -2,6 +2,7 @@
 #define CUDACAUSALSELFATTENTION_HPP
 
 #include "../Layers/CausalSelfAttention.hpp"
+#include "CudaKvCache.hpp"
 #include "CudaMatmul.hpp"
 
 /// <summary>device resident causal multi head attention forward with RoPE</summary>
@@ -41,8 +42,22 @@ public:
     /// <summary>causal multi head attention writing into out</summary>
     void forward(const CudaMatrix& input, CudaMatrix& out);
 
+    /// <summary>reset cache then run full sequence attention and append rotated KV</summary>
+    void prefill(const CudaMatrix& input, CudaKvCache& cache, CudaMatrix& out);
+
+    /// <summary>single token attention against append only KV cache</summary>
+    void decode(const CudaMatrix& input, CudaKvCache& cache, CudaMatrix& out);
+
     /// <summary>compare CPU attention vs device forward</summary>
     static void runSmokeDemo(int embeddingDim = 64, int headCount = 4, int sequenceLength = 32, int maximumPositionCount = 64);
+
+    /// <summary>compare prefill plus decode last token vs full forward last column</summary>
+    static void runKvCacheSmokeDemo(int embeddingDim = 64, int headCount = 4, int sequenceLength = 32, int maximumPositionCount = 64);
+
+private:
+    void projectAndRotate(const CudaMatrix& input, int positionOffset);
+    void attendFullSequence(CudaMatrix& out);
+    void attendCachedQuery(const CudaKvCache& cache, CudaMatrix& out);
 };
 
 #endif // CUDACAUSALSELFATTENTION_HPP

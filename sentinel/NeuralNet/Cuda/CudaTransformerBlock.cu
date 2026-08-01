@@ -39,6 +39,32 @@ void CudaTransformerBlock::forward(const CudaMatrix& input, CudaMatrix& out) {
     CudaOps::addInto(this->afterAttention, this->feedForwardOutput, out);
 }
 
+void CudaTransformerBlock::prefill(const CudaMatrix& input, CudaKvCache& cache, CudaMatrix& out) {
+    if (input.empty()) throw std::invalid_argument("CudaTransformerBlock::prefill empty input");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaTransformerBlock::prefill no CUDA device");
+
+    this->attentionNorm.forward(input, this->attentionInput);
+    this->attention.prefill(this->attentionInput, cache, this->attended);
+    CudaOps::addInto(input, this->attended, this->afterAttention);
+
+    this->feedForwardNorm.forward(this->afterAttention, this->feedForwardInput);
+    this->feedForward.forward(this->feedForwardInput, this->feedForwardOutput);
+    CudaOps::addInto(this->afterAttention, this->feedForwardOutput, out);
+}
+
+void CudaTransformerBlock::decode(const CudaMatrix& input, CudaKvCache& cache, CudaMatrix& out) {
+    if (input.empty()) throw std::invalid_argument("CudaTransformerBlock::decode empty input");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaTransformerBlock::decode no CUDA device");
+
+    this->attentionNorm.forward(input, this->attentionInput);
+    this->attention.decode(this->attentionInput, cache, this->attended);
+    CudaOps::addInto(input, this->attended, this->afterAttention);
+
+    this->feedForwardNorm.forward(this->afterAttention, this->feedForwardInput);
+    this->feedForward.forward(this->feedForwardInput, this->feedForwardOutput);
+    CudaOps::addInto(this->afterAttention, this->feedForwardOutput, out);
+}
+
 void CudaTransformerBlock::runSmokeDemo(int embeddingDim, int headCount, int sequenceLength, int maximumPositionCount) {
     if (!CudaMatmul::isAvailable()) {
         std::printf("CUDA TransformerBlock smoke: no device\n");

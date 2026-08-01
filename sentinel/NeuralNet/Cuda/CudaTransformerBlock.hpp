@@ -4,6 +4,7 @@
 #include "../Layers/TransformerBlock.hpp"
 #include "CudaCausalSelfAttention.hpp"
 #include "CudaFeedForward.hpp"
+#include "CudaKvCache.hpp"
 #include "CudaRMSNorm.hpp"
 
 /// <summary>device resident pre-norm transformer block forward</summary>
@@ -30,6 +31,12 @@ public:
 
     /// <summary>RMSNorm Attn residual RMSNorm SwiGLU residual writing into out</summary>
     void forward(const CudaMatrix& input, CudaMatrix& out);
+
+    /// <summary>prefill attention KV cache then residual FFN</summary>
+    void prefill(const CudaMatrix& input, CudaKvCache& cache, CudaMatrix& out);
+
+    /// <summary>decode one token against attention KV cache then residual FFN</summary>
+    void decode(const CudaMatrix& input, CudaKvCache& cache, CudaMatrix& out);
 
     /// <summary>compare CPU transformer block vs device forward</summary>
     static void runSmokeDemo(int embeddingDim = 64, int headCount = 4, int sequenceLength = 32, int maximumPositionCount = 64);

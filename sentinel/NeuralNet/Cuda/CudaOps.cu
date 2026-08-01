@@ -49,16 +49,15 @@ __device__ void CudaOps::runZeroInPlace(float* matrix, int elementCount) {
     matrix[index] = 0.0f;
 }
 
-__device__ void CudaOps::runExtractHeadInto(const float* full, float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim) {
-    const int elementCount = headDimension * sequenceLength;
+__device__ void CudaOps::runExtractHeadInto(const float* full, float* head, int headIndex, int headDimension, int sourceStrideColumns, int usedColumnCount) {
+    const int elementCount = headDimension * usedColumnCount;
     const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
     if (index >= elementCount) return;
 
-    const int row = index / sequenceLength;
-    const int column = index - row * sequenceLength;
+    const int row = index / usedColumnCount;
+    const int column = index - row * usedColumnCount;
     const int fullRow = headIndex * headDimension + row;
-    head[index] = full[fullRow * sequenceLength + column];
-    (void)embeddingDim;
+    head[index] = full[fullRow * sourceStrideColumns + column];
 }
 
 __device__ void CudaOps::runWriteHead(float* full, const float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim) {
@@ -71,6 +70,17 @@ __device__ void CudaOps::runWriteHead(float* full, const float* head, int headIn
     const int fullRow = headIndex * headDimension + row;
     full[fullRow * sequenceLength + column] = head[index];
     (void)embeddingDim;
+}
+
+__device__ void CudaOps::runWriteColumnsInto(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount) {
+    const int elementCount = embeddingDim * sourceColumnCount;
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+
+    const int row = index / sourceColumnCount;
+    const int sourceColumn = index - row * sourceColumnCount;
+    const int destinationColumn = destinationStartColumn + sourceColumn;
+    destination[row * destinationStrideColumns + destinationColumn] = source[index];
 }
 
 __device__ void CudaOps::runApplyCausalMaskInPlace(float* scores, int sequenceLength) {
@@ -107,16 +117,17 @@ __device__ void CudaOps::runSoftmaxInto(const float* logits, float* out, int row
         out[row * columnCount + column] *= inverseSum;
 }
 
-__device__ void CudaOps::runRotaryRotateInPlace(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, const float* cosTable, const float* sinTable) {
+__device__ void CudaOps::runRotaryRotateInPlace(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable) {
     const int position = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
     if (position >= sequenceLength) return;
 
+    const int absolutePosition = positionOffset + position;
     for (int headIndex = 0; headIndex < headCount; ++headIndex) {
         const int rowOffset = headIndex * headDimension;
         for (int pairIndex = 0; pairIndex < pairCount; ++pairIndex) {
             const int rowEven = rowOffset + 2 * pairIndex;
             const int rowOdd = rowEven + 1;
-            const int tableIndex = position * pairCount + pairIndex;
+            const int tableIndex = absolutePosition * pairCount + pairIndex;
             const float cosValue = cosTable[tableIndex];
             const float sinValue = sinTable[tableIndex];
             const float evenValue = tensor[rowEven * sequenceLength + position];
@@ -167,12 +178,16 @@ __global__ void CudaOpsZeroEntry(float* matrix, int elementCount) {
     CudaOps::runZeroInPlace(matrix, elementCount);
 }
 
-__global__ void CudaOpsExtractHeadEntry(const float* full, float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim) {
-    CudaOps::runExtractHeadInto(full, head, headIndex, headDimension, sequenceLength, embeddingDim);
+__global__ void CudaOpsExtractHeadEntry(const float* full, float* head, int headIndex, int headDimension, int sourceStrideColumns, int usedColumnCount) {
+    CudaOps::runExtractHeadInto(full, head, headIndex, headDimension, sourceStrideColumns, usedColumnCount);
 }
 
 __global__ void CudaOpsWriteHeadEntry(float* full, const float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim) {
     CudaOps::runWriteHead(full, head, headIndex, headDimension, sequenceLength, embeddingDim);
+}
+
+__global__ void CudaOpsWriteColumnsEntry(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount) {
+    CudaOps::runWriteColumnsInto(destination, source, embeddingDim, destinationStrideColumns, destinationStartColumn, sourceColumnCount);
 }
 
 __global__ void CudaOpsCausalMaskEntry(float* scores, int sequenceLength) {
@@ -183,8 +198,8 @@ __global__ void CudaOpsSoftmaxEntry(const float* logits, float* out, int rowCoun
     CudaOps::runSoftmaxInto(logits, out, rowCount, columnCount);
 }
 
-__global__ void CudaOpsRotaryRotateEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, const float* cosTable, const float* sinTable) {
-    CudaOps::runRotaryRotateInPlace(tensor, headCount, headDimension, pairCount, sequenceLength, cosTable, sinTable);
+__global__ void CudaOpsRotaryRotateEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable) {
+    CudaOps::runRotaryRotateInPlace(tensor, headCount, headDimension, pairCount, sequenceLength, positionOffset, cosTable, sinTable);
 }
 
 __global__ void CudaOpsEmbeddingGatherEntry(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize) {
@@ -262,15 +277,20 @@ void CudaOps::zeroInPlace(CudaMatrix& matrix) {
 }
 
 void CudaOps::extractHeadInto(const CudaMatrix& full, int headIndex, int headDimension, CudaMatrix& head) {
+    CudaOps::extractHeadInto(full, headIndex, headDimension, static_cast<int>(full.cols), head);
+}
+
+void CudaOps::extractHeadInto(const CudaMatrix& full, int headIndex, int headDimension, int usedColumnCount, CudaMatrix& head) {
     if (full.empty()) throw std::invalid_argument("CudaOps::extractHeadInto empty full");
     if (headIndex < 0 || headDimension <= 0) throw std::invalid_argument("CudaOps::extractHeadInto invalid head");
+    if (usedColumnCount <= 0 || usedColumnCount > static_cast<int>(full.cols)) throw std::invalid_argument("CudaOps::extractHeadInto invalid usedColumnCount");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::extractHeadInto no CUDA device");
 
-    head.ensureSize(static_cast<size_t>(headDimension), full.cols);
-    const int sequenceLength = static_cast<int>(full.cols);
-    const int elementCount = headDimension * sequenceLength;
+    head.ensureSize(static_cast<size_t>(headDimension), static_cast<size_t>(usedColumnCount));
+    const int sourceStrideColumns = static_cast<int>(full.cols);
+    const int elementCount = headDimension * usedColumnCount;
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsExtractHeadEntry<<<blockCount, CudaOps::threadCount>>>(full.buffer.deviceData, head.buffer.deviceData, headIndex, headDimension, sequenceLength, static_cast<int>(full.rows));
+    CudaOpsExtractHeadEntry<<<blockCount, CudaOps::threadCount>>>(full.buffer.deviceData, head.buffer.deviceData, headIndex, headDimension, sourceStrideColumns, usedColumnCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsExtractHeadEntry launch");
 }
 
@@ -284,6 +304,23 @@ void CudaOps::writeHead(CudaMatrix& full, int headIndex, int headDimension, cons
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
     CudaOpsWriteHeadEntry<<<blockCount, CudaOps::threadCount>>>(full.buffer.deviceData, head.buffer.deviceData, headIndex, headDimension, sequenceLength, static_cast<int>(full.rows));
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsWriteHeadEntry launch");
+}
+
+void CudaOps::writeColumnsInto(CudaMatrix& destination, int destinationStartColumn, const CudaMatrix& source) {
+    if (destination.empty() || source.empty()) throw std::invalid_argument("CudaOps::writeColumnsInto empty input");
+    if (destination.rows != source.rows) throw std::invalid_argument("CudaOps::writeColumnsInto row mismatch");
+    if (destinationStartColumn < 0) throw std::invalid_argument("CudaOps::writeColumnsInto negative start");
+    if (destinationStartColumn + static_cast<int>(source.cols) > static_cast<int>(destination.cols))
+        throw std::invalid_argument("CudaOps::writeColumnsInto exceeds destination width");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::writeColumnsInto no CUDA device");
+
+    const int embeddingDim = static_cast<int>(source.rows);
+    const int destinationStrideColumns = static_cast<int>(destination.cols);
+    const int sourceColumnCount = static_cast<int>(source.cols);
+    const int elementCount = embeddingDim * sourceColumnCount;
+    const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsWriteColumnsEntry<<<blockCount, CudaOps::threadCount>>>(destination.buffer.deviceData, source.buffer.deviceData, embeddingDim, destinationStrideColumns, destinationStartColumn, sourceColumnCount);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsWriteColumnsEntry launch");
 }
 
 void CudaOps::applyCausalMaskInPlace(CudaMatrix& scores) {
@@ -310,16 +347,19 @@ void CudaOps::softmaxInto(const CudaMatrix& logits, CudaMatrix& out) {
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSoftmaxEntry launch");
 }
 
-void CudaOps::rotaryRotateInPlace(CudaMatrix& tensor, int headCount, int headDimension, int pairCount, const CudaMatrix& cosTable, const CudaMatrix& sinTable) {
+void CudaOps::rotaryRotateInPlace(CudaMatrix& tensor, int headCount, int headDimension, int pairCount, const CudaMatrix& cosTable, const CudaMatrix& sinTable, int positionOffset) {
     if (tensor.empty()) throw std::invalid_argument("CudaOps::rotaryRotateInPlace empty tensor");
     if (headCount <= 0 || headDimension <= 0 || pairCount <= 0) throw std::invalid_argument("CudaOps::rotaryRotateInPlace invalid rope dims");
     if (static_cast<int>(tensor.rows) != headCount * headDimension) throw std::invalid_argument("CudaOps::rotaryRotateInPlace embedding dim mismatch");
     if (cosTable.empty() || sinTable.empty()) throw std::invalid_argument("CudaOps::rotaryRotateInPlace empty tables");
+    if (positionOffset < 0) throw std::invalid_argument("CudaOps::rotaryRotateInPlace negative positionOffset");
+    if (positionOffset + static_cast<int>(tensor.cols) > static_cast<int>(cosTable.rows))
+        throw std::invalid_argument("CudaOps::rotaryRotateInPlace position exceeds RoPE table");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::rotaryRotateInPlace no CUDA device");
 
     const int sequenceLength = static_cast<int>(tensor.cols);
     const int blockCount = (sequenceLength + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsRotaryRotateEntry<<<blockCount, CudaOps::threadCount>>>(tensor.buffer.deviceData, headCount, headDimension, pairCount, sequenceLength, cosTable.buffer.deviceData, sinTable.buffer.deviceData);
+    CudaOpsRotaryRotateEntry<<<blockCount, CudaOps::threadCount>>>(tensor.buffer.deviceData, headCount, headDimension, pairCount, sequenceLength, positionOffset, cosTable.buffer.deviceData, sinTable.buffer.deviceData);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsRotaryRotateEntry launch");
 }
 
