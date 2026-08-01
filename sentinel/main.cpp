@@ -3,6 +3,7 @@
 #include "NeuralNet/Cuda/CudaMatmul.hpp"
 #include "NeuralNet/Cuda/CudaRMSNorm.hpp"
 #include "NeuralNet/Cuda/CudaCausalSelfAttention.hpp"
+#include "NeuralNet/Cuda/CudaAdam.hpp"
 #include "NeuralNet/Cuda/CudaTransformerBlock.hpp"
 #include "NeuralNet/Layers/CausalSelfAttention.hpp"
 #include "NeuralNet/Tokenizer/BPETokenizer.hpp"
@@ -46,16 +47,20 @@ int main() {
 
     CudaMatmul::runSmokeDemo(512);
     CudaFeedForward::runSmokeDemo(128, 64);
+    CudaFeedForward::runBackwardSmokeDemo(64, 32);
     CudaRMSNorm::runSmokeDemo(128, 64);
+    CudaRMSNorm::runBackwardSmokeDemo(64, 32);
     CausalSelfAttention::runSparseMaskSmokeDemo(32, 2, 16, 32, 4, 2);
     CausalSelfAttention::runSparseBackwardSmokeDemo(32, 2, 12, 32, 4, 2);
     CausalSelfAttention::runSparseComputeSmokeDemo(32, 2, 16, 32, 4, 2);
     CudaCausalSelfAttention::runSmokeDemo(64, 4, 32, 64);
+    CudaCausalSelfAttention::runBackwardSmokeDemo(32, 2, 16, 32);
     CudaCausalSelfAttention::runKvCacheSmokeDemo(64, 4, 32, 64);
     CudaCausalSelfAttention::runSparseSmokeDemo(32, 2, 16, 32, 4, 2);
     CudaTransformerBlock::runSmokeDemo(64, 4, 32, 64);
     CudaLanguageModel::runSmokeDemo(128, 64, 32, 2, 4);
     CudaLanguageModel::runKvCacheSmokeDemo(128, 64, 32, 2, 4);
+    CudaAdam::runSmokeDemo(128, 64);
 
     // 0 = load entire jsonl (sera_sample has 10000 rows)
     std::vector<JsonlRow> rows = JsonlLoader::load(samplePath, 0);

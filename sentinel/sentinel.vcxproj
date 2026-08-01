@@ -46,6 +46,7 @@
     <CudaCompile Include="NeuralNet\Cuda\CudaFeedForward.cu" />
     <CudaCompile Include="NeuralNet\Cuda\CudaRMSNorm.cu" />
     <CudaCompile Include="NeuralNet\Cuda\CudaCausalSelfAttention.cu" />
+    <CudaCompile Include="NeuralNet\Cuda\CudaAdam.cu" />
     <CudaCompile Include="NeuralNet\Cuda\CudaKvCache.cu" />
     <CudaCompile Include="NeuralNet\Cuda\CudaTransformerBlock.cu" />
     <CudaCompile Include="NeuralNet\Cuda\CudaLanguageModel.cu" />
@@ -83,6 +84,7 @@
     <ClInclude Include="NeuralNet\Cuda\CudaFeedForward.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaRMSNorm.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaCausalSelfAttention.hpp" />
+    <ClInclude Include="NeuralNet\Cuda\CudaAdam.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaKvCache.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaTransformerBlock.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaLanguageModel.hpp" />

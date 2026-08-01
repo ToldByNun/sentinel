@@ -151,6 +151,7 @@ private:
     friend class CudaCausalSelfAttention;
     friend class CudaTransformerBlock;
     friend class CudaLanguageModel;
+    friend class CudaAdam;
 
     static constexpr int tileSize = 16;
 

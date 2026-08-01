@@ -5,6 +5,8 @@
 #include "CudaKvCache.hpp"
 #include "CudaMatmul.hpp"
 
+#include <vector>
+
 /// <summary>device resident causal multi head attention forward with RoPE and optional sparse mask</summary>
 class CudaCausalSelfAttention {
 public:
@@ -33,6 +35,19 @@ public:
     CudaMatrix attended;
     CudaMatrix output;
 
+    CudaMatrix inputCache;
+    CudaMatrix attendedGradient;
+    CudaMatrix queryGradient;
+    CudaMatrix keyGradient;
+    CudaMatrix valueGradient;
+    CudaMatrix probabilityGradient;
+    CudaMatrix scoreGradient;
+    CudaMatrix valueHeadGradient;
+    CudaMatrix queryHeadGradient;
+    CudaMatrix keyHeadGradient;
+    CudaMatrix temp;
+    std::vector<CudaMatrix> cachedHeadProbabilities;
+
     CudaCausalSelfAttention();
 
     /// <summary>upload weights and RoPE tables from host attention</summary>
@@ -44,6 +59,9 @@ public:
     /// <summary>causal multi head attention writing into out</summary>
     void forward(const CudaMatrix& input, CudaMatrix& out);
 
+    /// <summary>backprop through multi head attention fills weight gradients via out params</summary>
+    void backward(const CudaMatrix& outputGradient, CudaMatrix& inputGradient, CudaMatrix& queryWeightGradient, CudaMatrix& keyWeightGradient, CudaMatrix& valueWeightGradient, CudaMatrix& outputWeightGradient);
+
     /// <summary>reset cache then run full sequence attention and append rotated KV</summary>
     void prefill(const CudaMatrix& input, CudaKvCache& cache, CudaMatrix& out);
 
@@ -52,6 +70,9 @@ public:
 
     /// <summary>compare CPU attention vs device forward</summary>
     static void runSmokeDemo(int embeddingDim = 64, int headCount = 4, int sequenceLength = 32, int maximumPositionCount = 64);
+
+    /// <summary>compare CPU vs CUDA attention backward with dense W=max mask</summary>
+    static void runBackwardSmokeDemo(int embeddingDim = 32, int headCount = 2, int sequenceLength = 16, int maximumPositionCount = 32);
 
     /// <summary>compare prefill plus decode last token vs full forward last column</summary>
     static void runKvCacheSmokeDemo(int embeddingDim = 64, int headCount = 4, int sequenceLength = 32, int maximumPositionCount = 64);

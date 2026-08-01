@@ -44,6 +44,41 @@ void CudaFeedForward::forward(const CudaMatrix& input, CudaMatrix& out) {
 
     CudaMatrix::multiplyInto(this->downWeight, this->hidden, out);
     CudaOps::broadcastBiasAddInPlace(out, this->downBias);
+    CudaOps::copyInto(input, this->inputCache);
+}
+
+void CudaFeedForward::backward(const CudaMatrix& outputGradient, CudaMatrix& inputGradient, CudaMatrix& gateWeightGradient, CudaMatrix& gateBiasGradient, CudaMatrix& upWeightGradient, CudaMatrix& upBiasGradient, CudaMatrix& downWeightGradient, CudaMatrix& downBiasGradient) {
+    if (this->inputCache.empty()) throw std::logic_error("CudaFeedForward::backward called before forward");
+    if (outputGradient.rows != this->downWeight.rows || outputGradient.cols != this->inputCache.cols)
+        throw std::invalid_argument("CudaFeedForward::backward shape mismatch");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaFeedForward::backward no CUDA device");
+
+    CudaMatrix::multiplyInto(outputGradient, this->hidden, downWeightGradient, false, true);
+    CudaOps::sumColumnsInto(outputGradient, downBiasGradient);
+
+    CudaMatrix::multiplyInto(this->downWeight, outputGradient, this->hiddenGradient, true, false);
+    CudaOps::multiplyElementwiseInto(this->hiddenGradient, this->gateActivated, this->upGradient);
+    CudaOps::multiplyElementwiseInto(this->hiddenGradient, this->up, this->gateGradient);
+
+    CudaOps::siluDerivativeInto(this->gatePreActivation, this->siluDerivative);
+    CudaOps::multiplyElementwiseInPlace(this->gateGradient, this->siluDerivative);
+
+    CudaMatrix::multiplyInto(this->gateGradient, this->inputCache, gateWeightGradient, false, true);
+    CudaOps::sumColumnsInto(this->gateGradient, gateBiasGradient);
+    CudaMatrix::multiplyInto(this->upGradient, this->inputCache, upWeightGradient, false, true);
+    CudaOps::sumColumnsInto(this->upGradient, upBiasGradient);
+
+    CudaMatrix::multiplyInto(this->gateWeight, this->gateGradient, inputGradient, true, false);
+    CudaMatrix::multiplyInto(this->upWeight, this->upGradient, this->temp, true, false);
+    CudaOps::addInPlace(inputGradient, this->temp);
+}
+
+static float maximumAbsoluteDifference(const Matrix& left, const Matrix& right) {
+    if (left.rows != right.rows || left.cols != right.cols) throw std::invalid_argument("maximumAbsoluteDifference shape mismatch");
+    float maximumDifference = 0.0f;
+    for (size_t index = 0; index < left.data.size(); ++index)
+        maximumDifference = (std::max)(maximumDifference, std::fabs(left.data[index] - right.data[index]));
+    return maximumDifference;
 }
 
 void CudaFeedForward::runSmokeDemo(int embeddingDim, int sequenceLength) {
@@ -100,4 +135,64 @@ void CudaFeedForward::runSmokeDemo(int embeddingDim, int sequenceLength) {
 
     std::printf("CUDA FeedForward smoke: embed=%d seq=%d hidden=%zu\n", embeddingDim, sequenceLength, host.gateWeight.rows);
     std::printf("  cpu=%.2fms  upload=%.2fms  device-forward=%.2fms  download=%.2fms  maxAbsDiff=%.6g\n", cpuMilliseconds, uploadMilliseconds, static_cast<double>(deviceForwardMilliseconds), downloadMilliseconds, maximumDifference);
+}
+
+void CudaFeedForward::runBackwardSmokeDemo(int embeddingDim, int sequenceLength) {
+    if (!CudaMatmul::isAvailable()) {
+        std::printf("CUDA FeedForward backward smoke: no device\n");
+        return;
+    }
+    if (embeddingDim <= 0) throw std::invalid_argument("CudaFeedForward::runBackwardSmokeDemo embeddingDim must be > 0");
+    if (sequenceLength <= 0) throw std::invalid_argument("CudaFeedForward::runBackwardSmokeDemo sequenceLength must be > 0");
+
+    FeedForward host = FeedForward::create(embeddingDim, 4, 41u);
+    Matrix hostInput(static_cast<size_t>(embeddingDim), static_cast<size_t>(sequenceLength), 0.0f);
+    unsigned state = 99u;
+    for (size_t index = 0; index < hostInput.data.size(); ++index) {
+        state = state * 1664525u + 1013904223u;
+        hostInput.data[index] = (static_cast<float>(state >> 8) / 16777216.0f) * 2.0f - 1.0f;
+    }
+
+    FeedForwardCache hostCache;
+    host.forward(hostInput, hostCache);
+
+    Matrix outputGradient(host.downWeight.rows, hostInput.cols, 1.0f);
+    Matrix hostGateWeightGradient;
+    Matrix hostGateBiasGradient;
+    Matrix hostUpWeightGradient;
+    Matrix hostUpBiasGradient;
+    Matrix hostDownWeightGradient;
+    Matrix hostDownBiasGradient;
+    Matrix hostInputGradient = host.backward(outputGradient, hostCache, hostGateWeightGradient, hostGateBiasGradient, hostUpWeightGradient, hostUpBiasGradient, hostDownWeightGradient, hostDownBiasGradient);
+
+    CudaFeedForward device = CudaFeedForward::createFrom(host);
+    CudaMatrix deviceInput;
+    deviceInput.upload(hostInput);
+    CudaMatrix deviceOutput;
+    device.forward(deviceInput, deviceOutput);
+
+    CudaMatrix deviceOutputGradient;
+    deviceOutputGradient.upload(outputGradient);
+
+    CudaMatrix deviceInputGradient;
+    CudaMatrix deviceGateWeightGradient;
+    CudaMatrix deviceGateBiasGradient;
+    CudaMatrix deviceUpWeightGradient;
+    CudaMatrix deviceUpBiasGradient;
+    CudaMatrix deviceDownWeightGradient;
+    CudaMatrix deviceDownBiasGradient;
+    device.backward(deviceOutputGradient, deviceInputGradient, deviceGateWeightGradient, deviceGateBiasGradient, deviceUpWeightGradient, deviceUpBiasGradient, deviceDownWeightGradient, deviceDownBiasGradient);
+    CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaFeedForward backward synchronize");
+
+    const float inputGradientDiff = maximumAbsoluteDifference(hostInputGradient, deviceInputGradient.download());
+    const float gateWeightGradientDiff = maximumAbsoluteDifference(hostGateWeightGradient, deviceGateWeightGradient.download());
+    const float gateBiasGradientDiff = maximumAbsoluteDifference(hostGateBiasGradient, deviceGateBiasGradient.download());
+    const float upWeightGradientDiff = maximumAbsoluteDifference(hostUpWeightGradient, deviceUpWeightGradient.download());
+    const float upBiasGradientDiff = maximumAbsoluteDifference(hostUpBiasGradient, deviceUpBiasGradient.download());
+    const float downWeightGradientDiff = maximumAbsoluteDifference(hostDownWeightGradient, deviceDownWeightGradient.download());
+    const float downBiasGradientDiff = maximumAbsoluteDifference(hostDownBiasGradient, deviceDownBiasGradient.download());
+
+    std::printf("CUDA FeedForward backward smoke: embed=%d seq=%d hidden=%zu\n", embeddingDim, sequenceLength, host.gateWeight.rows);
+    std::printf("  inputGrad=%.6g  gateWeightGrad=%.6g  gateBiasGrad=%.6g  upWeightGrad=%.6g  upBiasGrad=%.6g  downWeightGrad=%.6g  downBiasGrad=%.6g\n",
+        inputGradientDiff, gateWeightGradientDiff, gateBiasGradientDiff, upWeightGradientDiff, upBiasGradientDiff, downWeightGradientDiff, downBiasGradientDiff);
 }

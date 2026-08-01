@@ -21,6 +21,15 @@ __device__ void CudaOps::runSiluInto(const float* input, float* out, int element
     out[index] = value * sigmoid;
 }
 
+__device__ void CudaOps::runSiluDerivativeInto(const float* input, float* out, int elementCount) {
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+
+    const float value = input[index];
+    const float sigmoid = 1.0f / (1.0f + expf(-value));
+    out[index] = sigmoid * (1.0f + value * (1.0f - sigmoid));
+}
+
 __device__ void CudaOps::runMultiplyElementwiseInto(const float* left, const float* right, float* out, int elementCount) {
     const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
     if (index >= elementCount) return;
@@ -28,11 +37,35 @@ __device__ void CudaOps::runMultiplyElementwiseInto(const float* left, const flo
     out[index] = left[index] * right[index];
 }
 
+__device__ void CudaOps::runMultiplyElementwiseInPlace(float* total, const float* other, int elementCount) {
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+
+    total[index] *= other[index];
+}
+
 __device__ void CudaOps::runAddInto(const float* left, const float* right, float* out, int elementCount) {
     const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
     if (index >= elementCount) return;
 
     out[index] = left[index] + right[index];
+}
+
+__device__ void CudaOps::runAddInPlace(float* total, const float* delta, int elementCount) {
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+
+    total[index] += delta[index];
+}
+
+__device__ void CudaOps::runSumColumnsInto(const float* gradient, float* biasGradient, int rowCount, int columnCount) {
+    const int row = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (row >= rowCount) return;
+
+    float total = 0.0f;
+    for (int column = 0; column < columnCount; ++column)
+        total += gradient[row * columnCount + column];
+    biasGradient[row] = total;
 }
 
 __device__ void CudaOps::runScaleInPlace(float* matrix, float scalar, int elementCount) {
@@ -134,6 +167,42 @@ __device__ void CudaOps::runSoftmaxInto(const float* logits, float* out, int row
         out[row * columnCount + column] *= inverseSum;
 }
 
+__device__ void CudaOps::runSoftmaxBackwardInto(const float* probabilities, const float* probabilityGradient, float* scoreGradient, int rowCount, int columnCount) {
+    const int column = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (column >= columnCount) return;
+
+    float dot = 0.0f;
+    for (int row = 0; row < rowCount; ++row)
+        dot += probabilityGradient[row * columnCount + column] * probabilities[row * columnCount + column];
+
+    for (int row = 0; row < rowCount; ++row)
+        scoreGradient[row * columnCount + column] = probabilities[row * columnCount + column] * (probabilityGradient[row * columnCount + column] - dot);
+}
+
+__device__ void CudaOps::runZeroForbiddenScoreGradientsInPlace(float* scoresGrad, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount) {
+    const int elementCount = keyCount * queryCount;
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+
+    const int keyIndex = index / queryCount;
+    const int queryIndex = index - keyIndex * queryCount;
+    const int absoluteQuery = queryPositionStart + queryIndex;
+    const int absoluteKey = keyIndex;
+
+    bool allowed = false;
+    if (absoluteKey <= absoluteQuery) {
+        if (absoluteKey < globalTokenCount)
+            allowed = true;
+        else if (windowSize <= 0)
+            allowed = true;
+        else if (absoluteKey >= absoluteQuery - windowSize + 1)
+            allowed = true;
+    }
+
+    if (allowed) return;
+    scoresGrad[index] = 0.0f;
+}
+
 __device__ void CudaOps::runRotaryRotateInPlace(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable) {
     const int position = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
     if (position >= sequenceLength) return;
@@ -155,6 +224,27 @@ __device__ void CudaOps::runRotaryRotateInPlace(float* tensor, int headCount, in
     }
 }
 
+__device__ void CudaOps::runRotaryRotateInverseInPlace(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable) {
+    const int position = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (position >= sequenceLength) return;
+
+    const int absolutePosition = positionOffset + position;
+    for (int headIndex = 0; headIndex < headCount; ++headIndex) {
+        const int rowOffset = headIndex * headDimension;
+        for (int pairIndex = 0; pairIndex < pairCount; ++pairIndex) {
+            const int rowEven = rowOffset + 2 * pairIndex;
+            const int rowOdd = rowEven + 1;
+            const int tableIndex = absolutePosition * pairCount + pairIndex;
+            const float cosValue = cosTable[tableIndex];
+            const float sinValue = sinTable[tableIndex];
+            const float evenValue = tensor[rowEven * sequenceLength + position];
+            const float oddValue = tensor[rowOdd * sequenceLength + position];
+            tensor[rowEven * sequenceLength + position] = evenValue * cosValue + oddValue * sinValue;
+            tensor[rowOdd * sequenceLength + position] = -evenValue * sinValue + oddValue * cosValue;
+        }
+    }
+}
+
 __device__ void CudaOps::runEmbeddingGatherInto(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize) {
     const int elementCount = embeddingDim * tokenCount;
     const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
@@ -171,6 +261,19 @@ __device__ void CudaOps::runEmbeddingGatherInto(const float* weight, const int* 
     out[index] = weight[tokenId * embeddingDim + dimensionIndex];
 }
 
+__device__ void CudaOps::runEmbeddingScatterAddInto(float* weightGradient, const int* tokenIds, const float* outputGradient, int embeddingDim, int tokenCount, int vocabularySize) {
+    const int elementCount = embeddingDim * tokenCount;
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+
+    const int dimensionIndex = index / tokenCount;
+    const int tokenIndex = index - dimensionIndex * tokenCount;
+    const int tokenId = tokenIds[tokenIndex];
+    if (tokenId < 0 || tokenId >= vocabularySize) return;
+
+    atomicAdd(&weightGradient[tokenId * embeddingDim + dimensionIndex], outputGradient[index]);
+}
+
 __global__ void CudaOpsBroadcastBiasAddEntry(float* product, const float* bias, int rowCount, int columnCount) {
     CudaOps::runBroadcastBiasAddInPlace(product, bias, rowCount, columnCount);
 }
@@ -179,12 +282,28 @@ __global__ void CudaOpsSiluEntry(const float* input, float* out, int elementCoun
     CudaOps::runSiluInto(input, out, elementCount);
 }
 
+__global__ void CudaOpsSiluDerivativeEntry(const float* input, float* out, int elementCount) {
+    CudaOps::runSiluDerivativeInto(input, out, elementCount);
+}
+
 __global__ void CudaOpsMultiplyElementwiseEntry(const float* left, const float* right, float* out, int elementCount) {
     CudaOps::runMultiplyElementwiseInto(left, right, out, elementCount);
 }
 
+__global__ void CudaOpsMultiplyElementwiseInPlaceEntry(float* total, const float* other, int elementCount) {
+    CudaOps::runMultiplyElementwiseInPlace(total, other, elementCount);
+}
+
 __global__ void CudaOpsAddEntry(const float* left, const float* right, float* out, int elementCount) {
     CudaOps::runAddInto(left, right, out, elementCount);
+}
+
+__global__ void CudaOpsAddInPlaceEntry(float* total, const float* delta, int elementCount) {
+    CudaOps::runAddInPlace(total, delta, elementCount);
+}
+
+__global__ void CudaOpsSumColumnsEntry(const float* gradient, float* biasGradient, int rowCount, int columnCount) {
+    CudaOps::runSumColumnsInto(gradient, biasGradient, rowCount, columnCount);
 }
 
 __global__ void CudaOpsScaleEntry(float* matrix, float scalar, int elementCount) {
@@ -219,12 +338,28 @@ __global__ void CudaOpsSoftmaxEntry(const float* logits, float* out, int rowCoun
     CudaOps::runSoftmaxInto(logits, out, rowCount, columnCount);
 }
 
+__global__ void CudaOpsSoftmaxBackwardEntry(const float* probabilities, const float* probabilityGradient, float* scoreGradient, int rowCount, int columnCount) {
+    CudaOps::runSoftmaxBackwardInto(probabilities, probabilityGradient, scoreGradient, rowCount, columnCount);
+}
+
+__global__ void CudaOpsZeroForbiddenScoreGradientsEntry(float* scoresGrad, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount) {
+    CudaOps::runZeroForbiddenScoreGradientsInPlace(scoresGrad, keyCount, queryCount, queryPositionStart, windowSize, globalTokenCount);
+}
+
 __global__ void CudaOpsRotaryRotateEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable) {
     CudaOps::runRotaryRotateInPlace(tensor, headCount, headDimension, pairCount, sequenceLength, positionOffset, cosTable, sinTable);
 }
 
+__global__ void CudaOpsRotaryRotateInverseEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable) {
+    CudaOps::runRotaryRotateInverseInPlace(tensor, headCount, headDimension, pairCount, sequenceLength, positionOffset, cosTable, sinTable);
+}
+
 __global__ void CudaOpsEmbeddingGatherEntry(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize) {
     CudaOps::runEmbeddingGatherInto(weight, tokenIds, out, embeddingDim, tokenCount, vocabularySize);
+}
+
+__global__ void CudaOpsEmbeddingScatterAddEntry(float* weightGradient, const int* tokenIds, const float* outputGradient, int embeddingDim, int tokenCount, int vocabularySize) {
+    CudaOps::runEmbeddingScatterAddInto(weightGradient, tokenIds, outputGradient, embeddingDim, tokenCount, vocabularySize);
 }
 
 void CudaOps::broadcastBiasAddInPlace(CudaMatrix& product, const CudaMatrix& bias) {
@@ -253,6 +388,17 @@ void CudaOps::siluInto(const CudaMatrix& input, CudaMatrix& out) {
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSiluEntry launch");
 }
 
+void CudaOps::siluDerivativeInto(const CudaMatrix& input, CudaMatrix& out) {
+    if (input.empty()) throw std::invalid_argument("CudaOps::siluDerivativeInto empty input");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::siluDerivativeInto no CUDA device");
+
+    out.ensureSize(input.rows, input.cols);
+    const int elementCount = static_cast<int>(input.elementCount());
+    const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsSiluDerivativeEntry<<<blockCount, CudaOps::threadCount>>>(input.buffer.deviceData, out.buffer.deviceData, elementCount);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSiluDerivativeEntry launch");
+}
+
 void CudaOps::multiplyElementwiseInto(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& out) {
     if (left.empty() || right.empty()) throw std::invalid_argument("CudaOps::multiplyElementwiseInto empty input");
     if (left.rows != right.rows || left.cols != right.cols) throw std::invalid_argument("CudaOps::multiplyElementwiseInto shape mismatch");
@@ -265,6 +411,17 @@ void CudaOps::multiplyElementwiseInto(const CudaMatrix& left, const CudaMatrix& 
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsMultiplyElementwiseEntry launch");
 }
 
+void CudaOps::multiplyElementwiseInPlace(CudaMatrix& total, const CudaMatrix& other) {
+    if (total.empty() || other.empty()) throw std::invalid_argument("CudaOps::multiplyElementwiseInPlace empty input");
+    if (total.rows != other.rows || total.cols != other.cols) throw std::invalid_argument("CudaOps::multiplyElementwiseInPlace shape mismatch");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::multiplyElementwiseInPlace no CUDA device");
+
+    const int elementCount = static_cast<int>(total.elementCount());
+    const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsMultiplyElementwiseInPlaceEntry<<<blockCount, CudaOps::threadCount>>>(total.buffer.deviceData, other.buffer.deviceData, elementCount);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsMultiplyElementwiseInPlaceEntry launch");
+}
+
 void CudaOps::addInto(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& out) {
     if (left.empty() || right.empty()) throw std::invalid_argument("CudaOps::addInto empty input");
     if (left.rows != right.rows || left.cols != right.cols) throw std::invalid_argument("CudaOps::addInto shape mismatch");
@@ -275,6 +432,37 @@ void CudaOps::addInto(const CudaMatrix& left, const CudaMatrix& right, CudaMatri
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
     CudaOpsAddEntry<<<blockCount, CudaOps::threadCount>>>(left.buffer.deviceData, right.buffer.deviceData, out.buffer.deviceData, elementCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsAddEntry launch");
+}
+
+void CudaOps::addInPlace(CudaMatrix& total, const CudaMatrix& delta) {
+    if (total.empty() || delta.empty()) throw std::invalid_argument("CudaOps::addInPlace empty input");
+    if (total.rows != delta.rows || total.cols != delta.cols) throw std::invalid_argument("CudaOps::addInPlace shape mismatch");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::addInPlace no CUDA device");
+
+    const int elementCount = static_cast<int>(total.elementCount());
+    const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsAddInPlaceEntry<<<blockCount, CudaOps::threadCount>>>(total.buffer.deviceData, delta.buffer.deviceData, elementCount);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsAddInPlaceEntry launch");
+}
+
+void CudaOps::sumColumnsInto(const CudaMatrix& gradient, CudaMatrix& biasGradient) {
+    if (gradient.empty()) throw std::invalid_argument("CudaOps::sumColumnsInto empty gradient");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::sumColumnsInto no CUDA device");
+
+    biasGradient.ensureSize(gradient.rows, 1);
+    const int rowCount = static_cast<int>(gradient.rows);
+    const int columnCount = static_cast<int>(gradient.cols);
+    const int blockCount = (rowCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsSumColumnsEntry<<<blockCount, CudaOps::threadCount>>>(gradient.buffer.deviceData, biasGradient.buffer.deviceData, rowCount, columnCount);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSumColumnsEntry launch");
+}
+
+void CudaOps::copyInto(const CudaMatrix& source, CudaMatrix& destination) {
+    if (source.empty()) throw std::invalid_argument("CudaOps::copyInto empty source");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::copyInto no CUDA device");
+
+    destination.ensureSize(source.rows, source.cols);
+    CudaMatmul::throwIfCudaFailed(cudaMemcpy(destination.buffer.deviceData, source.buffer.deviceData, source.byteCount(), cudaMemcpyDeviceToDevice), "CudaOps::copyInto memcpy");
 }
 
 void CudaOps::scaleInPlace(CudaMatrix& matrix, float scalar) {
@@ -376,6 +564,34 @@ void CudaOps::softmaxInto(const CudaMatrix& logits, CudaMatrix& out) {
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSoftmaxEntry launch");
 }
 
+void CudaOps::softmaxBackwardInto(const CudaMatrix& probabilities, const CudaMatrix& probabilityGradient, CudaMatrix& scoreGradient) {
+    if (probabilities.empty() || probabilityGradient.empty()) throw std::invalid_argument("CudaOps::softmaxBackwardInto empty input");
+    if (probabilities.rows != probabilityGradient.rows || probabilities.cols != probabilityGradient.cols)
+        throw std::invalid_argument("CudaOps::softmaxBackwardInto shape mismatch");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::softmaxBackwardInto no CUDA device");
+
+    scoreGradient.ensureSize(probabilities.rows, probabilities.cols);
+    const int rowCount = static_cast<int>(probabilities.rows);
+    const int columnCount = static_cast<int>(probabilities.cols);
+    const int blockCount = (columnCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsSoftmaxBackwardEntry<<<blockCount, CudaOps::threadCount>>>(probabilities.buffer.deviceData, probabilityGradient.buffer.deviceData, scoreGradient.buffer.deviceData, rowCount, columnCount);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSoftmaxBackwardEntry launch");
+}
+
+void CudaOps::zeroForbiddenScoreGradientsInPlace(CudaMatrix& scoresGrad, int windowSize, int globalTokenCount, int queryPositionStart) {
+    if (scoresGrad.empty()) throw std::invalid_argument("CudaOps::zeroForbiddenScoreGradientsInPlace empty scoresGrad");
+    if (globalTokenCount < 0) throw std::invalid_argument("CudaOps::zeroForbiddenScoreGradientsInPlace globalTokenCount must be >= 0");
+    if (queryPositionStart < 0) throw std::invalid_argument("CudaOps::zeroForbiddenScoreGradientsInPlace queryPositionStart must be >= 0");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::zeroForbiddenScoreGradientsInPlace no CUDA device");
+
+    const int keyCount = static_cast<int>(scoresGrad.rows);
+    const int queryCount = static_cast<int>(scoresGrad.cols);
+    const int elementCount = keyCount * queryCount;
+    const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsZeroForbiddenScoreGradientsEntry<<<blockCount, CudaOps::threadCount>>>(scoresGrad.buffer.deviceData, keyCount, queryCount, queryPositionStart, windowSize, globalTokenCount);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsZeroForbiddenScoreGradientsEntry launch");
+}
+
 void CudaOps::rotaryRotateInPlace(CudaMatrix& tensor, int headCount, int headDimension, int pairCount, const CudaMatrix& cosTable, const CudaMatrix& sinTable, int positionOffset) {
     if (tensor.empty()) throw std::invalid_argument("CudaOps::rotaryRotateInPlace empty tensor");
     if (headCount <= 0 || headDimension <= 0 || pairCount <= 0) throw std::invalid_argument("CudaOps::rotaryRotateInPlace invalid rope dims");
@@ -390,6 +606,22 @@ void CudaOps::rotaryRotateInPlace(CudaMatrix& tensor, int headCount, int headDim
     const int blockCount = (sequenceLength + CudaOps::threadCount - 1) / CudaOps::threadCount;
     CudaOpsRotaryRotateEntry<<<blockCount, CudaOps::threadCount>>>(tensor.buffer.deviceData, headCount, headDimension, pairCount, sequenceLength, positionOffset, cosTable.buffer.deviceData, sinTable.buffer.deviceData);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsRotaryRotateEntry launch");
+}
+
+void CudaOps::rotaryRotateInverseInPlace(CudaMatrix& tensor, int headCount, int headDimension, int pairCount, const CudaMatrix& cosTable, const CudaMatrix& sinTable, int positionOffset) {
+    if (tensor.empty()) throw std::invalid_argument("CudaOps::rotaryRotateInverseInPlace empty tensor");
+    if (headCount <= 0 || headDimension <= 0 || pairCount <= 0) throw std::invalid_argument("CudaOps::rotaryRotateInverseInPlace invalid rope dims");
+    if (static_cast<int>(tensor.rows) != headCount * headDimension) throw std::invalid_argument("CudaOps::rotaryRotateInverseInPlace embedding dim mismatch");
+    if (cosTable.empty() || sinTable.empty()) throw std::invalid_argument("CudaOps::rotaryRotateInverseInPlace empty tables");
+    if (positionOffset < 0) throw std::invalid_argument("CudaOps::rotaryRotateInverseInPlace negative positionOffset");
+    if (positionOffset + static_cast<int>(tensor.cols) > static_cast<int>(cosTable.rows))
+        throw std::invalid_argument("CudaOps::rotaryRotateInverseInPlace position exceeds RoPE table");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::rotaryRotateInverseInPlace no CUDA device");
+
+    const int sequenceLength = static_cast<int>(tensor.cols);
+    const int blockCount = (sequenceLength + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsRotaryRotateInverseEntry<<<blockCount, CudaOps::threadCount>>>(tensor.buffer.deviceData, headCount, headDimension, pairCount, sequenceLength, positionOffset, cosTable.buffer.deviceData, sinTable.buffer.deviceData);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsRotaryRotateInverseEntry launch");
 }
 
 void CudaOps::embeddingGatherInto(const CudaMatrix& weight, const CudaIntBuffer& tokenIds, size_t tokenCount, CudaMatrix& out) {
@@ -407,4 +639,22 @@ void CudaOps::embeddingGatherInto(const CudaMatrix& weight, const CudaIntBuffer&
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
     CudaOpsEmbeddingGatherEntry<<<blockCount, CudaOps::threadCount>>>(weight.buffer.deviceData, tokenIds.deviceData, out.buffer.deviceData, embeddingDim, static_cast<int>(tokenCount), vocabularySize);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsEmbeddingGatherEntry launch");
+}
+
+void CudaOps::embeddingScatterAddInto(CudaMatrix& weightGradient, const CudaIntBuffer& tokenIds, size_t tokenCount, const CudaMatrix& outputGradient) {
+    if (weightGradient.empty()) throw std::invalid_argument("CudaOps::embeddingScatterAddInto empty weightGradient");
+    if (outputGradient.empty()) throw std::invalid_argument("CudaOps::embeddingScatterAddInto empty outputGradient");
+    if (tokenCount == 0) throw std::invalid_argument("CudaOps::embeddingScatterAddInto empty tokenCount");
+    if (tokenIds.deviceData == nullptr) throw std::invalid_argument("CudaOps::embeddingScatterAddInto empty tokenIds");
+    if (tokenCount > tokenIds.capacityCount) throw std::invalid_argument("CudaOps::embeddingScatterAddInto tokenCount exceeds capacity");
+    if (outputGradient.cols != tokenCount) throw std::invalid_argument("CudaOps::embeddingScatterAddInto tokenCount mismatch");
+    if (static_cast<size_t>(outputGradient.rows) != weightGradient.cols) throw std::invalid_argument("CudaOps::embeddingScatterAddInto embedding dim mismatch");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::embeddingScatterAddInto no CUDA device");
+
+    const int vocabularySize = static_cast<int>(weightGradient.rows);
+    const int embeddingDim = static_cast<int>(weightGradient.cols);
+    const int elementCount = embeddingDim * static_cast<int>(tokenCount);
+    const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsEmbeddingScatterAddEntry<<<blockCount, CudaOps::threadCount>>>(weightGradient.buffer.deviceData, tokenIds.deviceData, outputGradient.buffer.deviceData, embeddingDim, static_cast<int>(tokenCount), vocabularySize);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsEmbeddingScatterAddEntry launch");
 }

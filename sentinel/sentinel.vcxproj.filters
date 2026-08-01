@@ -63,6 +63,9 @@
     <CudaCompile Include="NeuralNet\Cuda\CudaCausalSelfAttention.cu">
       <Filter>Quelldateien</Filter>
     </CudaCompile>
+    <CudaCompile Include="NeuralNet\Cuda\CudaAdam.cu">
+      <Filter>Quelldateien</Filter>
+    </CudaCompile>
     <CudaCompile Include="NeuralNet\Cuda\CudaKvCache.cu">
       <Filter>Quelldateien</Filter>
     </CudaCompile>
@@ -171,6 +174,9 @@
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Cuda\CudaCausalSelfAttention.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Cuda\CudaAdam.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Cuda\CudaKvCache.hpp">

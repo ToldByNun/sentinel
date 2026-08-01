@@ -12,11 +12,26 @@ public:
     /// <summary>SiLU writing into out</summary>
     static void siluInto(const CudaMatrix& input, CudaMatrix& out);
 
+    /// <summary>SiLU derivative writing into out</summary>
+    static void siluDerivativeInto(const CudaMatrix& input, CudaMatrix& out);
+
     /// <summary>out = left * right element wise</summary>
     static void multiplyElementwiseInto(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& out);
 
+    /// <summary>total *= other element wise in place</summary>
+    static void multiplyElementwiseInPlace(CudaMatrix& total, const CudaMatrix& other);
+
     /// <summary>out = left + right</summary>
     static void addInto(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& out);
+
+    /// <summary>total += delta element wise in place</summary>
+    static void addInPlace(CudaMatrix& total, const CudaMatrix& delta);
+
+    /// <summary>sum gradient columns into biasGradient rows x 1</summary>
+    static void sumColumnsInto(const CudaMatrix& gradient, CudaMatrix& biasGradient);
+
+    /// <summary>device to device copy after ensureSize</summary>
+    static void copyInto(const CudaMatrix& source, CudaMatrix& destination);
 
     /// <summary>matrix *= scalar in place</summary>
     static void scaleInPlace(CudaMatrix& matrix, float scalar);
@@ -45,11 +60,23 @@ public:
     /// <summary>column wise softmax writing into out</summary>
     static void softmaxInto(const CudaMatrix& logits, CudaMatrix& out);
 
+    /// <summary>column wise softmax backward scores/probs rows=keys cols=queries</summary>
+    static void softmaxBackwardInto(const CudaMatrix& probabilities, const CudaMatrix& probabilityGradient, CudaMatrix& scoreGradient);
+
+    /// <summary>zero score gradients at sparse attention forbidden positions</summary>
+    static void zeroForbiddenScoreGradientsInPlace(CudaMatrix& scoresGrad, int windowSize, int globalTokenCount, int queryPositionStart = 0);
+
     /// <summary>RoPE rotate Q or K in place column c uses position positionOffset + c</summary>
     static void rotaryRotateInPlace(CudaMatrix& tensor, int headCount, int headDimension, int pairCount, const CudaMatrix& cosTable, const CudaMatrix& sinTable, int positionOffset = 0);
 
+    /// <summary>inverse RoPE rotate Q or K in place</summary>
+    static void rotaryRotateInverseInPlace(CudaMatrix& tensor, int headCount, int headDimension, int pairCount, const CudaMatrix& cosTable, const CudaMatrix& sinTable, int positionOffset = 0);
+
     /// <summary>gather embedding rows into embedDim x tokenCount matrix</summary>
     static void embeddingGatherInto(const CudaMatrix& weight, const CudaIntBuffer& tokenIds, size_t tokenCount, CudaMatrix& out);
+
+    /// <summary>scatter add outputGradient into weightGradient rows by tokenId with atomicAdd</summary>
+    static void embeddingScatterAddInto(CudaMatrix& weightGradient, const CudaIntBuffer& tokenIds, size_t tokenCount, const CudaMatrix& outputGradient);
 
 private:
     static constexpr int threadCount = 256;
@@ -57,8 +84,12 @@ private:
 #ifdef __CUDACC__
     __device__ static void runBroadcastBiasAddInPlace(float* product, const float* bias, int rowCount, int columnCount);
     __device__ static void runSiluInto(const float* input, float* out, int elementCount);
+    __device__ static void runSiluDerivativeInto(const float* input, float* out, int elementCount);
     __device__ static void runMultiplyElementwiseInto(const float* left, const float* right, float* out, int elementCount);
+    __device__ static void runMultiplyElementwiseInPlace(float* total, const float* other, int elementCount);
     __device__ static void runAddInto(const float* left, const float* right, float* out, int elementCount);
+    __device__ static void runAddInPlace(float* total, const float* delta, int elementCount);
+    __device__ static void runSumColumnsInto(const float* gradient, float* biasGradient, int rowCount, int columnCount);
     __device__ static void runScaleInPlace(float* matrix, float scalar, int elementCount);
     __device__ static void runZeroInPlace(float* matrix, int elementCount);
     __device__ static void runExtractHeadInto(const float* full, float* head, int headIndex, int headDimension, int sourceStrideColumns, int usedColumnCount);
@@ -67,13 +98,21 @@ private:
     __device__ static void runApplyCausalMaskInPlace(float* scores, int sequenceLength);
     __device__ static void runApplySparseAttentionMaskInPlace(float* scores, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount);
     __device__ static void runSoftmaxInto(const float* logits, float* out, int rowCount, int columnCount);
+    __device__ static void runSoftmaxBackwardInto(const float* probabilities, const float* probabilityGradient, float* scoreGradient, int rowCount, int columnCount);
+    __device__ static void runZeroForbiddenScoreGradientsInPlace(float* scoresGrad, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount);
     __device__ static void runRotaryRotateInPlace(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable);
+    __device__ static void runRotaryRotateInverseInPlace(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable);
     __device__ static void runEmbeddingGatherInto(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);
+    __device__ static void runEmbeddingScatterAddInto(float* weightGradient, const int* tokenIds, const float* outputGradient, int embeddingDim, int tokenCount, int vocabularySize);
 
     friend __global__ void CudaOpsBroadcastBiasAddEntry(float* product, const float* bias, int rowCount, int columnCount);
     friend __global__ void CudaOpsSiluEntry(const float* input, float* out, int elementCount);
+    friend __global__ void CudaOpsSiluDerivativeEntry(const float* input, float* out, int elementCount);
     friend __global__ void CudaOpsMultiplyElementwiseEntry(const float* left, const float* right, float* out, int elementCount);
+    friend __global__ void CudaOpsMultiplyElementwiseInPlaceEntry(float* total, const float* other, int elementCount);
     friend __global__ void CudaOpsAddEntry(const float* left, const float* right, float* out, int elementCount);
+    friend __global__ void CudaOpsAddInPlaceEntry(float* total, const float* delta, int elementCount);
+    friend __global__ void CudaOpsSumColumnsEntry(const float* gradient, float* biasGradient, int rowCount, int columnCount);
     friend __global__ void CudaOpsScaleEntry(float* matrix, float scalar, int elementCount);
     friend __global__ void CudaOpsZeroEntry(float* matrix, int elementCount);
     friend __global__ void CudaOpsExtractHeadEntry(const float* full, float* head, int headIndex, int headDimension, int sourceStrideColumns, int usedColumnCount);
@@ -82,16 +121,24 @@ private:
     friend __global__ void CudaOpsCausalMaskEntry(float* scores, int sequenceLength);
     friend __global__ void CudaOpsSparseAttentionMaskEntry(float* scores, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount);
     friend __global__ void CudaOpsSoftmaxEntry(const float* logits, float* out, int rowCount, int columnCount);
+    friend __global__ void CudaOpsSoftmaxBackwardEntry(const float* probabilities, const float* probabilityGradient, float* scoreGradient, int rowCount, int columnCount);
+    friend __global__ void CudaOpsZeroForbiddenScoreGradientsEntry(float* scoresGrad, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount);
     friend __global__ void CudaOpsRotaryRotateEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable);
+    friend __global__ void CudaOpsRotaryRotateInverseEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable);
     friend __global__ void CudaOpsEmbeddingGatherEntry(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);
+    friend __global__ void CudaOpsEmbeddingScatterAddEntry(float* weightGradient, const int* tokenIds, const float* outputGradient, int embeddingDim, int tokenCount, int vocabularySize);
 #endif
 };
 
 #ifdef __CUDACC__
 __global__ void CudaOpsBroadcastBiasAddEntry(float* product, const float* bias, int rowCount, int columnCount);
 __global__ void CudaOpsSiluEntry(const float* input, float* out, int elementCount);
+__global__ void CudaOpsSiluDerivativeEntry(const float* input, float* out, int elementCount);
 __global__ void CudaOpsMultiplyElementwiseEntry(const float* left, const float* right, float* out, int elementCount);
+__global__ void CudaOpsMultiplyElementwiseInPlaceEntry(float* total, const float* other, int elementCount);
 __global__ void CudaOpsAddEntry(const float* left, const float* right, float* out, int elementCount);
+__global__ void CudaOpsAddInPlaceEntry(float* total, const float* delta, int elementCount);
+__global__ void CudaOpsSumColumnsEntry(const float* gradient, float* biasGradient, int rowCount, int columnCount);
 __global__ void CudaOpsScaleEntry(float* matrix, float scalar, int elementCount);
 __global__ void CudaOpsZeroEntry(float* matrix, int elementCount);
 __global__ void CudaOpsExtractHeadEntry(const float* full, float* head, int headIndex, int headDimension, int sourceStrideColumns, int usedColumnCount);
@@ -100,8 +147,12 @@ __global__ void CudaOpsWriteColumnsEntry(float* destination, const float* source
 __global__ void CudaOpsCausalMaskEntry(float* scores, int sequenceLength);
 __global__ void CudaOpsSparseAttentionMaskEntry(float* scores, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount);
 __global__ void CudaOpsSoftmaxEntry(const float* logits, float* out, int rowCount, int columnCount);
+__global__ void CudaOpsSoftmaxBackwardEntry(const float* probabilities, const float* probabilityGradient, float* scoreGradient, int rowCount, int columnCount);
+__global__ void CudaOpsZeroForbiddenScoreGradientsEntry(float* scoresGrad, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount);
 __global__ void CudaOpsRotaryRotateEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable);
+__global__ void CudaOpsRotaryRotateInverseEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable);
 __global__ void CudaOpsEmbeddingGatherEntry(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);
+__global__ void CudaOpsEmbeddingScatterAddEntry(float* weightGradient, const int* tokenIds, const float* outputGradient, int embeddingDim, int tokenCount, int vocabularySize);
 #endif
 
 #endif // CUDAOPS_HPP

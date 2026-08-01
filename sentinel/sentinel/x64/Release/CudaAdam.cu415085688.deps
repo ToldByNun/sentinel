@@ -33,7 +33,6 @@ C:\Program Files (x86)\Windows Kits\10\Include\10.0.28000.0\ucrt\wchar.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\algorithm
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\ammintrin.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\cfloat
-C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\chrono
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\climits
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\cmath
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\concurrencysal.h
@@ -43,7 +42,6 @@ C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\cstdio
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\cstdlib
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\cstring
-C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\ctime
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\cwchar
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\eh.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\emmintrin.h
@@ -60,7 +58,6 @@ C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\new
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\nmmintrin.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\pmmintrin.h
-C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\ratio
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\sal.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\setjmp.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\smmintrin.h
@@ -83,14 +80,12 @@ C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\xmemory
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\xmmintrin.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\xstring
-C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\xtimec.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\xtr1common
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\xutility
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\yvals.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\yvals_core.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\zmmintrin.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\__msvc_bit_utils.hpp
-C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\__msvc_chrono.hpp
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\__msvc_doom_core.hpp
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\__msvc_heap_algorithms.hpp
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\__msvc_int128.hpp
@@ -139,8 +134,8 @@ C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\texture_types.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\vector_functions.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\vector_functions.hpp
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\vector_types.h
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaAdam.hpp
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaMatmul.hpp
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaOps.hpp
-C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaRMSNorm.hpp
-C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Layers\RMSNorm.hpp
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Math\Matrix.hpp
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Optimizers\Adam.hpp
