@@ -52,6 +52,7 @@ public:
     int headDimension;
     int windowSize;
     int globalTokenCount;
+    bool preferSparseCompute;
 
     CausalSelfAttention(Matrix queryWeight, Matrix keyWeight, Matrix valueWeight, Matrix outputWeight, RotaryEmbedding rotaryEmbedding, int headCount, int windowSize, int globalTokenCount);
 
@@ -67,12 +68,33 @@ public:
     /// <summary>smoke dense default vs sparse window+global mask probabilities</summary>
     static void runSparseMaskSmokeDemo(int embeddingDim = 32, int headCount = 2, int sequenceLength = 16, int maximumPositionCount = 32, int windowSize = 4, int globalTokenCount = 2);
 
+    /// <summary>smoke sparse backward mask + finite difference + W=max gradient parity</summary>
+    static void runSparseBackwardSmokeDemo(int embeddingDim = 32, int headCount = 2, int sequenceLength = 12, int maximumPositionCount = 32, int windowSize = 4, int globalTokenCount = 2);
+
+    /// <summary>smoke sparse compute path vs dense masked path parity</summary>
+    static void runSparseComputeSmokeDemo(int embeddingDim = 32, int headCount = 2, int sequenceLength = 16, int maximumPositionCount = 32, int windowSize = 4, int globalTokenCount = 2);
+
 private:
     /// <summary>true when key may attend for this query under causal window/global rules</summary>
     static bool allowsKey(int queryIndex, int keyIndex, int windowSize, int globalTokenCount);
 
+    /// <summary>true when sparse score loops beat dense gemm for this sequence</summary>
+    bool usesSparseCompute(int sequenceLength) const;
+
     /// <summary>set disallowed scores to large negative</summary>
     static void applyAttentionMaskInPlace(Matrix& scores, int windowSize, int globalTokenCount);
+
+    /// <summary>dense K^T Q scale mask into scores</summary>
+    static void computeDenseMaskedScoresInto(const Matrix& queryHead, const Matrix& keyHead, Matrix& scores, float scale, int windowSize, int globalTokenCount);
+
+    /// <summary>only allowed score entries O(seq*(W+G))</summary>
+    static void computeSparseScoresInto(const Matrix& queryHead, const Matrix& keyHead, Matrix& scores, float scale, int windowSize, int globalTokenCount);
+
+    /// <summary>dense V probabilities product</summary>
+    static void attendDenseInto(const Matrix& valueHead, const Matrix& probabilities, Matrix& attendedHead);
+
+    /// <summary>sparse V probabilities product over allowed keys</summary>
+    static void attendSparseInto(const Matrix& valueHead, const Matrix& probabilities, Matrix& attendedHead, int windowSize, int globalTokenCount);
 
     /// <summary>column wise softmax jacobian writing into scoreGradient</summary>
     static void softmaxBackwardInto(const Matrix& probabilities, const Matrix& probabilityGradient, Matrix& scoreGradient);

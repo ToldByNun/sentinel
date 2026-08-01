@@ -48,6 +48,8 @@ int main() {
     CudaFeedForward::runSmokeDemo(128, 64);
     CudaRMSNorm::runSmokeDemo(128, 64);
     CausalSelfAttention::runSparseMaskSmokeDemo(32, 2, 16, 32, 4, 2);
+    CausalSelfAttention::runSparseBackwardSmokeDemo(32, 2, 12, 32, 4, 2);
+    CausalSelfAttention::runSparseComputeSmokeDemo(32, 2, 16, 32, 4, 2);
     CudaCausalSelfAttention::runSmokeDemo(64, 4, 32, 64);
     CudaCausalSelfAttention::runKvCacheSmokeDemo(64, 4, 32, 64);
     CudaTransformerBlock::runSmokeDemo(64, 4, 32, 64);
