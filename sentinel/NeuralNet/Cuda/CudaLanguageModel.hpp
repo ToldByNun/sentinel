@@ -278,15 +278,15 @@ public:
 
 
 
-    /// <summary>Adam step updating all parameters from averaged batch gradients</summary>
+    /// <summary>Adam step updating all parameters; gradientScale multiplies grads in-kernel</summary>
 
-    void applyGradients(CudaLanguageModelGradients& gradients);
+    void applyGradients(CudaLanguageModelGradients& gradients, float gradientScale = 1.0f);
 
 
 
     /// <summary>sequential batch training loop on device</summary>
 
-    void train(const LanguageModelDataset& trainDataset, const LanguageModelDataset& testDataset, int epochs, int logEveryEpochs, int batchSize, int gradientAccumulationSteps = 1);
+    void train(const LanguageModelDataset& trainDataset, const LanguageModelDataset& testDataset, int epochs, int logEveryEpochs, int batchSize, int gradientAccumulationSteps = 4);
 
 
 

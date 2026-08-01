@@ -33,11 +33,11 @@ void CudaAdam::step() {
     ++this->timeStep;
 }
 
-__device__ void CudaAdam::runUpdate(float* parameter, float* firstMoment, float* secondMoment, const float* gradient, int elementCount, float learningRate, float beta1, float beta2, float epsilon, float inverseFirstCorrection, float inverseSecondCorrection) {
+__device__ void CudaAdam::runUpdate(float* parameter, float* firstMoment, float* secondMoment, const float* gradient, int elementCount, float learningRate, float beta1, float beta2, float epsilon, float inverseFirstCorrection, float inverseSecondCorrection, float gradientScale) {
     const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
     if (index >= elementCount) return;
 
-    const float gradientValue = gradient[index];
+    const float gradientValue = gradient[index] * gradientScale;
     float updatedFirstMoment = beta1 * firstMoment[index] + (1.0f - beta1) * gradientValue;
     float updatedSecondMoment = beta2 * secondMoment[index] + (1.0f - beta2) * gradientValue * gradientValue;
     firstMoment[index] = updatedFirstMoment;
@@ -48,13 +48,13 @@ __device__ void CudaAdam::runUpdate(float* parameter, float* firstMoment, float*
     parameter[index] -= learningRate * correctedFirst / (sqrtf(correctedSecond) + epsilon);
 }
 
-__device__ void CudaAdam::runUpdateMany(const CudaAdamUpdateItem* items, int itemCount, float learningRate, float beta1, float beta2, float epsilon, float inverseFirstCorrection, float inverseSecondCorrection) {
+__device__ void CudaAdam::runUpdateMany(const CudaAdamUpdateItem* items, int itemCount, float learningRate, float beta1, float beta2, float epsilon, float inverseFirstCorrection, float inverseSecondCorrection, float gradientScale) {
     const int tensorIndex = static_cast<int>(blockIdx.x);
     if (tensorIndex >= itemCount) return;
 
     const CudaAdamUpdateItem item = items[tensorIndex];
     for (int index = static_cast<int>(threadIdx.x); index < item.elementCount; index += static_cast<int>(blockDim.x)) {
-        const float gradientValue = item.gradient[index];
+        const float gradientValue = item.gradient[index] * gradientScale;
         float updatedFirstMoment = beta1 * item.firstMoment[index] + (1.0f - beta1) * gradientValue;
         float updatedSecondMoment = beta2 * item.secondMoment[index] + (1.0f - beta2) * gradientValue * gradientValue;
         item.firstMoment[index] = updatedFirstMoment;
@@ -66,15 +66,15 @@ __device__ void CudaAdam::runUpdateMany(const CudaAdamUpdateItem* items, int ite
     }
 }
 
-__global__ void CudaAdamUpdateEntry(float* parameter, float* firstMoment, float* secondMoment, const float* gradient, int elementCount, float learningRate, float beta1, float beta2, float epsilon, float inverseFirstCorrection, float inverseSecondCorrection) {
-    CudaAdam::runUpdate(parameter, firstMoment, secondMoment, gradient, elementCount, learningRate, beta1, beta2, epsilon, inverseFirstCorrection, inverseSecondCorrection);
+__global__ void CudaAdamUpdateEntry(float* parameter, float* firstMoment, float* secondMoment, const float* gradient, int elementCount, float learningRate, float beta1, float beta2, float epsilon, float inverseFirstCorrection, float inverseSecondCorrection, float gradientScale) {
+    CudaAdam::runUpdate(parameter, firstMoment, secondMoment, gradient, elementCount, learningRate, beta1, beta2, epsilon, inverseFirstCorrection, inverseSecondCorrection, gradientScale);
 }
 
-__global__ void CudaAdamUpdateManyEntry(const CudaAdamUpdateItem* items, int itemCount, float learningRate, float beta1, float beta2, float epsilon, float inverseFirstCorrection, float inverseSecondCorrection) {
-    CudaAdam::runUpdateMany(items, itemCount, learningRate, beta1, beta2, epsilon, inverseFirstCorrection, inverseSecondCorrection);
+__global__ void CudaAdamUpdateManyEntry(const CudaAdamUpdateItem* items, int itemCount, float learningRate, float beta1, float beta2, float epsilon, float inverseFirstCorrection, float inverseSecondCorrection, float gradientScale) {
+    CudaAdam::runUpdateMany(items, itemCount, learningRate, beta1, beta2, epsilon, inverseFirstCorrection, inverseSecondCorrection, gradientScale);
 }
 
-void CudaAdam::update(CudaMatrix& parameter, CudaAdamState& state, const CudaMatrix& gradient) const {
+void CudaAdam::update(CudaMatrix& parameter, CudaAdamState& state, const CudaMatrix& gradient, float gradientScale) const {
     CudaAdamUpdateItem item;
     item.parameter = parameter.buffer.deviceData;
     if (state.firstMoment.empty()) {
@@ -87,10 +87,10 @@ void CudaAdam::update(CudaMatrix& parameter, CudaAdamState& state, const CudaMat
     item.secondMoment = state.secondMoment.buffer.deviceData;
     item.gradient = gradient.buffer.deviceData;
     item.elementCount = static_cast<int>(parameter.elementCount());
-    this->updateMany(&item, 1);
+    this->updateMany(&item, 1, gradientScale);
 }
 
-void CudaAdam::updateMany(const CudaAdamUpdateItem* items, int itemCount) const {
+void CudaAdam::updateMany(const CudaAdamUpdateItem* items, int itemCount, float gradientScale) const {
     if (this->timeStep <= 0) throw std::invalid_argument("CudaAdam::updateMany requires step() before update");
     if (items == nullptr || itemCount <= 0) throw std::invalid_argument("CudaAdam::updateMany empty items");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaAdam::updateMany no CUDA device");
@@ -106,13 +106,23 @@ void CudaAdam::updateMany(const CudaAdamUpdateItem* items, int itemCount) const 
     const float inverseFirstCorrection = 1.0f / firstMomentCorrection;
     const float inverseSecondCorrection = 1.0f / secondMomentCorrection;
 
-    static CudaDeviceBuffer itemBuffer;
     const size_t byteCount = static_cast<size_t>(itemCount) * sizeof(CudaAdamUpdateItem);
-    itemBuffer.ensureCapacity(byteCount);
-    itemBuffer.copyBytesFromHost(items, byteCount);
+    // const method but buffer is mutable workspace; cast away for pooled reuse
+    CudaDeviceBuffer& buffer = const_cast<CudaAdam*>(this)->itemBuffer;
+    buffer.ensureCapacity(byteCount);
+    buffer.copyBytesFromHost(items, byteCount);
 
     constexpr int threadCount = 256;
-    CudaAdamUpdateManyEntry<<<itemCount, threadCount>>>(reinterpret_cast<const CudaAdamUpdateItem*>(itemBuffer.deviceData), itemCount, this->learningRate, this->beta1, this->beta2, this->epsilon, inverseFirstCorrection, inverseSecondCorrection);
+    CudaAdamUpdateManyEntry<<<itemCount, threadCount>>>(
+        reinterpret_cast<const CudaAdamUpdateItem*>(buffer.deviceData),
+        itemCount,
+        this->learningRate,
+        this->beta1,
+        this->beta2,
+        this->epsilon,
+        inverseFirstCorrection,
+        inverseSecondCorrection,
+        gradientScale);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaAdamUpdateManyEntry launch");
 }
 

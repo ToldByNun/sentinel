@@ -171,6 +171,8 @@ __global__ void CudaFlashAttentionForwardEntry(
     float* sharedScores = sharedValue + tileBc * headDim;
 
     const int headIndex = static_cast<int>(blockIdx.y);
+    const int packIndex = static_cast<int>(blockIdx.z);
+    const int packColumnStart = columnStart + packIndex * sequenceLength;
     const int queryTile = static_cast<int>(blockIdx.x);
     const int queryStart = queryTile * tileBr;
     if (queryStart >= sequenceLength) return;
@@ -182,7 +184,7 @@ __global__ void CudaFlashAttentionForwardEntry(
     for (int index = threadIndex; index < queryCount * headDim; index += threadCount) {
         const int localQuery = index / headDim;
         const int dim = index - localQuery * headDim;
-        const int absoluteColumn = columnStart + queryStart + localQuery;
+        const int absoluteColumn = packColumnStart + queryStart + localQuery;
         sharedQuery[localQuery * headDim + dim] = *headRow(query, headIndex, headDim, dim, strideColumns, absoluteColumn);
     }
     __syncthreads();
@@ -203,7 +205,7 @@ __global__ void CudaFlashAttentionForwardEntry(
         for (int index = threadIndex; index < keyCount * headDim; index += threadCount) {
             const int localKey = index / headDim;
             const int dim = index - localKey * headDim;
-            const int absoluteColumn = columnStart + keyStart + localKey;
+            const int absoluteColumn = packColumnStart + keyStart + localKey;
             sharedKey[localKey * headDim + dim] = *headRow(key, headIndex, headDim, dim, strideColumns, absoluteColumn);
             sharedValue[localKey * headDim + dim] = *headRow(value, headIndex, headDim, dim, strideColumns, absoluteColumn);
         }
@@ -243,7 +245,7 @@ __global__ void CudaFlashAttentionForwardEntry(
     }
 
     if (threadIndex < queryCount) {
-        const int absoluteColumn = columnStart + queryStart + threadIndex;
+        const int absoluteColumn = packColumnStart + queryStart + threadIndex;
         const float inverseSum = 1.0f / rowSum;
         for (int dim = 0; dim < headDim; ++dim)
             *headRowMutable(out, headIndex, headDim, dim, strideColumns, absoluteColumn) = outputAccum[dim] * inverseSum;
@@ -270,6 +272,8 @@ __global__ void CudaFlashAttentionForwardFixedEntry(
     float* sharedScores = sharedValue + TileBc * HeadDim;
 
     const int headIndex = static_cast<int>(blockIdx.y);
+    const int packIndex = static_cast<int>(blockIdx.z);
+    const int packColumnStart = columnStart + packIndex * sequenceLength;
     const int queryTile = static_cast<int>(blockIdx.x);
     const int queryStart = queryTile * TileBr;
     if (queryStart >= sequenceLength) return;
@@ -281,7 +285,7 @@ __global__ void CudaFlashAttentionForwardFixedEntry(
     for (int index = threadIndex; index < queryCount * HeadDim; index += threadCount) {
         const int localQuery = index / HeadDim;
         const int dim = index - localQuery * HeadDim;
-        const int absoluteColumn = columnStart + queryStart + localQuery;
+        const int absoluteColumn = packColumnStart + queryStart + localQuery;
         sharedQuery[localQuery * HeadDim + dim] = *headRow(query, headIndex, HeadDim, dim, strideColumns, absoluteColumn);
     }
     __syncthreads();
@@ -302,7 +306,7 @@ __global__ void CudaFlashAttentionForwardFixedEntry(
         for (int index = threadIndex; index < keyCount * HeadDim; index += threadCount) {
             const int localKey = index / HeadDim;
             const int dim = index - localKey * HeadDim;
-            const int absoluteColumn = columnStart + keyStart + localKey;
+            const int absoluteColumn = packColumnStart + keyStart + localKey;
             sharedKey[localKey * HeadDim + dim] = *headRow(key, headIndex, HeadDim, dim, strideColumns, absoluteColumn);
             sharedValue[localKey * HeadDim + dim] = *headRow(value, headIndex, HeadDim, dim, strideColumns, absoluteColumn);
         }
@@ -343,7 +347,7 @@ __global__ void CudaFlashAttentionForwardFixedEntry(
     }
 
     if (threadIndex < queryCount) {
-        const int absoluteColumn = columnStart + queryStart + threadIndex;
+        const int absoluteColumn = packColumnStart + queryStart + threadIndex;
         const float inverseSum = 1.0f / rowSum;
 #pragma unroll
         for (int dim = 0; dim < HeadDim; ++dim)
@@ -361,14 +365,17 @@ __global__ void CudaFlashAttentionDeltaEntry(
     int columnStart,
     int sequenceLength) {
     const int headIndex = static_cast<int>(blockIdx.y);
+    const int packIndex = static_cast<int>(blockIdx.z);
+    const int packColumnStart = columnStart + packIndex * sequenceLength;
+    const int deltaStride = static_cast<int>(gridDim.z) * sequenceLength;
     const int localColumn = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
     if (localColumn >= sequenceLength) return;
 
-    const int absoluteColumn = columnStart + localColumn;
+    const int absoluteColumn = packColumnStart + localColumn;
     float sum = 0.0f;
     for (int dim = 0; dim < headDim; ++dim)
         sum += *headRow(out, headIndex, headDim, dim, strideColumns, absoluteColumn) * *headRow(outGradient, headIndex, headDim, dim, strideColumns, absoluteColumn);
-    delta[headIndex * sequenceLength + localColumn] = sum;
+    delta[headIndex * deltaStride + packIndex * sequenceLength + localColumn] = sum;
 }
 
 /// <summary>key-tile outer: dK/dV in smem; dQ via sparse global atomics</summary>
@@ -402,6 +409,9 @@ __global__ void CudaFlashAttentionBackwardKeyEntry(
     float* sharedDelta = sharedLse + tileBr;
 
     const int headIndex = static_cast<int>(blockIdx.y);
+    const int packIndex = static_cast<int>(blockIdx.z);
+    const int packColumnStart = columnStart + packIndex * sequenceLength;
+    const int deltaStride = static_cast<int>(gridDim.z) * sequenceLength;
     const int keyTile = static_cast<int>(blockIdx.x);
     const int keyStart = keyTile * tileBc;
     if (keyStart >= sequenceLength) return;
@@ -413,7 +423,7 @@ __global__ void CudaFlashAttentionBackwardKeyEntry(
     for (int index = threadIndex; index < keyCount * headDim; index += threadCount) {
         const int localKey = index / headDim;
         const int dim = index - localKey * headDim;
-        const int absoluteColumn = columnStart + keyStart + localKey;
+        const int absoluteColumn = packColumnStart + keyStart + localKey;
         sharedKey[localKey * headDim + dim] = *headRow(key, headIndex, headDim, dim, strideColumns, absoluteColumn);
         sharedValue[localKey * headDim + dim] = *headRow(value, headIndex, headDim, dim, strideColumns, absoluteColumn);
         sharedKeyGrad[localKey * headDim + dim] = 0.0f;
@@ -430,14 +440,14 @@ __global__ void CudaFlashAttentionBackwardKeyEntry(
         for (int index = threadIndex; index < queryCount * headDim; index += threadCount) {
             const int localQuery = index / headDim;
             const int dim = index - localQuery * headDim;
-            const int absoluteColumn = columnStart + queryStart + localQuery;
+            const int absoluteColumn = packColumnStart + queryStart + localQuery;
             sharedQuery[localQuery * headDim + dim] = *headRow(query, headIndex, headDim, dim, strideColumns, absoluteColumn);
             sharedOutGrad[localQuery * headDim + dim] = *headRow(outGradient, headIndex, headDim, dim, strideColumns, absoluteColumn);
         }
         if (threadIndex < queryCount) {
-            const int absoluteColumn = columnStart + queryStart + threadIndex;
+            const int absoluteColumn = packColumnStart + queryStart + threadIndex;
             sharedLse[threadIndex] = logSumExp[headIndex * strideColumns + absoluteColumn];
-            sharedDelta[threadIndex] = delta[headIndex * sequenceLength + queryStart + threadIndex];
+            sharedDelta[threadIndex] = delta[headIndex * deltaStride + packIndex * sequenceLength + queryStart + threadIndex];
         }
         __syncthreads();
 
@@ -475,7 +485,7 @@ __global__ void CudaFlashAttentionBackwardKeyEntry(
                 for (int dim = 0; dim < headDim; ++dim)
                     queryGradLocal[dim] += scaledDs * sharedKey[localKey * headDim + dim];
             }
-            const int absoluteColumn = columnStart + queryStart + threadIndex;
+            const int absoluteColumn = packColumnStart + queryStart + threadIndex;
             for (int dim = 0; dim < headDim; ++dim)
                 atomicAdd(headRowMutable(queryGradient, headIndex, headDim, dim, strideColumns, absoluteColumn), queryGradLocal[dim]);
         }
@@ -485,7 +495,7 @@ __global__ void CudaFlashAttentionBackwardKeyEntry(
     for (int index = threadIndex; index < keyCount * headDim; index += threadCount) {
         const int localKey = index / headDim;
         const int dim = index - localKey * headDim;
-        const int absoluteColumn = columnStart + keyStart + localKey;
+        const int absoluteColumn = packColumnStart + keyStart + localKey;
         *headRowMutable(keyGradient, headIndex, headDim, dim, strideColumns, absoluteColumn) = sharedKeyGrad[localKey * headDim + dim];
         *headRowMutable(valueGradient, headIndex, headDim, dim, strideColumns, absoluteColumn) = sharedValueGrad[localKey * headDim + dim];
     }
@@ -519,6 +529,9 @@ __global__ void CudaFlashAttentionBackwardKeyFixedEntry(
     float* sharedDelta = sharedLse + TileBr;
 
     const int headIndex = static_cast<int>(blockIdx.y);
+    const int packIndex = static_cast<int>(blockIdx.z);
+    const int packColumnStart = columnStart + packIndex * sequenceLength;
+    const int deltaStride = static_cast<int>(gridDim.z) * sequenceLength;
     const int keyTile = static_cast<int>(blockIdx.x);
     const int keyStart = keyTile * TileBc;
     if (keyStart >= sequenceLength) return;
@@ -530,7 +543,7 @@ __global__ void CudaFlashAttentionBackwardKeyFixedEntry(
     for (int index = threadIndex; index < keyCount * HeadDim; index += threadCount) {
         const int localKey = index / HeadDim;
         const int dim = index - localKey * HeadDim;
-        const int absoluteColumn = columnStart + keyStart + localKey;
+        const int absoluteColumn = packColumnStart + keyStart + localKey;
         sharedKey[localKey * HeadDim + dim] = *headRow(key, headIndex, HeadDim, dim, strideColumns, absoluteColumn);
         sharedValue[localKey * HeadDim + dim] = *headRow(value, headIndex, HeadDim, dim, strideColumns, absoluteColumn);
         sharedKeyGrad[localKey * HeadDim + dim] = 0.0f;
@@ -547,14 +560,14 @@ __global__ void CudaFlashAttentionBackwardKeyFixedEntry(
         for (int index = threadIndex; index < queryCount * HeadDim; index += threadCount) {
             const int localQuery = index / HeadDim;
             const int dim = index - localQuery * HeadDim;
-            const int absoluteColumn = columnStart + queryStart + localQuery;
+            const int absoluteColumn = packColumnStart + queryStart + localQuery;
             sharedQuery[localQuery * HeadDim + dim] = *headRow(query, headIndex, HeadDim, dim, strideColumns, absoluteColumn);
             sharedOutGrad[localQuery * HeadDim + dim] = *headRow(outGradient, headIndex, HeadDim, dim, strideColumns, absoluteColumn);
         }
         if (threadIndex < queryCount) {
-            const int absoluteColumn = columnStart + queryStart + threadIndex;
+            const int absoluteColumn = packColumnStart + queryStart + threadIndex;
             sharedLse[threadIndex] = logSumExp[headIndex * strideColumns + absoluteColumn];
-            sharedDelta[threadIndex] = delta[headIndex * sequenceLength + queryStart + threadIndex];
+            sharedDelta[threadIndex] = delta[headIndex * deltaStride + packIndex * sequenceLength + queryStart + threadIndex];
         }
         __syncthreads();
 
@@ -595,7 +608,7 @@ __global__ void CudaFlashAttentionBackwardKeyFixedEntry(
                 for (int dim = 0; dim < HeadDim; ++dim)
                     queryGradLocal[dim] += scaledDs * sharedKey[localKey * HeadDim + dim];
             }
-            const int absoluteColumn = columnStart + queryStart + threadIndex;
+            const int absoluteColumn = packColumnStart + queryStart + threadIndex;
 #pragma unroll
             for (int dim = 0; dim < HeadDim; ++dim)
                 atomicAdd(headRowMutable(queryGradient, headIndex, HeadDim, dim, strideColumns, absoluteColumn), queryGradLocal[dim]);
@@ -606,7 +619,7 @@ __global__ void CudaFlashAttentionBackwardKeyFixedEntry(
     for (int index = threadIndex; index < keyCount * HeadDim; index += threadCount) {
         const int localKey = index / HeadDim;
         const int dim = index - localKey * HeadDim;
-        const int absoluteColumn = columnStart + keyStart + localKey;
+        const int absoluteColumn = packColumnStart + keyStart + localKey;
         *headRowMutable(keyGradient, headIndex, HeadDim, dim, strideColumns, absoluteColumn) = sharedKeyGrad[localKey * HeadDim + dim];
         *headRowMutable(valueGradient, headIndex, HeadDim, dim, strideColumns, absoluteColumn) = sharedValueGrad[localKey * HeadDim + dim];
     }
@@ -664,12 +677,16 @@ void resolveColumnWindow(const CudaMatrix& query, int& columnStart, int& columnC
 
 } // namespace
 
-void CudaFlashAttention::forwardMultiHead(const CudaMatrix& query, const CudaMatrix& key, const CudaMatrix& value, CudaMatrix& out, CudaMatrix& logSumExp, int headCount, int headDimension, float scale, bool causal, int columnStart, int columnCount) {
+void CudaFlashAttention::forwardMultiHead(const CudaMatrix& query, const CudaMatrix& key, const CudaMatrix& value, CudaMatrix& out, CudaMatrix& logSumExp, int headCount, int headDimension, float scale, bool causal, int columnStart, int columnCount, int packCount) {
     validateMultiHeadShape(query, key, value, headCount, headDimension, "CudaFlashAttention::forwardMultiHead");
     if (!CudaMatmul::isAvailable())
         throw std::runtime_error("CudaFlashAttention::forwardMultiHead no CUDA device");
+    if (packCount <= 0)
+        packCount = 1;
 
     resolveColumnWindow(query, columnStart, columnCount);
+    if (columnStart + packCount * columnCount > static_cast<int>(query.cols))
+        throw std::invalid_argument("CudaFlashAttention::forwardMultiHead pack window exceeds columns");
     const int strideColumns = static_cast<int>(query.cols);
 
     out.ensureSize(query.rows, query.cols);
@@ -680,7 +697,7 @@ void CudaFlashAttention::forwardMultiHead(const CudaMatrix& query, const CudaMat
     chooseTileSizes(headDimension, tileBr, tileBc);
 
     const int queryTileCount = (columnCount + tileBr - 1) / tileBr;
-    const dim3 grid(static_cast<unsigned>(queryTileCount), static_cast<unsigned>(headCount));
+    const dim3 grid(static_cast<unsigned>(queryTileCount), static_cast<unsigned>(headCount), static_cast<unsigned>(packCount));
     const int threadCount = chooseThreadCount(tileBr, tileBc);
     const size_t sharedBytes = forwardSharedBytes(headDimension, tileBr, tileBc);
     const int causalFlag = causal ? 1 : 0;
@@ -705,7 +722,7 @@ void CudaFlashAttention::forward(const CudaMatrix& query, const CudaMatrix& key,
     forwardMultiHead(query, key, value, out, logSumExp, 1, static_cast<int>(query.rows), scale, causal, 0, static_cast<int>(query.cols));
 }
 
-void CudaFlashAttention::backwardMultiHead(const CudaMatrix& query, const CudaMatrix& key, const CudaMatrix& value, const CudaMatrix& out, const CudaMatrix& logSumExp, const CudaMatrix& outGradient, CudaMatrix& queryGradient, CudaMatrix& keyGradient, CudaMatrix& valueGradient, CudaMatrix& deltaWorkspace, int headCount, int headDimension, float scale, bool causal, int columnStart, int columnCount) {
+void CudaFlashAttention::backwardMultiHead(const CudaMatrix& query, const CudaMatrix& key, const CudaMatrix& value, const CudaMatrix& out, const CudaMatrix& logSumExp, const CudaMatrix& outGradient, CudaMatrix& queryGradient, CudaMatrix& keyGradient, CudaMatrix& valueGradient, CudaMatrix& deltaWorkspace, int headCount, int headDimension, float scale, bool causal, int columnStart, int columnCount, int packCount) {
     validateMultiHeadShape(query, key, value, headCount, headDimension, "CudaFlashAttention::backwardMultiHead");
     if (out.rows != query.rows || out.cols != query.cols)
         throw std::invalid_argument("CudaFlashAttention::backwardMultiHead out shape mismatch");
@@ -715,8 +732,12 @@ void CudaFlashAttention::backwardMultiHead(const CudaMatrix& query, const CudaMa
         throw std::invalid_argument("CudaFlashAttention::backwardMultiHead logSumExp shape mismatch");
     if (!CudaMatmul::isAvailable())
         throw std::runtime_error("CudaFlashAttention::backwardMultiHead no CUDA device");
+    if (packCount <= 0)
+        packCount = 1;
 
     resolveColumnWindow(query, columnStart, columnCount);
+    if (columnStart + packCount * columnCount > static_cast<int>(query.cols))
+        throw std::invalid_argument("CudaFlashAttention::backwardMultiHead pack window exceeds columns");
     const int strideColumns = static_cast<int>(query.cols);
 
     queryGradient.ensureSize(query.rows, query.cols);
@@ -724,11 +745,11 @@ void CudaFlashAttention::backwardMultiHead(const CudaMatrix& query, const CudaMa
     valueGradient.ensureSize(value.rows, value.cols);
 
     // dK/dV overwrite the active window; dQ accumulates with atomics (caller must zero dQ)
-    deltaWorkspace.ensureSize(static_cast<size_t>(headCount), static_cast<size_t>(columnCount));
+    deltaWorkspace.ensureSize(static_cast<size_t>(headCount), static_cast<size_t>(packCount) * static_cast<size_t>(columnCount));
 
     const int deltaThreads = 128;
     const int deltaBlocksX = (columnCount + deltaThreads - 1) / deltaThreads;
-    const dim3 deltaGrid(static_cast<unsigned>(deltaBlocksX), static_cast<unsigned>(headCount));
+    const dim3 deltaGrid(static_cast<unsigned>(deltaBlocksX), static_cast<unsigned>(headCount), static_cast<unsigned>(packCount));
     CudaFlashAttentionDeltaEntry<<<deltaGrid, deltaThreads>>>(
         out.buffer.deviceData,
         outGradient.buffer.deviceData,
@@ -744,7 +765,7 @@ void CudaFlashAttention::backwardMultiHead(const CudaMatrix& query, const CudaMa
     chooseTileSizes(headDimension, tileBr, tileBc);
 
     const int keyTileCount = (columnCount + tileBc - 1) / tileBc;
-    const dim3 grid(static_cast<unsigned>(keyTileCount), static_cast<unsigned>(headCount));
+    const dim3 grid(static_cast<unsigned>(keyTileCount), static_cast<unsigned>(headCount), static_cast<unsigned>(packCount));
     const int threadCount = chooseThreadCount(tileBr, tileBc);
     const size_t keySharedBytes = backwardKeySharedBytes(headDimension, tileBr, tileBc);
     const int causalFlag = causal ? 1 : 0;

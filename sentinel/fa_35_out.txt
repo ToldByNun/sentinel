@@ -1,0 +1,92 @@
+
+-- runtime --
+  OpenMP                              threads=16
+
+-- gemm --
+  matmul                              512x512  backend=cuBLASLt TF32  cpu=4.61ms  gpu=0.13ms  warm=0.93ms  chain=0.049ms/gemm  diff=9.45e-03
+
+-- layers --
+  FeedForward fwd                     embed=128 seq=64  cpu=0.70ms  gpu=0.16ms  diff=2.20e-04
+  FeedForward bwd                     embed=64 seq=32  diff=6.78e-04
+  RMSNorm fwd                         embed=128 seq=64  cpu=0.03ms  gpu=0.06ms  diff=4.77e-07
+  RMSNorm bwd                         embed=64 seq=32  diff=9.54e-07
+  Adam                                rows=128 cols=64  diff=0.00e+00
+
+-- attention --
+  Sparse Attn S1                      embed=32 heads=2 seq=16 W=4 G=2  denseDiff=0.00e+00  forbiddenP=0.00e+00  allowed=162 forbidden=350
+  Sparse Attn S2                      embed=32 heads=2 seq=12 W=4 G=2  gradDiff=0.00e+00  fdErr=2.10e-04  forbiddenGrad=0.00e+00
+  Sparse Attn S3                      embed=32 heads=2 seq=16 W=4 G=2  fwd=0.00e+00  bwd=0.00e+00
+  Attention fwd                       embed=64 heads=4 seq=32  cpu=0.21ms  gpu=0.18ms  diff=1.10e-04
+  Attention bwd                       embed=32 heads=2 seq=16  diff=2.15e-03
+  Attention flash                     embed=64 heads=4 seq=48  fwdDiff=7.66e-05  bwdDiff=8.08e-04
+  Attention KV                        embed=64 heads=4 seq=32  cache=32  diff=1.54e-05
+  Sparse Attn S4                      embed=32 heads=2 seq=16 W=4 G=2  fwd=5.07e-05  kv=1.38e-05
+
+-- model --
+  TransformerBlock fwd                embed=64 heads=4 seq=32  cpu=0.57ms  gpu=0.54ms  diff=2.34e-04
+  LanguageModel fwd                   vocab=128 embed=64 seq=32  cpu=0.86ms  gpu=1.26ms  diff=1.12e-03
+  LanguageModel KV                    vocab=128 embed=64 seq=32  cache=32  diff=6.26e-04
+  LanguageModel train                 vocab=64 embed=32 seq=16 pack=16  loss cpu=4.1081 gpu=4.1081  gradDiff=1.12e-04  packLossDiff=0.00e+00 packGradDiff=2.38e-07  tokens/s=129473
+  LanguageModel train                 vocab=1000 embed=64 seq=48 pack=16  loss cpu=7.0085 gpu=7.0084  gradDiff=1.04e-04  packLossDiff=1.22e-04 packGradDiff=6.57e-05  tokens/s=221090
+
+-- train profile --
+  profile config                      vocab=1000 embed=64 seq=48 blocks=2 pack=5 tokens/step=240 flash=on maxPackCols=256
+  profile step                        avg=3.31ms  ~tokens/s=72526
+    attention                         fwd=0.44ms bwd=0.80ms  total=1.24ms (38%)
+    ffn                               fwd=0.40ms bwd=0.65ms  total=1.05ms (32%)
+    head+ce                           fwd=0.08ms ce=0.36ms bwd=0.23ms  total=0.67ms (20%)
+    embed+h2d                         embed=0.04ms scatter=0.02ms h2d=0.06ms hostPack=0.00ms
+    adam                              0.23ms (7%)
+    other sum                         0.35ms (11%)
+
+-- train profile --
+  profile config                      vocab=1000 embed=64 seq=48 blocks=2 pack=5 tokens/step=240 flash=off maxPackCols=256
+  profile step                        avg=6.40ms  ~tokens/s=37491
+    attention                         fwd=1.97ms bwd=2.36ms  total=4.33ms (68%)
+    ffn                               fwd=0.39ms bwd=0.69ms  total=1.08ms (17%)
+    head+ce                           fwd=0.10ms ce=0.33ms bwd=0.19ms  total=0.61ms (10%)
+    embed+h2d                         embed=0.02ms scatter=0.04ms h2d=0.10ms hostPack=0.00ms
+    adam                              0.22ms (3%)
+    other sum                         0.38ms (6%)
+
+-- train profile --
+  profile config                      vocab=1000 embed=64 seq=256 blocks=2 pack=8 tokens/step=2048 flash=on maxPackCols=2048
+  profile step                        avg=4.93ms  ~tokens/s=415076
+    attention                         fwd=0.49ms bwd=1.68ms  total=2.17ms (44%)
+    ffn                               fwd=0.36ms bwd=1.23ms  total=1.59ms (32%)
+    head+ce                           fwd=0.08ms ce=0.36ms bwd=0.37ms  total=0.81ms (17%)
+    embed+h2d                         embed=0.06ms scatter=0.02ms h2d=0.04ms hostPack=0.00ms
+    adam                              0.24ms (5%)
+    other sum                         0.36ms (7%)
+
+-- train profile --
+  profile config                      vocab=1000 embed=64 seq=256 blocks=2 pack=8 tokens/step=2048 flash=off maxPackCols=2048
+  profile step                        avg=33.15ms  ~tokens/s=61784
+    attention                         fwd=14.24ms bwd=16.11ms  total=30.35ms (92%)
+    ffn                               fwd=0.39ms bwd=1.11ms  total=1.51ms (5%)
+    head+ce                           fwd=0.12ms ce=0.32ms bwd=0.41ms  total=0.85ms (3%)
+    embed+h2d                         embed=0.02ms scatter=0.05ms h2d=0.11ms hostPack=0.00ms
+    adam                              0.26ms (1%)
+    other sum                         0.44ms (1%)
+
+-- train profile --
+  profile config                      vocab=1000 embed=64 seq=512 blocks=2 pack=4 tokens/step=2048 flash=on maxPackCols=2048
+  profile step                        avg=6.01ms  ~tokens/s=340806
+    attention                         fwd=0.69ms bwd=2.34ms  total=3.04ms (51%)
+    ffn                               fwd=0.51ms bwd=1.17ms  total=1.68ms (28%)
+    head+ce                           fwd=0.12ms ce=0.34ms bwd=0.46ms  total=0.92ms (15%)
+    embed+h2d                         embed=0.02ms scatter=0.02ms h2d=0.06ms hostPack=0.00ms
+    adam                              0.26ms (4%)
+    other sum                         0.37ms (6%)
+
+-- train profile --
+  profile config                      vocab=1000 embed=64 seq=512 blocks=2 pack=4 tokens/step=2048 flash=off maxPackCols=2048
+  profile step                        avg=20.75ms  ~tokens/s=98706
+    attention                         fwd=8.33ms bwd=9.69ms  total=18.02ms (87%)
+    ffn                               fwd=0.36ms bwd=1.10ms  total=1.47ms (7%)
+    head+ce                           fwd=0.12ms ce=0.34ms bwd=0.38ms  total=0.84ms (4%)
+    embed+h2d                         embed=0.03ms scatter=0.03ms h2d=0.08ms hostPack=0.00ms
+    adam                              0.27ms (1%)
+    other sum                         0.42ms (2%)
+
+-- sera train --

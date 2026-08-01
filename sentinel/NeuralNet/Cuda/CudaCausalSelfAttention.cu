@@ -108,21 +108,19 @@ void CudaCausalSelfAttention::attendFullSequence(CudaMatrix& out, int segmentLen
         this->flashLogSumExp.ensureSize(static_cast<size_t>(this->headCount), sequenceLength);
         this->attended.ensureSize(this->query.rows, sequenceLength);
 
-        for (int segmentIndex = 0; segmentIndex < packCount; ++segmentIndex) {
-            const int columnStart = segmentIndex * segmentLength;
-            CudaFlashAttention::forwardMultiHead(
-                this->query,
-                this->key,
-                this->value,
-                this->attended,
-                this->flashLogSumExp,
-                this->headCount,
-                this->headDimension,
-                scale,
-                true,
-                columnStart,
-                segmentLength);
-        }
+        CudaFlashAttention::forwardMultiHead(
+            this->query,
+            this->key,
+            this->value,
+            this->attended,
+            this->flashLogSumExp,
+            this->headCount,
+            this->headDimension,
+            scale,
+            true,
+            0,
+            segmentLength,
+            packCount);
 
         CudaMatrix::multiplyInto(this->outputWeight, this->attended, out);
         return;
@@ -260,26 +258,24 @@ void CudaCausalSelfAttention::backward(const CudaMatrix& outputGradient, CudaMat
     const float scale = 1.0f / std::sqrt(static_cast<float>(this->headDimension));
 
     if (this->usedFlashAttention) {
-        for (int segmentIndex = 0; segmentIndex < packCount; ++segmentIndex) {
-            const int columnStart = segmentIndex * segmentLength;
-            CudaFlashAttention::backwardMultiHead(
-                this->query,
-                this->key,
-                this->value,
-                this->attended,
-                this->flashLogSumExp,
-                this->attendedGradient,
-                this->queryGradient,
-                this->keyGradient,
-                this->valueGradient,
-                this->flashDelta,
-                this->headCount,
-                this->headDimension,
-                scale,
-                true,
-                columnStart,
-                segmentLength);
-        }
+        CudaFlashAttention::backwardMultiHead(
+            this->query,
+            this->key,
+            this->value,
+            this->attended,
+            this->flashLogSumExp,
+            this->attendedGradient,
+            this->queryGradient,
+            this->keyGradient,
+            this->valueGradient,
+            this->flashDelta,
+            this->headCount,
+            this->headDimension,
+            scale,
+            true,
+            0,
+            segmentLength,
+            packCount);
     } else if (packCount <= 1) {
         for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
             CudaOps::extractHeadInto(this->attendedGradient, headIndex, this->headDimension, this->attendedHead);

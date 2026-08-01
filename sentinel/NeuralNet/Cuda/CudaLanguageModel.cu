@@ -18,18 +18,8 @@ CudaLanguageModel::CudaLanguageModel()
     : maximumPositionCount(0), maxPackedColumns(1024), gradientAccumulationSteps(1), activationCheckpointing(false), adam(0.001f), trainStateReady(false) {}
 
 void CudaTransformerBlockAdamStates::ensureFrom(const CudaTransformerBlock& block) {
-    this->queryWeight = CudaAdamState::zerosLike(block.attention.queryWeight);
-    this->keyWeight = CudaAdamState::zerosLike(block.attention.keyWeight);
-    this->valueWeight = CudaAdamState::zerosLike(block.attention.valueWeight);
-    this->attentionOutputWeight = CudaAdamState::zerosLike(block.attention.outputWeight);
-    this->attentionNormGamma = CudaAdamState::zerosLike(block.attentionNorm.gamma);
-    this->feedForwardNormGamma = CudaAdamState::zerosLike(block.feedForwardNorm.gamma);
-    this->feedForwardGateWeight = CudaAdamState::zerosLike(block.feedForward.gateWeight);
-    this->feedForwardGateBias = CudaAdamState::zerosLike(block.feedForward.gateBias);
-    this->feedForwardUpWeight = CudaAdamState::zerosLike(block.feedForward.upWeight);
-    this->feedForwardUpBias = CudaAdamState::zerosLike(block.feedForward.upBias);
-    this->feedForwardDownWeight = CudaAdamState::zerosLike(block.feedForward.downWeight);
-    this->feedForwardDownBias = CudaAdamState::zerosLike(block.feedForward.downBias);
+    // moments stay empty until first Adam update (lazy allocation for low VRAM before train)
+    (void)block;
 }
 
 void CudaLanguageModelGradients::ensureFrom(const CudaLanguageModel& model) {
@@ -70,16 +60,13 @@ void CudaLanguageModelGradients::scaleInPlace(float scalar) {
 }
 
 void CudaLanguageModel::ensureTrainState() {
+    if (this->trainStateReady) return;
     if (this->tokenEmbeddingWeight.empty()) throw std::logic_error("CudaLanguageModel::ensureTrainState weights not uploaded");
 
     this->trainGradients.ensureFrom(*this);
     this->trainGradients.zeroInPlace();
 
-    this->tokenEmbeddingState = CudaAdamState::zerosLike(this->tokenEmbeddingWeight);
-    this->finalNormGammaState = CudaAdamState::zerosLike(this->finalNorm.gamma);
-    this->projectionWeightState = CudaAdamState::zerosLike(this->projectionWeight);
-    this->projectionBiasState = CudaAdamState::zerosLike(this->projectionBias);
-
+    // Adam moments allocated lazily on first applyGradients
     this->blockAdamStates.resize(this->blocks.size());
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex)
         this->blockAdamStates[blockIndex].ensureFrom(this->blocks[blockIndex]);
@@ -181,7 +168,7 @@ float CudaLanguageModel::accumulatePackedExamples(const LanguageModelExample* co
     return 0.0f;
 }
 
-void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients) {
+void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, float gradientScale) {
     if (!this->trainStateReady) throw std::logic_error("CudaLanguageModel::applyGradients train state not ready");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaLanguageModel::applyGradients no CUDA device");
 
@@ -233,7 +220,7 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients) {
     }
 
     pushItem(this->tokenEmbeddingWeight, this->tokenEmbeddingState, gradients.tokenEmbedding);
-    this->adam.updateMany(items.data(), static_cast<int>(items.size()));
+    this->adam.updateMany(items.data(), static_cast<int>(items.size()), gradientScale);
 }
 
 float CudaLanguageModel::averageLoss(const LanguageModelDataset& dataset) {
@@ -322,8 +309,7 @@ void CudaLanguageModel::train(const LanguageModelDataset& trainDataset, const La
             if (microbatchesSinceStep < this->gradientAccumulationSteps && !isLastBatch)
                 continue;
 
-            this->trainGradients.scaleInPlace(1.0f / static_cast<float>(accumulatedExampleCount));
-            this->applyGradients(this->trainGradients);
+            this->applyGradients(this->trainGradients, 1.0f / static_cast<float>(accumulatedExampleCount));
             this->trainGradients.zeroInPlace();
             accumulatedExampleCount = 0;
             microbatchesSinceStep = 0;
@@ -422,8 +408,7 @@ void CudaLanguageModel::runTrainSmokeDemo(int vocabularySize, int embeddingDim, 
     for (int step = 0; step < warmupStepCount; ++step) {
         device.trainGradients.zeroInPlace();
         device.accumulatePackedExamples(packPointers.data(), packBatchSize, device.trainGradients);
-        device.trainGradients.scaleInPlace(1.0f / static_cast<float>(packBatchSize));
-        device.applyGradients(device.trainGradients);
+        device.applyGradients(device.trainGradients, 1.0f / static_cast<float>(packBatchSize));
     }
     CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaLanguageModel train smoke warmup synchronize");
 
@@ -432,8 +417,7 @@ void CudaLanguageModel::runTrainSmokeDemo(int vocabularySize, int embeddingDim, 
     for (int step = 0; step < timedStepCount; ++step) {
         device.trainGradients.zeroInPlace();
         device.accumulatePackedExamples(packPointers.data(), packBatchSize, device.trainGradients);
-        device.trainGradients.scaleInPlace(1.0f / static_cast<float>(packBatchSize));
-        device.applyGradients(device.trainGradients);
+        device.applyGradients(device.trainGradients, 1.0f / static_cast<float>(packBatchSize));
         totalTokens += sequenceLength * packBatchSize;
     }
     CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaLanguageModel train smoke steps synchronize");
@@ -623,8 +607,7 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
         });
 
         adamMs += gpuMs([&]() {
-            device.trainGradients.scaleInPlace(1.0f / static_cast<float>(packBatchSize));
-            device.applyGradients(device.trainGradients);
+            device.applyGradients(device.trainGradients, 1.0f / static_cast<float>(packBatchSize));
         });
     };
 

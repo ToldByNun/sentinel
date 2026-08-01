@@ -114,7 +114,7 @@ public:
     void train(const LanguageModelDataset& dataset, int epochs, int logEveryEpochs = 1);
 
     /// <summary>train and also report testLoss every logEveryEpochs</summary>
-    void train(const LanguageModelDataset& trainDataset, const LanguageModelDataset& testDataset, int epochs, int logEveryEpochs = 1, int batchSize = 32, int gradientAccumulationSteps = 1);
+    void train(const LanguageModelDataset& trainDataset, const LanguageModelDataset& testDataset, int epochs, int logEveryEpochs = 1, int batchSize = 32, int gradientAccumulationSteps = 4);
 
     /// <summary>next-token generation temperature&lt;=0 is greedy otherwise sample with optional topK</summary>
     std::vector<int> generate(const std::vector<int>& promptTokenIds, int newTokenCount, float temperature = 1.0f, int topK = 40, unsigned seed = 42u);
