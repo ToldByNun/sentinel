@@ -12,6 +12,7 @@
 #include "NeuralNet/Data/LanguageModelDataset.hpp"
 #include "NeuralNet/Network/LanguageModel.hpp"
 #include "NeuralNet/Optimizers/Adam.hpp"
+#include "NeuralNet/Utils/SmokeLog.hpp"
 #include "NeuralNet/Utils/TextUtil.hpp"
 
 #include <algorithm>
@@ -39,17 +40,24 @@ int main() {
     const int embeddingDim = 64;
     const int maximumPositionCount = static_cast<int>(maximumTokenCount);
 
+    SmokeLog::section("runtime");
 #if defined(_OPENMP)
-    std::cout << "OpenMP threads: " << omp_get_max_threads() << '\n';
+    SmokeLog::result("OpenMP", "threads=%d", omp_get_max_threads());
 #else
-    std::cout << "OpenMP: disabled\n";
+    SmokeLog::note("OpenMP disabled");
 #endif
 
+    SmokeLog::section("gemm");
     CudaMatmul::runSmokeDemo(512);
+
+    SmokeLog::section("layers");
     CudaFeedForward::runSmokeDemo(128, 64);
     CudaFeedForward::runBackwardSmokeDemo(64, 32);
     CudaRMSNorm::runSmokeDemo(128, 64);
     CudaRMSNorm::runBackwardSmokeDemo(64, 32);
+    CudaAdam::runSmokeDemo(128, 64);
+
+    SmokeLog::section("attention");
     CausalSelfAttention::runSparseMaskSmokeDemo(32, 2, 16, 32, 4, 2);
     CausalSelfAttention::runSparseBackwardSmokeDemo(32, 2, 12, 32, 4, 2);
     CausalSelfAttention::runSparseComputeSmokeDemo(32, 2, 16, 32, 4, 2);
@@ -57,10 +65,14 @@ int main() {
     CudaCausalSelfAttention::runBackwardSmokeDemo(32, 2, 16, 32);
     CudaCausalSelfAttention::runKvCacheSmokeDemo(64, 4, 32, 64);
     CudaCausalSelfAttention::runSparseSmokeDemo(32, 2, 16, 32, 4, 2);
+
+    SmokeLog::section("model");
     CudaTransformerBlock::runSmokeDemo(64, 4, 32, 64);
     CudaLanguageModel::runSmokeDemo(128, 64, 32, 2, 4);
     CudaLanguageModel::runKvCacheSmokeDemo(128, 64, 32, 2, 4);
-    CudaAdam::runSmokeDemo(128, 64);
+    CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);
+
+    SmokeLog::section("sera train");
 
     // 0 = load entire jsonl (sera_sample has 10000 rows)
     std::vector<JsonlRow> rows = JsonlLoader::load(samplePath, 0);
@@ -72,7 +84,7 @@ int main() {
     }
 
     if (texts.empty()) {
-        std::cout << "no usable rows from " << samplePath << '\n';
+        SmokeLog::note(("no usable rows from " + samplePath).c_str());
         return 1;
     }
 
@@ -84,14 +96,11 @@ int main() {
     LanguageModelDataset trainDataset = LanguageModelDataset::build(split.trainTexts, tokenizer, maximumTokenCount, false);
     LanguageModelDataset testDataset = LanguageModelDataset::build(split.testTexts, tokenizer, maximumTokenCount, false);
 
-    std::cout << "texts: " << texts.size() << '\n';
-    std::cout << "train examples: " << trainDataset.size()
-              << " | test examples: " << testDataset.size() << '\n';
-    std::cout << "vocab size: " << tokenizer.vocabSize() << '\n';
-    std::cout << "next-token positions train: " << trainDataset.totalPredictionCount() << '\n';
+    SmokeLog::result("data", "texts=%zu  train=%d  test=%d  vocab=%d  positions=%d",
+        texts.size(), trainDataset.size(), testDataset.size(), tokenizer.vocabSize(), trainDataset.totalPredictionCount());
 
     if (trainDataset.examples.empty()) {
-        std::cout << "no language-model examples (need sequences with >= 2 tokens)\n";
+        SmokeLog::note("no language-model examples (need sequences with >= 2 tokens)");
         return 1;
     }
 
@@ -101,35 +110,35 @@ int main() {
     Matrix cpuLogits = model.forward(parityTokenIds);
 
     model.enableCuda();
-    std::cout << "blocks: " << model.blocks.size() << " | heads: " << model.blocks[0].attention.headCount
-              << " | cuda: " << (model.cudaEnabled() ? "on" : "off") << '\n';
+    SmokeLog::result("model", "blocks=%zu  heads=%d  cuda=%s  train=%s",
+        model.blocks.size(),
+        model.blocks[0].attention.headCount,
+        model.cudaEnabled() ? "on" : "off",
+        model.cudaTrainEnabled() ? "cuda" : "cpu-openmp");
 
     if (model.cudaEnabled()) {
         Matrix deviceLogits = model.forward(parityTokenIds);
         float maximumDifference = 0.0f;
         for (size_t index = 0; index < cpuLogits.data.size(); ++index)
             maximumDifference = (std::max)(maximumDifference, std::fabs(cpuLogits.data[index] - deviceLogits.data[index]));
-        std::cout << "CUDA framework parity (CPU vs enableCuda forward): maxAbsDiff=" << maximumDifference << '\n';
+        SmokeLog::result("framework parity", "diff=%.2e", maximumDifference);
     }
 
+    // Device train is opt-in via enableCudaTrain(); tiny models are faster on OpenMP until packed batches (P2)
     model.train(trainDataset, testDataset, 5, 1, 64);
 
-    std::cout << "final trainLoss: " << model.averageLoss(trainDataset) << '\n';
+    SmokeLog::result("final", "trainLoss=%.6f", model.averageLoss(trainDataset));
     if (!testDataset.examples.empty())
-        std::cout << "final testLoss:  " << model.averageLoss(testDataset) << '\n';
+        SmokeLog::result("final", "testLoss=%.6f", model.averageLoss(testDataset));
 
-    const LanguageModelExample& sample = trainDataset.examples[0];
-    const size_t promptLength = (sample.inputTokenIds.size() < 12) ? sample.inputTokenIds.size() : 12;
-    std::vector<int> prompt;
-    for (size_t index = 0; index < promptLength; ++index)
-        prompt.push_back(sample.inputTokenIds[index]);
+    const std::vector<int> prompt = trainDataset.examples[0].inputTokenIds;
+    const std::vector<int> greedy = model.generate(prompt, 32, 0.0f, 0, 7u);
+    const std::vector<int> sampled = model.generate(prompt, 32, 0.9f, 40, 7u);
 
-    std::vector<int> greedy = model.generate(prompt, 20, 0.0f);
-    std::vector<int> sampled = model.generate(prompt, 20, 0.9f, 40, 42u);
-
-    std::cout << "--- prompt ---\n" << tokenizer.decode(prompt) << '\n';
-    std::cout << "--- greedy ---\n" << tokenizer.decode(greedy) << '\n';
-    std::cout << "--- sample T=0.9 topK=40 ---\n" << tokenizer.decode(sampled) << '\n';
+    SmokeLog::section("generate");
+    std::cout << "  prompt:  " << tokenizer.decode(prompt) << '\n';
+    std::cout << "  greedy:  " << tokenizer.decode(greedy) << '\n';
+    std::cout << "  sample:  " << tokenizer.decode(sampled) << '\n';
 
     return 0;
 }

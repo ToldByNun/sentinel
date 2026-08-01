@@ -1,6 +1,7 @@
 #include "CudaFeedForward.hpp"
 
 #include "CudaOps.hpp"
+#include "../Utils/SmokeLog.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -83,7 +84,7 @@ static float maximumAbsoluteDifference(const Matrix& left, const Matrix& right) 
 
 void CudaFeedForward::runSmokeDemo(int embeddingDim, int sequenceLength) {
     if (!CudaMatmul::isAvailable()) {
-        std::printf("CUDA FeedForward smoke: no device\n");
+        SmokeLog::skip("FeedForward fwd");
         return;
     }
     if (embeddingDim <= 0) throw std::invalid_argument("CudaFeedForward::runSmokeDemo embeddingDim must be > 0");
@@ -133,13 +134,15 @@ void CudaFeedForward::runSmokeDemo(int embeddingDim, int sequenceLength) {
     for (size_t index = 0; index < hostOutput.data.size(); ++index)
         maximumDifference = (std::max)(maximumDifference, std::fabs(hostOutput.data[index] - deviceHostOutput.data[index]));
 
-    std::printf("CUDA FeedForward smoke: embed=%d seq=%d hidden=%zu\n", embeddingDim, sequenceLength, host.gateWeight.rows);
-    std::printf("  cpu=%.2fms  upload=%.2fms  device-forward=%.2fms  download=%.2fms  maxAbsDiff=%.6g\n", cpuMilliseconds, uploadMilliseconds, static_cast<double>(deviceForwardMilliseconds), downloadMilliseconds, maximumDifference);
+    SmokeLog::result("FeedForward fwd", "embed=%d seq=%d  cpu=%.2fms  gpu=%.2fms  diff=%.2e",
+        embeddingDim, sequenceLength, cpuMilliseconds, static_cast<double>(deviceForwardMilliseconds), maximumDifference);
+    (void)uploadMilliseconds;
+    (void)downloadMilliseconds;
 }
 
 void CudaFeedForward::runBackwardSmokeDemo(int embeddingDim, int sequenceLength) {
     if (!CudaMatmul::isAvailable()) {
-        std::printf("CUDA FeedForward backward smoke: no device\n");
+        SmokeLog::skip("FeedForward bwd");
         return;
     }
     if (embeddingDim <= 0) throw std::invalid_argument("CudaFeedForward::runBackwardSmokeDemo embeddingDim must be > 0");
@@ -192,7 +195,6 @@ void CudaFeedForward::runBackwardSmokeDemo(int embeddingDim, int sequenceLength)
     const float downWeightGradientDiff = maximumAbsoluteDifference(hostDownWeightGradient, deviceDownWeightGradient.download());
     const float downBiasGradientDiff = maximumAbsoluteDifference(hostDownBiasGradient, deviceDownBiasGradient.download());
 
-    std::printf("CUDA FeedForward backward smoke: embed=%d seq=%d hidden=%zu\n", embeddingDim, sequenceLength, host.gateWeight.rows);
-    std::printf("  inputGrad=%.6g  gateWeightGrad=%.6g  gateBiasGrad=%.6g  upWeightGrad=%.6g  upBiasGrad=%.6g  downWeightGrad=%.6g  downBiasGrad=%.6g\n",
-        inputGradientDiff, gateWeightGradientDiff, gateBiasGradientDiff, upWeightGradientDiff, upBiasGradientDiff, downWeightGradientDiff, downBiasGradientDiff);
+    const float maximumDifference = (std::max)({ inputGradientDiff, gateWeightGradientDiff, gateBiasGradientDiff, upWeightGradientDiff, upBiasGradientDiff, downWeightGradientDiff, downBiasGradientDiff });
+    SmokeLog::result("FeedForward bwd", "embed=%d seq=%d  diff=%.2e", embeddingDim, sequenceLength, maximumDifference);
 }

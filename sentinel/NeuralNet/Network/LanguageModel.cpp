@@ -57,7 +57,7 @@ void LanguageModelGradients::scaleInPlace(float scalar) {
 }
 
 LanguageModel::LanguageModel(int vocabularySize, int embeddingDim, int maximumPositionCount, Adam optimizer, int blockCount, int headCount)
-    : tokenEmbedding(vocabularySize, embeddingDim), finalNorm(embeddingDim), outputProjection(UniformInit::matrix(vocabularySize, embeddingDim, 0.1f, 31u), UniformInit::matrix(vocabularySize, 1, 0.01f, 32u)), optimizer(optimizer), maximumPositionCount(maximumPositionCount), deviceStale(false) {
+    : tokenEmbedding(vocabularySize, embeddingDim), finalNorm(embeddingDim), outputProjection(UniformInit::matrix(vocabularySize, embeddingDim, 0.1f, 31u), UniformInit::matrix(vocabularySize, 1, 0.01f, 32u)), optimizer(optimizer), maximumPositionCount(maximumPositionCount), deviceStale(false), deviceTrainEnabled(false) {
     if (maximumPositionCount <= 0) throw std::invalid_argument("LanguageModel maximumPositionCount must be > 0");
     if (blockCount <= 0) throw std::invalid_argument("LanguageModel blockCount must be > 0");
     if (headCount <= 0) throw std::invalid_argument("LanguageModel headCount must be > 0");
@@ -83,17 +83,33 @@ void LanguageModel::enableCuda() {
         std::cout << "LanguageModel::enableCuda: no CUDA device\n";
         this->device.reset();
         this->deviceStale = false;
+        this->deviceTrainEnabled = false;
         return;
     }
 
     this->device = std::make_unique<CudaLanguageModel>();
     this->device->uploadFrom(*this);
     this->deviceStale = false;
-    std::cout << "LanguageModel::enableCuda: device mirror active\n";
+    std::cout << "LanguageModel::enableCuda: device mirror active (forward/generate)\n";
+}
+
+void LanguageModel::enableCudaTrain() {
+    if (this->device == nullptr) this->enableCuda();
+    if (this->device == nullptr) {
+        this->deviceTrainEnabled = false;
+        return;
+    }
+
+    this->deviceTrainEnabled = true;
+    std::cout << "LanguageModel::enableCudaTrain: device training enabled (sequential; OpenMP host is usually faster until packed batches)\n";
 }
 
 bool LanguageModel::cudaEnabled() const {
     return this->device != nullptr;
+}
+
+bool LanguageModel::cudaTrainEnabled() const {
+    return this->device != nullptr && this->deviceTrainEnabled;
 }
 
 void LanguageModel::syncDevice() {
@@ -170,14 +186,13 @@ float LanguageModel::exampleLoss(const LanguageModelExample& example) {
 float LanguageModel::averageLoss(const LanguageModelDataset& dataset) {
     if (dataset.examples.empty()) return 0.0f;
 
+    if (this->device != nullptr) {
+        this->syncDeviceIfStale();
+        return this->device->averageLoss(dataset);
+    }
+
     float total = 0.0f;
     const int exampleCount = static_cast<int>(dataset.examples.size());
-
-    if (this->device != nullptr) {
-        for (int index = 0; index < exampleCount; ++index)
-            total += this->exampleLoss(dataset.examples[static_cast<size_t>(index)]);
-        return total / static_cast<float>(dataset.size());
-    }
 
 #if defined(_OPENMP)
     #pragma omp parallel for reduction(+:total) schedule(dynamic, 4)
@@ -239,6 +254,17 @@ void LanguageModel::train(const LanguageModelDataset& trainDataset, const Langua
     if (logEveryEpochs <= 0) logEveryEpochs = 1;
     if (batchSize <= 0) batchSize = 32;
 
+    if (this->cudaTrainEnabled()) {
+        this->syncDeviceIfStale();
+        this->device->adam = CudaAdam(this->optimizer.learningRate, this->optimizer.beta1, this->optimizer.beta2, this->optimizer.epsilon);
+        this->device->adam.timeStep = this->optimizer.timeStep;
+        this->device->train(trainDataset, testDataset, epochs, logEveryEpochs, batchSize);
+        this->device->downloadTo(*this);
+        this->optimizer.timeStep = this->device->adam.timeStep;
+        this->deviceStale = false;
+        return;
+    }
+
     const int exampleCount = static_cast<int>(trainDataset.examples.size());
 
     int threadCount = 1;
@@ -296,11 +322,16 @@ void LanguageModel::train(const LanguageModelDataset& trainDataset, const Langua
         const float averageTrainLoss = epochLoss / static_cast<float>(trainDataset.size());
         const auto epochEnd = std::chrono::steady_clock::now();
         const double epochSeconds = std::chrono::duration<double>(epochEnd - epochStart).count();
-        std::cout << "Epoch " << epoch << " | trainLoss: " << averageTrainLoss << " | sec: " << epochSeconds;
+        const double tokensPerSecond = epochSeconds > 0.0
+            ? static_cast<double>(trainDataset.totalPredictionCount()) / epochSeconds
+            : 0.0;
+        std::cout << "  Epoch " << epoch << "  trainLoss=" << averageTrainLoss
+                  << "  sec=" << epochSeconds << "  tokens/s=" << tokensPerSecond
+                  << "  backend=cpu-openmp";
 
         if (!testDataset.examples.empty()) {
             const float testLoss = this->averageLoss(testDataset);
-            std::cout << " | testLoss: " << testLoss;
+            std::cout << "  testLoss=" << testLoss;
         }
 
         std::cout << '\n';

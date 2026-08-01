@@ -1,6 +1,7 @@
 #include "CudaAdam.hpp"
 
 #include "CudaOps.hpp"
+#include "../Utils/SmokeLog.hpp"
 
 #include "../Optimizers/Adam.hpp"
 
@@ -79,7 +80,7 @@ void CudaAdam::update(CudaMatrix& parameter, CudaAdamState& state, const CudaMat
 
 void CudaAdam::runSmokeDemo(int parameterRows, int parameterCols) {
     if (!CudaMatmul::isAvailable()) {
-        std::printf("CUDA Adam smoke: no device\n");
+        SmokeLog::skip("Adam");
         return;
     }
     if (parameterRows <= 0 || parameterCols <= 0) throw std::invalid_argument("CudaAdam::runSmokeDemo invalid dims");
@@ -115,5 +116,5 @@ void CudaAdam::runSmokeDemo(int parameterRows, int parameterCols) {
     for (size_t index = 0; index < hostParameterCopy.data.size(); ++index)
         maximumDifference = (std::max)(maximumDifference, std::fabs(hostParameterCopy.data[index] - deviceHostParameter.data[index]));
 
-    std::printf("CUDA Adam smoke: rows=%d cols=%d  maxAbsDiff=%.6g\n", parameterRows, parameterCols, maximumDifference);
+    SmokeLog::result("Adam", "rows=%d cols=%d  diff=%.2e", parameterRows, parameterCols, maximumDifference);
 }

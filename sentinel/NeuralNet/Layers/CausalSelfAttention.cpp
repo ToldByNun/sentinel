@@ -2,6 +2,7 @@
 
 #include "../Activations/Softmax.hpp"
 #include "../Initializers/UniformInit.hpp"
+#include "../Utils/SmokeLog.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -344,9 +345,8 @@ void CausalSelfAttention::runSparseMaskSmokeDemo(int embeddingDim, int headCount
         }
     }
 
-    std::printf("CPU Sparse Attention S1 smoke: embed=%d heads=%d seq=%d W=%d G=%d\n", embeddingDim, headCount, sequenceLength, windowSize, globalTokenCount);
-    std::printf("  dense default vs W=max G=0 maxAbsDiff=%.6g\n", denseParity);
-    std::printf("  forbiddenProbMax=%.6g  allowed=%d forbidden=%d\n", forbiddenProbabilityMass, allowedCount, forbiddenCount);
+    SmokeLog::result("Sparse Attn S1", "embed=%d heads=%d seq=%d W=%d G=%d  denseDiff=%.2e  forbiddenP=%.2e  allowed=%d forbidden=%d",
+        embeddingDim, headCount, sequenceLength, windowSize, globalTokenCount, denseParity, forbiddenProbabilityMass, allowedCount, forbiddenCount);
 }
 
 void CausalSelfAttention::runSparseBackwardSmokeDemo(int embeddingDim, int headCount, int sequenceLength, int maximumPositionCount, int windowSize, int globalTokenCount) {
@@ -425,10 +425,10 @@ void CausalSelfAttention::runSparseBackwardSmokeDemo(int embeddingDim, int headC
     const float analyticGradient = inputGradS.data[probeIndex];
     const float finiteDifferenceError = std::fabs(numericalGradient - analyticGradient);
 
-    std::printf("CPU Sparse Attention S2 smoke: embed=%d heads=%d seq=%d W=%d G=%d\n", embeddingDim, headCount, sequenceLength, windowSize, globalTokenCount);
-    std::printf("  W=max grad parity maxAbsDiff=%.6g\n", denseGradientParity);
-    std::printf("  finiteDiff err=%.6g  analytic=%.6g  numeric=%.6g\n", finiteDifferenceError, analyticGradient, numericalGradient);
-    std::printf("  forbiddenScoreGradMax=%.6g\n", forbiddenScoreGradient);
+    SmokeLog::result("Sparse Attn S2", "embed=%d heads=%d seq=%d W=%d G=%d  gradDiff=%.2e  fdErr=%.2e  forbiddenGrad=%.2e",
+        embeddingDim, headCount, sequenceLength, windowSize, globalTokenCount, denseGradientParity, finiteDifferenceError, forbiddenScoreGradient);
+    (void)analyticGradient;
+    (void)numericalGradient;
 }
 
 void CausalSelfAttention::runSparseComputeSmokeDemo(int embeddingDim, int headCount, int sequenceLength, int maximumPositionCount, int windowSize, int globalTokenCount) {
@@ -474,7 +474,6 @@ void CausalSelfAttention::runSparseComputeSmokeDemo(int embeddingDim, int headCo
     for (size_t index = 0; index < inputGradS.data.size(); ++index)
         backwardParity = (std::max)(backwardParity, std::fabs(inputGradS.data[index] - inputGradD.data[index]));
 
-    std::printf("CPU Sparse Attention S3 smoke: embed=%d heads=%d seq=%d W=%d G=%d\n", embeddingDim, headCount, sequenceLength, windowSize, globalTokenCount);
-    std::printf("  sparseCompute vs denseMasked forward maxAbsDiff=%.6g\n", forwardParity);
-    std::printf("  sparseCompute vs denseMasked inputGrad maxAbsDiff=%.6g\n", backwardParity);
+    SmokeLog::result("Sparse Attn S3", "embed=%d heads=%d seq=%d W=%d G=%d  fwd=%.2e  bwd=%.2e",
+        embeddingDim, headCount, sequenceLength, windowSize, globalTokenCount, forwardParity, backwardParity);
 }

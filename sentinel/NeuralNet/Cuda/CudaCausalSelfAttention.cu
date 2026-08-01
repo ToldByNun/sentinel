@@ -1,6 +1,7 @@
 #include "CudaCausalSelfAttention.hpp"
 
 #include "CudaOps.hpp"
+#include "../Utils/SmokeLog.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -200,7 +201,7 @@ void CudaCausalSelfAttention::decode(const CudaMatrix& input, CudaKvCache& cache
 
 void CudaCausalSelfAttention::runSmokeDemo(int embeddingDim, int headCount, int sequenceLength, int maximumPositionCount) {
     if (!CudaMatmul::isAvailable()) {
-        std::printf("CUDA Attention smoke: no device\n");
+        SmokeLog::skip("Attention fwd");
         return;
     }
     if (embeddingDim <= 0 || headCount <= 0 || sequenceLength <= 0 || maximumPositionCount < sequenceLength)
@@ -244,12 +245,13 @@ void CudaCausalSelfAttention::runSmokeDemo(int embeddingDim, int headCount, int 
     for (size_t index = 0; index < hostOutput.data.size(); ++index)
         maximumDifference = (std::max)(maximumDifference, std::fabs(hostOutput.data[index] - deviceHostOutput.data[index]));
 
-    std::printf("CUDA Attention smoke: embed=%d heads=%d seq=%d  cpu=%.2fms  device=%.2fms  maxAbsDiff=%.6g\n", embeddingDim, headCount, sequenceLength, cpuMilliseconds, static_cast<double>(deviceMilliseconds), maximumDifference);
+    SmokeLog::result("Attention fwd", "embed=%d heads=%d seq=%d  cpu=%.2fms  gpu=%.2fms  diff=%.2e",
+        embeddingDim, headCount, sequenceLength, cpuMilliseconds, static_cast<double>(deviceMilliseconds), maximumDifference);
 }
 
 void CudaCausalSelfAttention::runBackwardSmokeDemo(int embeddingDim, int headCount, int sequenceLength, int maximumPositionCount) {
     if (!CudaMatmul::isAvailable()) {
-        std::printf("CUDA Attention backward smoke: no device\n");
+        SmokeLog::skip("Attention bwd");
         return;
     }
     if (embeddingDim <= 0 || headCount <= 0 || sequenceLength <= 0 || maximumPositionCount < sequenceLength)
@@ -315,14 +317,13 @@ void CudaCausalSelfAttention::runBackwardSmokeDemo(int embeddingDim, int headCou
     for (size_t index = 0; index < hostOutputGrad.data.size(); ++index)
         outputWeightGradDiff = (std::max)(outputWeightGradDiff, std::fabs(hostOutputGrad.data[index] - deviceHostOutputWeightGrad.data[index]));
 
-    std::printf("CUDA Attention backward smoke: embed=%d heads=%d seq=%d W=max\n", embeddingDim, headCount, sequenceLength);
-    std::printf("  inputGrad maxAbsDiff=%.6g\n", inputGradDiff);
-    std::printf("  queryWeightGrad maxAbsDiff=%.6g  keyWeightGrad maxAbsDiff=%.6g  valueWeightGrad maxAbsDiff=%.6g  outputWeightGrad maxAbsDiff=%.6g\n", queryWeightGradDiff, keyWeightGradDiff, valueWeightGradDiff, outputWeightGradDiff);
+    const float maximumDifference = (std::max)({ inputGradDiff, queryWeightGradDiff, keyWeightGradDiff, valueWeightGradDiff, outputWeightGradDiff });
+    SmokeLog::result("Attention bwd", "embed=%d heads=%d seq=%d  diff=%.2e", embeddingDim, headCount, sequenceLength, maximumDifference);
 }
 
 void CudaCausalSelfAttention::runKvCacheSmokeDemo(int embeddingDim, int headCount, int sequenceLength, int maximumPositionCount) {
     if (!CudaMatmul::isAvailable()) {
-        std::printf("CUDA Attention KV smoke: no device\n");
+        SmokeLog::skip("Attention KV");
         return;
     }
     if (embeddingDim <= 0 || headCount <= 0 || sequenceLength < 2 || maximumPositionCount < sequenceLength)
@@ -371,12 +372,13 @@ void CudaCausalSelfAttention::runKvCacheSmokeDemo(int embeddingDim, int headCoun
         maximumDifference = (std::max)(maximumDifference, std::fabs(fullValue - decodeValue));
     }
 
-    std::printf("CUDA Attention KV smoke: embed=%d heads=%d seq=%d  prefill+decode vs full last-col maxAbsDiff=%.6g  cacheLen=%d\n", embeddingDim, headCount, sequenceLength, maximumDifference, cache.length);
+    SmokeLog::result("Attention KV", "embed=%d heads=%d seq=%d  cache=%d  diff=%.2e",
+        embeddingDim, headCount, sequenceLength, cache.length, maximumDifference);
 }
 
 void CudaCausalSelfAttention::runSparseSmokeDemo(int embeddingDim, int headCount, int sequenceLength, int maximumPositionCount, int windowSize, int globalTokenCount) {
     if (!CudaMatmul::isAvailable()) {
-        std::printf("CUDA Sparse Attention S4 smoke: no device\n");
+        SmokeLog::skip("Sparse Attn S4");
         return;
     }
     if (embeddingDim <= 0 || headCount <= 0 || sequenceLength < 2 || maximumPositionCount < sequenceLength)
@@ -433,7 +435,6 @@ void CudaCausalSelfAttention::runSparseSmokeDemo(int embeddingDim, int headCount
         decodeDifference = (std::max)(decodeDifference, std::fabs(fullValue - decodeValue));
     }
 
-    std::printf("CUDA Sparse Attention S4 smoke: embed=%d heads=%d seq=%d W=%d G=%d\n", embeddingDim, headCount, sequenceLength, windowSize, globalTokenCount);
-    std::printf("  CPU vs CUDA forward maxAbsDiff=%.6g\n", forwardDifference);
-    std::printf("  sparse prefill+decode vs CPU last-col maxAbsDiff=%.6g  cacheLen=%d\n", decodeDifference, cache.length);
+    SmokeLog::result("Sparse Attn S4", "embed=%d heads=%d seq=%d W=%d G=%d  fwd=%.2e  kv=%.2e",
+        embeddingDim, headCount, sequenceLength, windowSize, globalTokenCount, forwardDifference, decodeDifference);
 }

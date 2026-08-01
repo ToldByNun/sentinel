@@ -66,6 +66,7 @@
     <ClInclude Include="NeuralNet\Data\LanguageModelDataset.hpp" />
     <ClInclude Include="NeuralNet\Initializers\UniformInit.hpp" />
     <ClInclude Include="NeuralNet\Utils\TextUtil.hpp" />
+    <ClInclude Include="NeuralNet\Utils\SmokeLog.hpp" />
     <ClInclude Include="NeuralNet\Layers\Dense.hpp" />
     <ClInclude Include="NeuralNet\Layers\Dropout.hpp" />
     <ClInclude Include="NeuralNet\Layers\CausalSelfAttention.hpp" />
@@ -199,7 +200,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>cudart_static.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>cudart_static.lib;cublasLt.lib;cublas.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
@@ -223,7 +224,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>cudart_static.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>cudart_static.lib;cublasLt.lib;cublas.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>

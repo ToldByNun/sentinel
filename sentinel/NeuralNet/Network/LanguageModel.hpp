@@ -52,6 +52,8 @@ public:
 /// optional CudaLanguageModel device mirror for inference forward
 /// </summary>
 class LanguageModel {
+    friend class CudaLanguageModel;
+
 public:
     Embedding tokenEmbedding;
     std::vector<TransformerBlock> blocks;
@@ -74,11 +76,17 @@ public:
     LanguageModel(LanguageModel&&) noexcept;
     LanguageModel& operator=(LanguageModel&&) noexcept;
 
-    /// <summary>upload host weights to optional CUDA device mirror</summary>
+    /// <summary>upload host weights to optional CUDA device mirror for forward and generate</summary>
     void enableCuda();
+
+    /// <summary>opt in to sequential device training instead of OpenMP host training</summary>
+    void enableCudaTrain();
 
     /// <summary>true when device mirror is active</summary>
     bool cudaEnabled() const;
+
+    /// <summary>true when train uses the device path</summary>
+    bool cudaTrainEnabled() const;
 
     /// <summary>reupload host weights to device mirror if active</summary>
     void syncDevice();
@@ -103,8 +111,11 @@ public:
     std::vector<int> generate(const std::vector<int>& promptTokenIds, int newTokenCount, float temperature = 1.0f, int topK = 40, unsigned seed = 42u);
 
 private:
+    friend class CudaLanguageModel;
+
     std::unique_ptr<CudaLanguageModel> device;
     bool deviceStale;
+    bool deviceTrainEnabled;
 
     /// <summary>upload host weights when device mirror is stale</summary>
     void syncDeviceIfStale();

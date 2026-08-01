@@ -1,6 +1,7 @@
 #include "CudaRMSNorm.hpp"
 
 #include "CudaOps.hpp"
+#include "../Utils/SmokeLog.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -129,7 +130,7 @@ void CudaRMSNorm::backward(const CudaMatrix& outputGradient, CudaMatrix& inputGr
 
 void CudaRMSNorm::runSmokeDemo(int embeddingDim, int sequenceLength) {
     if (!CudaMatmul::isAvailable()) {
-        std::printf("CUDA RMSNorm smoke: no device\n");
+        SmokeLog::skip("RMSNorm fwd");
         return;
     }
     if (embeddingDim <= 0 || sequenceLength <= 0) throw std::invalid_argument("CudaRMSNorm::runSmokeDemo invalid dims");
@@ -176,12 +177,13 @@ void CudaRMSNorm::runSmokeDemo(int embeddingDim, int sequenceLength) {
     for (size_t index = 0; index < hostOutput.data.size(); ++index)
         maximumDifference = (std::max)(maximumDifference, std::fabs(hostOutput.data[index] - deviceHostOutput.data[index]));
 
-    std::printf("CUDA RMSNorm smoke: embed=%d seq=%d  cpu=%.2fms  device=%.2fms  maxAbsDiff=%.6g\n", embeddingDim, sequenceLength, cpuMilliseconds, static_cast<double>(deviceMilliseconds), maximumDifference);
+    SmokeLog::result("RMSNorm fwd", "embed=%d seq=%d  cpu=%.2fms  gpu=%.2fms  diff=%.2e",
+        embeddingDim, sequenceLength, cpuMilliseconds, static_cast<double>(deviceMilliseconds), maximumDifference);
 }
 
 void CudaRMSNorm::runBackwardSmokeDemo(int embeddingDim, int sequenceLength) {
     if (!CudaMatmul::isAvailable()) {
-        std::printf("CUDA RMSNorm backward smoke: no device\n");
+        SmokeLog::skip("RMSNorm bwd");
         return;
     }
     if (embeddingDim <= 0 || sequenceLength <= 0) throw std::invalid_argument("CudaRMSNorm::runBackwardSmokeDemo invalid dims");
@@ -233,5 +235,6 @@ void CudaRMSNorm::runBackwardSmokeDemo(int embeddingDim, int sequenceLength) {
     for (size_t index = 0; index < hostGammaGradient.data.size(); ++index)
         gammaGradientDifference = (std::max)(gammaGradientDifference, std::fabs(hostGammaGradient.data[index] - deviceHostGammaGradient.data[index]));
 
-    std::printf("CUDA RMSNorm backward smoke: embed=%d seq=%d  inputGrad maxAbsDiff=%.6g  gammaGrad maxAbsDiff=%.6g\n", embeddingDim, sequenceLength, inputGradientDifference, gammaGradientDifference);
+    SmokeLog::result("RMSNorm bwd", "embed=%d seq=%d  diff=%.2e",
+        embeddingDim, sequenceLength, (std::max)(inputGradientDifference, gammaGradientDifference));
 }

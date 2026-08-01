@@ -233,5 +233,8 @@
     <ClInclude Include="NeuralNet\Utils\TextUtil.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
+    <ClInclude Include="NeuralNet\Utils\SmokeLog.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

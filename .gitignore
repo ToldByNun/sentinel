@@ -5,3 +5,6 @@
 /sentinel/x64/Release
 /SERA-Data
 /x64/Debug
+sentinel/_smoke_clean.txt
+sentinel/_smoke_err.txt
+sentinel/_smoke_out.txt

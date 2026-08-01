@@ -274,6 +274,59 @@ __device__ void CudaOps::runEmbeddingScatterAddInto(float* weightGradient, const
     atomicAdd(&weightGradient[tokenId * embeddingDim + dimensionIndex], outputGradient[index]);
 }
 
+__device__ void CudaOps::runCrossEntropyLossFromIds(const float* probabilities, const int* targetTokenIds, float* columnLosses, int vocabularySize, int tokenCount) {
+    const int column = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (column >= tokenCount) return;
+
+    const int targetId = targetTokenIds[column];
+    if (targetId < 0 || targetId >= vocabularySize) {
+        columnLosses[column] = 0.0f;
+        return;
+    }
+
+    float probability = probabilities[targetId * tokenCount + column];
+    if (probability < 1e-7f) probability = 1e-7f;
+    columnLosses[column] = -logf(probability);
+}
+
+__device__ void CudaOps::runCrossEntropyAddMeanLossFromIds(const float* probabilities, const int* targetTokenIds, float* lossSum, int vocabularySize, int tokenCount) {
+    const int column = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (column >= tokenCount) return;
+
+    const int targetId = targetTokenIds[column];
+    if (targetId < 0 || targetId >= vocabularySize) return;
+
+    float probability = probabilities[targetId * tokenCount + column];
+    if (probability < 1e-7f) probability = 1e-7f;
+    atomicAdd(lossSum, (-logf(probability)) / static_cast<float>(tokenCount));
+}
+
+__device__ void CudaOps::runCrossEntropyLogitGradientFromIds(const float* probabilities, const int* targetTokenIds, float* logitGradient, int vocabularySize, int tokenCount) {
+    const int elementCount = vocabularySize * tokenCount;
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+
+    const int column = index % tokenCount;
+    const int row = index / tokenCount;
+    const float inverseTokenCount = 1.0f / static_cast<float>(tokenCount);
+    float gradient = probabilities[index] * inverseTokenCount;
+    if (row == targetTokenIds[column])
+        gradient -= inverseTokenCount;
+    logitGradient[index] = gradient;
+}
+
+__global__ void CudaOpsCrossEntropyLossFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* columnLosses, int vocabularySize, int tokenCount) {
+    CudaOps::runCrossEntropyLossFromIds(probabilities, targetTokenIds, columnLosses, vocabularySize, tokenCount);
+}
+
+__global__ void CudaOpsCrossEntropyAddMeanLossFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* lossSum, int vocabularySize, int tokenCount) {
+    CudaOps::runCrossEntropyAddMeanLossFromIds(probabilities, targetTokenIds, lossSum, vocabularySize, tokenCount);
+}
+
+__global__ void CudaOpsCrossEntropyLogitGradientFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* logitGradient, int vocabularySize, int tokenCount) {
+    CudaOps::runCrossEntropyLogitGradientFromIds(probabilities, targetTokenIds, logitGradient, vocabularySize, tokenCount);
+}
+
 __global__ void CudaOpsBroadcastBiasAddEntry(float* product, const float* bias, int rowCount, int columnCount) {
     CudaOps::runBroadcastBiasAddInPlace(product, bias, rowCount, columnCount);
 }
@@ -657,4 +710,62 @@ void CudaOps::embeddingScatterAddInto(CudaMatrix& weightGradient, const CudaIntB
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
     CudaOpsEmbeddingScatterAddEntry<<<blockCount, CudaOps::threadCount>>>(weightGradient.buffer.deviceData, tokenIds.deviceData, outputGradient.buffer.deviceData, embeddingDim, static_cast<int>(tokenCount), vocabularySize);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsEmbeddingScatterAddEntry launch");
+}
+
+float CudaOps::crossEntropyLossFromIds(const CudaMatrix& probabilities, const CudaIntBuffer& targetTokenIds, size_t tokenCount) {
+    if (probabilities.empty()) throw std::invalid_argument("CudaOps::crossEntropyLossFromIds empty probabilities");
+    if (tokenCount == 0) throw std::invalid_argument("CudaOps::crossEntropyLossFromIds empty tokenCount");
+    if (probabilities.cols != tokenCount) throw std::invalid_argument("CudaOps::crossEntropyLossFromIds tokenCount mismatch");
+    if (targetTokenIds.deviceData == nullptr) throw std::invalid_argument("CudaOps::crossEntropyLossFromIds empty targetTokenIds");
+    if (tokenCount > targetTokenIds.capacityCount) throw std::invalid_argument("CudaOps::crossEntropyLossFromIds tokenCount exceeds capacity");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::crossEntropyLossFromIds no CUDA device");
+
+    static CudaMatrix columnLossScratch;
+    columnLossScratch.ensureSize(1, tokenCount);
+
+    const int vocabularySize = static_cast<int>(probabilities.rows);
+    const int tokenCountInt = static_cast<int>(tokenCount);
+    const int blockCount = (tokenCountInt + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsCrossEntropyLossFromIdsEntry<<<blockCount, CudaOps::threadCount>>>(probabilities.buffer.deviceData, targetTokenIds.deviceData, columnLossScratch.buffer.deviceData, vocabularySize, tokenCountInt);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsCrossEntropyLossFromIdsEntry launch");
+    CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaOps::crossEntropyLossFromIds synchronize");
+
+    Matrix columnLossHost = columnLossScratch.download();
+    float total = 0.0f;
+    for (size_t column = 0; column < tokenCount; ++column)
+        total += columnLossHost.at(0, column);
+    return total / static_cast<float>(tokenCount);
+}
+
+void CudaOps::crossEntropyAddMeanLossFromIds(const CudaMatrix& probabilities, const CudaIntBuffer& targetTokenIds, size_t tokenCount, CudaMatrix& lossSum) {
+    if (probabilities.empty()) throw std::invalid_argument("CudaOps::crossEntropyAddMeanLossFromIds empty probabilities");
+    if (tokenCount == 0) throw std::invalid_argument("CudaOps::crossEntropyAddMeanLossFromIds empty tokenCount");
+    if (probabilities.cols != tokenCount) throw std::invalid_argument("CudaOps::crossEntropyAddMeanLossFromIds tokenCount mismatch");
+    if (targetTokenIds.deviceData == nullptr) throw std::invalid_argument("CudaOps::crossEntropyAddMeanLossFromIds empty targetTokenIds");
+    if (tokenCount > targetTokenIds.capacityCount) throw std::invalid_argument("CudaOps::crossEntropyAddMeanLossFromIds tokenCount exceeds capacity");
+    if (lossSum.rows != 1 || lossSum.cols != 1) throw std::invalid_argument("CudaOps::crossEntropyAddMeanLossFromIds lossSum must be 1x1");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::crossEntropyAddMeanLossFromIds no CUDA device");
+
+    const int vocabularySize = static_cast<int>(probabilities.rows);
+    const int tokenCountInt = static_cast<int>(tokenCount);
+    const int blockCount = (tokenCountInt + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsCrossEntropyAddMeanLossFromIdsEntry<<<blockCount, CudaOps::threadCount>>>(probabilities.buffer.deviceData, targetTokenIds.deviceData, lossSum.buffer.deviceData, vocabularySize, tokenCountInt);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsCrossEntropyAddMeanLossFromIdsEntry launch");
+}
+
+void CudaOps::crossEntropyLogitGradientFromIdsInto(const CudaMatrix& probabilities, const CudaIntBuffer& targetTokenIds, size_t tokenCount, CudaMatrix& logitGradient) {
+    if (probabilities.empty()) throw std::invalid_argument("CudaOps::crossEntropyLogitGradientFromIdsInto empty probabilities");
+    if (tokenCount == 0) throw std::invalid_argument("CudaOps::crossEntropyLogitGradientFromIdsInto empty tokenCount");
+    if (probabilities.cols != tokenCount) throw std::invalid_argument("CudaOps::crossEntropyLogitGradientFromIdsInto tokenCount mismatch");
+    if (targetTokenIds.deviceData == nullptr) throw std::invalid_argument("CudaOps::crossEntropyLogitGradientFromIdsInto empty targetTokenIds");
+    if (tokenCount > targetTokenIds.capacityCount) throw std::invalid_argument("CudaOps::crossEntropyLogitGradientFromIdsInto tokenCount exceeds capacity");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::crossEntropyLogitGradientFromIdsInto no CUDA device");
+
+    logitGradient.ensureSize(probabilities.rows, probabilities.cols);
+    const int vocabularySize = static_cast<int>(probabilities.rows);
+    const int tokenCountInt = static_cast<int>(tokenCount);
+    const int elementCount = vocabularySize * tokenCountInt;
+    const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsCrossEntropyLogitGradientFromIdsEntry<<<blockCount, CudaOps::threadCount>>>(probabilities.buffer.deviceData, targetTokenIds.deviceData, logitGradient.buffer.deviceData, vocabularySize, tokenCountInt);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsCrossEntropyLogitGradientFromIdsEntry launch");
 }

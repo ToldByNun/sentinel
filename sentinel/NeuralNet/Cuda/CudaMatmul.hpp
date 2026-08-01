@@ -109,7 +109,7 @@ public:
 };
 
 /// <summary>
-/// CUDA row major GEMM C = A * B using shared memory tiling
+/// CUDA row major GEMM C = A * B preferring cuBLASLt TF32 with shared memory fallback
 /// host path reuses scratch buffers device path uses CudaMatrix
 /// </summary>
 class CudaMatmul {
@@ -158,13 +158,22 @@ private:
     /// <summary>throw runtime_error when a CUDA call failed</summary>
     static void throwIfCudaFailed(int status, const char* operationName);
 
+    /// <summary>throw runtime_error when a cuBLASLt call failed</summary>
+    static void throwIfCublasLtFailed(int status, const char* operationName);
+
     /// <summary>fill matrix with deterministic values in minus one to one</summary>
     static Matrix makeRandomMatrix(size_t rowCount, size_t columnCount, unsigned seed);
 
     /// <summary>maximum absolute difference between same shape matrices</summary>
     static float maximumAbsoluteDifference(const Matrix& left, const Matrix& right);
 
-    /// <summary>launch shared memory matmul optionally filling kernelMilliseconds</summary>
+    /// <summary>launch cuBLASLt TF32 row major matmul returning false on any failure</summary>
+    static bool launchCublasLtMatmul(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds);
+
+    /// <summary>launch shared memory matmul kernel optionally filling kernelMilliseconds</summary>
+    static void launchSharedMemoryMatmulKernel(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds);
+
+    /// <summary>launch GEMM preferring cuBLASLt TF32 falling back to shared memory kernel</summary>
     static void launchSharedMemoryMatmul(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds);
 
     /// <summary>grow owned buffers then copy launch and copy back optionally filling timing</summary>

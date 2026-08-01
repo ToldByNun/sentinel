@@ -39,6 +39,7 @@ C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\cmath
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\concurrencysal.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\crtdefs.h
+C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\cstdarg
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\cstddef
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\cstdint
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\cstdio
@@ -65,6 +66,7 @@ C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\sal.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\setjmp.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\smmintrin.h
+C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\stdarg.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\stdexcept
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\stdint.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\string
@@ -116,7 +118,14 @@ C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\crt\sm_100_rt.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\crt\sm_70_rt.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\crt\sm_80_rt.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\crt\sm_90_rt.h
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\cublasLt.h
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\cublas_api.h
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\cuComplex.h
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\cuda_bf16.h
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\cuda_bf16.hpp
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\cuda_device_runtime_api.h
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\cuda_fp16.h
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\cuda_fp16.hpp
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\cuda_runtime.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\cuda_runtime_api.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\device_atomic_functions.h
@@ -125,6 +134,9 @@ C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\device_types.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\driver_functions.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\driver_types.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\library_types.h
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\nv\detail\__preprocessor
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\nv\detail\__target_macros
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\nv\target
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\sm_20_atomic_functions.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\sm_20_intrinsics.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\sm_30_intrinsics.h
@@ -143,3 +155,4 @@ C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\vector_function
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\vector_types.h
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaMatmul.hpp
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Math\Matrix.hpp
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Utils\SmokeLog.hpp
