@@ -9,3 +9,4 @@ sentinel/_smoke_clean.txt
 sentinel/_smoke_err.txt
 sentinel/_smoke_out.txt
 sentinel/_smoke_opt.txt
+sentinel/fa_fast_out.txt

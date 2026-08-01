@@ -35,7 +35,7 @@ int main() {
 
     const std::string samplePath = "../SERA-Data/sera_sample.jsonl";
     const size_t maximumTextCharacters = 400;
-    const size_t maximumTokenCount = 64;
+    const size_t maximumTokenCount = 256;
     const float trainRatio = 0.8f;
     const int embeddingDim = 64;
     const int maximumPositionCount = static_cast<int>(maximumTokenCount);
@@ -73,7 +73,12 @@ int main() {
     CudaLanguageModel::runKvCacheSmokeDemo(128, 64, 32, 2, 4);
     CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);
     CudaLanguageModel::runTrainSmokeDemo(1000, 64, 48, 2, 4);
-    CudaLanguageModel::runTrainProfileDemo(1000, 64, 48, 2, 4);
+    CudaLanguageModel::runTrainProfileDemo(1000, 64, 48, 2, 4, true, 256);
+    CudaLanguageModel::runTrainProfileDemo(1000, 64, 48, 2, 4, false, 256);
+    CudaLanguageModel::runTrainProfileDemo(1000, 64, 256, 2, 4, true, 2048);
+    CudaLanguageModel::runTrainProfileDemo(1000, 64, 256, 2, 4, false, 2048);
+    CudaLanguageModel::runTrainProfileDemo(1000, 64, 512, 2, 4, true, 2048);
+    CudaLanguageModel::runTrainProfileDemo(1000, 64, 512, 2, 4, false, 2048);
 
     SmokeLog::section("sera train");
 
@@ -114,11 +119,14 @@ int main() {
 
     model.enableCuda();
     model.enableCudaTrain();
-    SmokeLog::result("model", "blocks=%zu  heads=%d  cuda=%s  train=%s",
+    model.setCudaMaxPackedColumns(2048);
+    model.setCudaPreferFlashAttention(false);
+    SmokeLog::result("model", "blocks=%zu  heads=%d  cuda=%s  train=%s  maxTok=%zu maxPackCols=2048 flash=off",
         model.blocks.size(),
         model.blocks[0].attention.headCount,
         model.cudaEnabled() ? "on" : "off",
-        model.cudaTrainEnabled() ? "cuda" : "cpu-openmp");
+        model.cudaTrainEnabled() ? "cuda" : "cpu-openmp",
+        maximumTokenCount);
 
     if (model.cudaEnabled()) {
         Matrix deviceLogits = model.forward(parityTokenIds);
@@ -128,8 +136,8 @@ int main() {
         SmokeLog::result("framework parity", "diff=%.2e", maximumDifference);
     }
 
-    // segmented pack attn + grad accum=2 (Adam every 128 examples)
-    model.train(trainDataset, testDataset, 5, 1, 64, 2);
+    // longer sequences + flash; 2 epochs for timing, accum=2
+    model.train(trainDataset, testDataset, 2, 1, 32, 2);
 
     SmokeLog::result("final", "trainLoss=%.6f", model.averageLoss(trainDataset));
     if (!testDataset.examples.empty())

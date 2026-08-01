@@ -15,7 +15,7 @@
 #include "../Optimizers/Adam.hpp"
 
 CudaLanguageModel::CudaLanguageModel()
-    : maximumPositionCount(0), maxPackedColumns(256), gradientAccumulationSteps(1), activationCheckpointing(false), adam(0.001f), trainStateReady(false) {}
+    : maximumPositionCount(0), maxPackedColumns(1024), gradientAccumulationSteps(1), activationCheckpointing(false), adam(0.001f), trainStateReady(false) {}
 
 void CudaTransformerBlockAdamStates::ensureFrom(const CudaTransformerBlock& block) {
     this->queryWeight = CudaAdamState::zerosLike(block.attention.queryWeight);
@@ -444,7 +444,7 @@ void CudaLanguageModel::runTrainSmokeDemo(int vocabularySize, int embeddingDim, 
         vocabularySize, embeddingDim, sequenceLength, packBatchSize, hostLoss, deviceLoss, maximumDifference, std::fabs(packedLoss - sequentialLoss), packedDifference, tokensPerSecond);
 }
 
-void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim, int sequenceLength, int blockCount, int headCount) {
+void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim, int sequenceLength, int blockCount, int headCount, bool preferFlash, int maxPackedColumns) {
     if (!CudaMatmul::isAvailable()) {
         SmokeLog::skip("LanguageModel profile");
         return;
@@ -455,6 +455,10 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
     LanguageModel host(vocabularySize, embeddingDim, sequenceLength, Adam(0.001f), blockCount, headCount);
     CudaLanguageModel device = CudaLanguageModel::createFrom(host);
     device.adam = CudaAdam(host.optimizer.learningRate, host.optimizer.beta1, host.optimizer.beta2, host.optimizer.epsilon);
+    if (maxPackedColumns > 0)
+        device.maxPackedColumns = maxPackedColumns;
+    for (CudaTransformerBlock& block : device.blocks)
+        block.attention.preferFlashAttention = preferFlash;
     device.ensureTrainState();
     device.epochLossSum.ensureSize(1, 1);
     device.blockInputGradientScratch.ensureSize(static_cast<size_t>(embeddingDim), 1);
@@ -661,8 +665,8 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
     const float tokensPerSecond = stepTotal > 0.0f ? (1000.0f * static_cast<float>(tokensPerStep) / stepTotal) : 0.0f;
 
     SmokeLog::section("train profile");
-    SmokeLog::result("profile config", "vocab=%d embed=%d seq=%d blocks=%d pack=%d tokens/step=%d",
-        vocabularySize, embeddingDim, sequenceLength, blockCount, packBatchSize, tokensPerStep);
+    SmokeLog::result("profile config", "vocab=%d embed=%d seq=%d blocks=%d pack=%d tokens/step=%d flash=%s maxPackCols=%d",
+        vocabularySize, embeddingDim, sequenceLength, blockCount, packBatchSize, tokensPerStep, preferFlash ? "on" : "off", device.maxPackedColumns);
     SmokeLog::result("profile step", "avg=%.2fms  ~tokens/s=%.0f", stepTotal, tokensPerSecond);
     SmokeLog::result("  attention", "fwd=%.2fms bwd=%.2fms  total=%.2fms (%.0f%%)", sumAttn, sumAttnBwd, attnTotal, attnTotal * percent);
     SmokeLog::result("  ffn", "fwd=%.2fms bwd=%.2fms  total=%.2fms (%.0f%%)", sumFfn, sumFfnBwd, ffnTotal, ffnTotal * percent);

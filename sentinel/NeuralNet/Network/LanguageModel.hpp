@@ -85,6 +85,12 @@ public:
     /// <summary>recompute transformer block activations on device backward</summary>
     void enableActivationCheckpointing(bool enabled = true);
 
+    /// <summary>cap packed token columns on device train</summary>
+    void setCudaMaxPackedColumns(int columns);
+
+    /// <summary>toggle flash attention on device blocks</summary>
+    void setCudaPreferFlashAttention(bool enabled);
+
     /// <summary>true when device mirror is active</summary>
     bool cudaEnabled() const;
 

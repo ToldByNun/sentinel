@@ -304,7 +304,7 @@ public:
 
     /// <summary>breakdown of one packed train step embed attn ffn ce adam</summary>
 
-    static void runTrainProfileDemo(int vocabularySize = 1000, int embeddingDim = 64, int sequenceLength = 48, int blockCount = 2, int headCount = 4);
+    static void runTrainProfileDemo(int vocabularySize = 1000, int embeddingDim = 64, int sequenceLength = 48, int blockCount = 2, int headCount = 4, bool preferFlash = true, int maxPackedColumns = 0);
 
 
 
