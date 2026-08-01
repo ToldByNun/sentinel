@@ -51,6 +51,9 @@
     <CudaCompile Include="NeuralNet\Cuda\CudaMatmul.cu">
       <Filter>Quelldateien</Filter>
     </CudaCompile>
+    <CudaCompile Include="NeuralNet\Cuda\CudaAmp.cu">
+      <Filter>Quelldateien</Filter>
+    </CudaCompile>
     <CudaCompile Include="NeuralNet\Cuda\CudaOps.cu">
       <Filter>Quelldateien</Filter>
     </CudaCompile>
@@ -165,6 +168,9 @@
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Cuda\CudaMatmul.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Cuda\CudaAmp.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Cuda\CudaOps.hpp">

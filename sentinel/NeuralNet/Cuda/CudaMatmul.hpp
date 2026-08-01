@@ -159,6 +159,7 @@ private:
     friend class CudaTransformerBlock;
     friend class CudaLanguageModel;
     friend class CudaAdam;
+    friend class CudaAmp;
 
     static constexpr int tileSize = 16;
 

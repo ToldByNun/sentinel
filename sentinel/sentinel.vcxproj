@@ -42,6 +42,7 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="NeuralNet\Math\Matrix.cpp" />
     <CudaCompile Include="NeuralNet\Cuda\CudaMatmul.cu" />
+    <CudaCompile Include="NeuralNet\Cuda\CudaAmp.cu" />
     <CudaCompile Include="NeuralNet\Cuda\CudaOps.cu" />
     <CudaCompile Include="NeuralNet\Cuda\CudaFeedForward.cu" />
     <CudaCompile Include="NeuralNet\Cuda\CudaRMSNorm.cu" />
@@ -82,6 +83,7 @@
     <ClInclude Include="NeuralNet\Losses\MSE.hpp" />
     <ClInclude Include="NeuralNet\Math\Matrix.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaMatmul.hpp" />
+    <ClInclude Include="NeuralNet\Cuda\CudaAmp.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaOps.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaFeedForward.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaRMSNorm.hpp" />

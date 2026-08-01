@@ -85,6 +85,9 @@ public:
     /// <summary>recompute transformer block activations on device backward</summary>
     void enableActivationCheckpointing(bool enabled = true);
 
+    /// <summary>FP16 GEMMs with dynamic loss scaling for consumer GPU train</summary>
+    void setCudaPreferMixedPrecision(bool enabled);
+
     /// <summary>cap packed token columns on device train</summary>
     void setCudaMaxPackedColumns(int columns);
 

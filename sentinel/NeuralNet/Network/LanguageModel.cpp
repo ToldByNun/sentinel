@@ -9,6 +9,7 @@
 
 #include "../Activations/Softmax.hpp"
 #include "../Cuda/CudaLanguageModel.hpp"
+#include "../Cuda/CudaAmp.hpp"
 #include "../Cuda/CudaMatmul.hpp"
 #include "../Initializers/UniformInit.hpp"
 #include "../Losses/CrossEntropy.hpp"
@@ -101,14 +102,31 @@ void LanguageModel::enableCudaTrain() {
     }
 
     this->deviceTrainEnabled = true;
-    std::cout << "LanguageModel::enableCudaTrain: device training enabled (packed equal-length batches)\n";
+    this->device->activationCheckpointing = true;
+    CudaAmp::preferMixedPrecision = true;
+    this->device->ensureTrainState();
+    std::cout << "LanguageModel::enableCudaTrain: device training enabled (packed batches, checkpointing on, FP16 amp on)\n";
 }
 
 void LanguageModel::enableActivationCheckpointing(bool enabled) {
     if (this->device == nullptr) this->enableCuda();
     if (this->device == nullptr) return;
     this->device->activationCheckpointing = enabled;
+    if (enabled)
+        this->device->ensureTrainWorkspaces();
+    else
+        this->device->releaseActivationCheckpoints();
     std::cout << "LanguageModel::enableActivationCheckpointing: " << (enabled ? "on" : "off") << '\n';
+}
+
+void LanguageModel::setCudaPreferMixedPrecision(bool enabled) {
+    if (this->device == nullptr) this->enableCuda();
+    if (this->device == nullptr) return;
+    CudaAmp::preferMixedPrecision = enabled;
+    if (this->deviceTrainEnabled)
+        this->device->ensureTrainWorkspaces();
+    std::cout << "LanguageModel::setCudaPreferMixedPrecision: " << (enabled ? "on" : "off")
+              << "  lossScale=" << CudaAmp::lossScaler.scale << '\n';
 }
 
 void LanguageModel::setCudaMaxPackedColumns(int columns) {
@@ -116,6 +134,8 @@ void LanguageModel::setCudaMaxPackedColumns(int columns) {
     if (this->device == nullptr) return;
     if (columns <= 0) throw std::invalid_argument("LanguageModel::setCudaMaxPackedColumns columns must be > 0");
     this->device->maxPackedColumns = columns;
+    if (this->deviceTrainEnabled)
+        this->device->ensureTrainWorkspaces();
 }
 
 void LanguageModel::setCudaPreferFlashAttention(bool enabled) {

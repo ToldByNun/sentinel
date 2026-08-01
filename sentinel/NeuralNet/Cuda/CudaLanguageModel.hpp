@@ -10,6 +10,8 @@
 
 #include "CudaAdam.hpp"
 
+#include "CudaAmp.hpp"
+
 #include "CudaKvCache.hpp"
 
 #include "CudaMatmul.hpp"
@@ -154,7 +156,7 @@ public:
 
     int gradientAccumulationSteps;
 
-    /// <summary>recompute block activations during backward</summary>
+    /// <summary>recompute block activations during backward default on for train</summary>
 
     bool activationCheckpointing;
 
@@ -205,6 +207,14 @@ public:
     std::vector<int> packedTargetTokenIds;
 
     std::vector<CudaMatrix> blockInputCheckpoints;
+
+    /// <summary>FP16 block input checkpoints when mixed precision is on</summary>
+
+    std::vector<CudaHalfMatrix> blockInputCheckpointsHalf;
+
+    /// <summary>float restore workspace for FP16 checkpoints during backward</summary>
+
+    CudaMatrix checkpointRestoreScratch;
 
 
 
@@ -257,6 +267,18 @@ public:
     /// <summary>allocate gradient and Adam state buffers from current weight shapes</summary>
 
     void ensureTrainState();
+
+
+
+    /// <summary>pre-allocate train activation workspaces to maxPackedColumns</summary>
+
+    void ensureTrainWorkspaces();
+
+
+
+    /// <summary>free block input checkpoints when checkpointing is off</summary>
+
+    void releaseActivationCheckpoints();
 
 
 

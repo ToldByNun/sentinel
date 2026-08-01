@@ -1,4 +1,5 @@
 #include "CudaMatmul.hpp"
+#include "CudaAmp.hpp"
 
 #include "../Utils/SmokeLog.hpp"
 
@@ -475,6 +476,7 @@ void CudaMatmul::launchSharedMemoryMatmul(const float* deviceLeft, const float* 
     if (deviceLeft == nullptr || deviceRight == nullptr || deviceOut == nullptr) throw std::invalid_argument("CudaMatmul::launchSharedMemoryMatmul null device pointer");
     if (rowCount <= 0 || columnCount <= 0 || sharedCount <= 0) throw std::invalid_argument("CudaMatmul::launchSharedMemoryMatmul invalid shape");
 
+    if (CudaAmp::launchCublasLtMatmulFp16(deviceLeft, deviceRight, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, kernelMilliseconds)) return;
     if (CudaMatmul::launchCublasLtMatmul(deviceLeft, deviceRight, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, kernelMilliseconds)) return;
 
     CudaMatmul::launchSharedMemoryMatmulKernel(deviceLeft, deviceRight, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, kernelMilliseconds);
