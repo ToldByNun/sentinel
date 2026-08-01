@@ -302,6 +302,12 @@ public:
 
 
 
+    /// <summary>breakdown of one packed train step embed attn ffn ce adam</summary>
+
+    static void runTrainProfileDemo(int vocabularySize = 1000, int embeddingDim = 64, int sequenceLength = 48, int blockCount = 2, int headCount = 4);
+
+
+
     /// <summary>compare CPU LanguageModel forward vs device forward</summary>
 
     static void runSmokeDemo(int vocabularySize = 128, int embeddingDim = 64, int sequenceLength = 32, int blockCount = 2, int headCount = 4);

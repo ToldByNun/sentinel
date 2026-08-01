@@ -72,6 +72,7 @@ int main() {
     CudaLanguageModel::runKvCacheSmokeDemo(128, 64, 32, 2, 4);
     CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);
     CudaLanguageModel::runTrainSmokeDemo(1000, 64, 48, 2, 4);
+    CudaLanguageModel::runTrainProfileDemo(1000, 64, 48, 2, 4);
 
     SmokeLog::section("sera train");
 
