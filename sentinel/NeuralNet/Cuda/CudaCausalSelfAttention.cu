@@ -12,7 +12,7 @@
 #include <stdexcept>
 
 CudaCausalSelfAttention::CudaCausalSelfAttention()
-    : headCount(0), headDimension(0), pairCount(0), maximumPositionCount(0), windowSize(0), globalTokenCount(0), activeSegmentLength(0), activePackCount(0), preferFlashAttention(false), usedFlashAttention(false) {}
+    : headCount(0), headDimension(0), pairCount(0), maximumPositionCount(0), windowSize(0), globalTokenCount(0), activeSegmentLength(0), activePackCount(0), preferFlashAttention(true), usedFlashAttention(false) {}
 
 bool CudaCausalSelfAttention::canUseFlashAttention(int segmentLength) const {
     if (!this->preferFlashAttention) return false;
@@ -20,6 +20,32 @@ bool CudaCausalSelfAttention::canUseFlashAttention(int segmentLength) const {
     if (segmentLength <= 0) return false;
     if (this->windowSize < segmentLength) return false;
     return true;
+}
+
+void CudaCausalSelfAttention::releaseDenseAttentionScratch() {
+    this->scores.free();
+    this->probabilities.free();
+    for (CudaMatrix& cached : this->cachedHeadProbabilities)
+        cached.free();
+    this->cachedHeadProbabilities.clear();
+    this->querySegment.free();
+    this->keySegment.free();
+    this->valueSegment.free();
+    this->attendedSegment.free();
+    this->attendedGradientSegment.free();
+    this->queryGradientSegment.free();
+    this->keyGradientSegment.free();
+    this->valueGradientSegment.free();
+    this->probabilityGradient.free();
+    this->scoreGradient.free();
+    this->valueHeadGradient.free();
+    this->queryHeadGradient.free();
+    this->keyHeadGradient.free();
+}
+
+void CudaCausalSelfAttention::releaseFlashAttentionScratch() {
+    this->flashLogSumExp.free();
+    this->flashDelta.free();
 }
 
 void CudaCausalSelfAttention::uploadFrom(const CausalSelfAttention& host) {
@@ -78,6 +104,7 @@ void CudaCausalSelfAttention::attendFullSequence(CudaMatrix& out, int segmentLen
 
     if (this->canUseFlashAttention(segmentLength)) {
         this->usedFlashAttention = true;
+        this->releaseDenseAttentionScratch();
         this->flashLogSumExp.ensureSize(static_cast<size_t>(this->headCount), sequenceLength);
         this->attended.ensureSize(this->query.rows, sequenceLength);
 
@@ -100,6 +127,8 @@ void CudaCausalSelfAttention::attendFullSequence(CudaMatrix& out, int segmentLen
         CudaMatrix::multiplyInto(this->outputWeight, this->attended, out);
         return;
     }
+
+    this->releaseFlashAttentionScratch();
 
     // prefer one dense scores GEMM when width is modest; segment loop for wide packs
     const bool useDensePack = packCount <= 1 || static_cast<int>(sequenceLength) <= 384;
@@ -243,6 +272,7 @@ void CudaCausalSelfAttention::backward(const CudaMatrix& outputGradient, CudaMat
                 this->queryGradient,
                 this->keyGradient,
                 this->valueGradient,
+                this->flashDelta,
                 this->headCount,
                 this->headDimension,
                 scale,

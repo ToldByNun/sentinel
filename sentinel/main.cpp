@@ -120,8 +120,8 @@ int main() {
     model.enableCuda();
     model.enableCudaTrain();
     model.setCudaMaxPackedColumns(2048);
-    model.setCudaPreferFlashAttention(false);
-    SmokeLog::result("model", "blocks=%zu  heads=%d  cuda=%s  train=%s  maxTok=%zu maxPackCols=2048 flash=off",
+    model.setCudaPreferFlashAttention(true);
+    SmokeLog::result("model", "blocks=%zu  heads=%d  cuda=%s  train=%s  maxTok=%zu maxPackCols=2048 flash=on",
         model.blocks.size(),
         model.blocks[0].attention.headCount,
         model.cudaEnabled() ? "on" : "off",

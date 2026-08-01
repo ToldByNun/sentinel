@@ -11,3 +11,4 @@ sentinel/_smoke_out.txt
 sentinel/_smoke_opt.txt
 sentinel/fa_fast_out.txt
 sentinel/fa_mh_out.txt
+sentinel/fa_pool_out.txt

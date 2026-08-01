@@ -195,6 +195,12 @@ void CudaMatrix::ensureSize(size_t rowCount, size_t columnCount) {
     this->buffer.ensureCapacity(this->byteCount());
 }
 
+void CudaMatrix::free() {
+    this->buffer.free();
+    this->rows = 0;
+    this->cols = 0;
+}
+
 void CudaMatrix::upload(const Matrix& host) {
     if (host.empty()) throw std::invalid_argument("CudaMatrix::upload empty host");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaMatrix::upload no CUDA device");

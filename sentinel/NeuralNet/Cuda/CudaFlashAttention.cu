@@ -705,7 +705,7 @@ void CudaFlashAttention::forward(const CudaMatrix& query, const CudaMatrix& key,
     forwardMultiHead(query, key, value, out, logSumExp, 1, static_cast<int>(query.rows), scale, causal, 0, static_cast<int>(query.cols));
 }
 
-void CudaFlashAttention::backwardMultiHead(const CudaMatrix& query, const CudaMatrix& key, const CudaMatrix& value, const CudaMatrix& out, const CudaMatrix& logSumExp, const CudaMatrix& outGradient, CudaMatrix& queryGradient, CudaMatrix& keyGradient, CudaMatrix& valueGradient, int headCount, int headDimension, float scale, bool causal, int columnStart, int columnCount) {
+void CudaFlashAttention::backwardMultiHead(const CudaMatrix& query, const CudaMatrix& key, const CudaMatrix& value, const CudaMatrix& out, const CudaMatrix& logSumExp, const CudaMatrix& outGradient, CudaMatrix& queryGradient, CudaMatrix& keyGradient, CudaMatrix& valueGradient, CudaMatrix& deltaWorkspace, int headCount, int headDimension, float scale, bool causal, int columnStart, int columnCount) {
     validateMultiHeadShape(query, key, value, headCount, headDimension, "CudaFlashAttention::backwardMultiHead");
     if (out.rows != query.rows || out.cols != query.cols)
         throw std::invalid_argument("CudaFlashAttention::backwardMultiHead out shape mismatch");
@@ -724,9 +724,7 @@ void CudaFlashAttention::backwardMultiHead(const CudaMatrix& query, const CudaMa
     valueGradient.ensureSize(value.rows, value.cols);
 
     // dK/dV overwrite the active window; dQ accumulates with atomics (caller must zero dQ)
-
-    CudaMatrix delta;
-    delta.ensureSize(static_cast<size_t>(headCount), static_cast<size_t>(columnCount));
+    deltaWorkspace.ensureSize(static_cast<size_t>(headCount), static_cast<size_t>(columnCount));
 
     const int deltaThreads = 128;
     const int deltaBlocksX = (columnCount + deltaThreads - 1) / deltaThreads;
@@ -734,7 +732,7 @@ void CudaFlashAttention::backwardMultiHead(const CudaMatrix& query, const CudaMa
     CudaFlashAttentionDeltaEntry<<<deltaGrid, deltaThreads>>>(
         out.buffer.deviceData,
         outGradient.buffer.deviceData,
-        delta.buffer.deviceData,
+        deltaWorkspace.buffer.deviceData,
         headDimension,
         strideColumns,
         columnStart,
@@ -753,16 +751,16 @@ void CudaFlashAttention::backwardMultiHead(const CudaMatrix& query, const CudaMa
 
     if (headDimension == 16 && tileBr == 64 && tileBc == 64) {
         CudaFlashAttentionBackwardKeyFixedEntry<16, 64, 64><<<grid, threadCount, keySharedBytes>>>(
-            query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, outGradient.buffer.deviceData, logSumExp.buffer.deviceData, delta.buffer.deviceData, queryGradient.buffer.deviceData, keyGradient.buffer.deviceData, valueGradient.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
+            query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, outGradient.buffer.deviceData, logSumExp.buffer.deviceData, deltaWorkspace.buffer.deviceData, queryGradient.buffer.deviceData, keyGradient.buffer.deviceData, valueGradient.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
     } else if (headDimension == 16 && tileBr == 32 && tileBc == 32) {
         CudaFlashAttentionBackwardKeyFixedEntry<16, 32, 32><<<grid, threadCount, keySharedBytes>>>(
-            query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, outGradient.buffer.deviceData, logSumExp.buffer.deviceData, delta.buffer.deviceData, queryGradient.buffer.deviceData, keyGradient.buffer.deviceData, valueGradient.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
+            query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, outGradient.buffer.deviceData, logSumExp.buffer.deviceData, deltaWorkspace.buffer.deviceData, queryGradient.buffer.deviceData, keyGradient.buffer.deviceData, valueGradient.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
     } else if (headDimension == 64 && tileBr == 16 && tileBc == 16) {
         CudaFlashAttentionBackwardKeyFixedEntry<64, 16, 16><<<grid, threadCount, keySharedBytes>>>(
-            query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, outGradient.buffer.deviceData, logSumExp.buffer.deviceData, delta.buffer.deviceData, queryGradient.buffer.deviceData, keyGradient.buffer.deviceData, valueGradient.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
+            query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, outGradient.buffer.deviceData, logSumExp.buffer.deviceData, deltaWorkspace.buffer.deviceData, queryGradient.buffer.deviceData, keyGradient.buffer.deviceData, valueGradient.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
     } else {
         CudaFlashAttentionBackwardKeyEntry<<<grid, threadCount, keySharedBytes>>>(
-            query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, outGradient.buffer.deviceData, logSumExp.buffer.deviceData, delta.buffer.deviceData, queryGradient.buffer.deviceData, keyGradient.buffer.deviceData, valueGradient.buffer.deviceData, headDimension, strideColumns, columnStart, columnCount, scale, causalFlag, tileBr, tileBc);
+            query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, outGradient.buffer.deviceData, logSumExp.buffer.deviceData, deltaWorkspace.buffer.deviceData, queryGradient.buffer.deviceData, keyGradient.buffer.deviceData, valueGradient.buffer.deviceData, headDimension, strideColumns, columnStart, columnCount, scale, causalFlag, tileBr, tileBc);
     }
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaFlashAttentionBackwardEntry launch");
 }
@@ -770,5 +768,6 @@ void CudaFlashAttention::backwardMultiHead(const CudaMatrix& query, const CudaMa
 void CudaFlashAttention::backward(const CudaMatrix& query, const CudaMatrix& key, const CudaMatrix& value, const CudaMatrix& out, const CudaMatrix& logSumExp, const CudaMatrix& outGradient, CudaMatrix& queryGradient, CudaMatrix& keyGradient, CudaMatrix& valueGradient, float scale, bool causal) {
     queryGradient.ensureSize(query.rows, query.cols);
     CudaOps::zeroInPlace(queryGradient);
-    backwardMultiHead(query, key, value, out, logSumExp, outGradient, queryGradient, keyGradient, valueGradient, 1, static_cast<int>(query.rows), scale, causal, 0, static_cast<int>(query.cols));
+    CudaMatrix deltaWorkspace;
+    backwardMultiHead(query, key, value, out, logSumExp, outGradient, queryGradient, keyGradient, valueGradient, deltaWorkspace, 1, static_cast<int>(query.rows), scale, causal, 0, static_cast<int>(query.cols));
 }

@@ -35,7 +35,8 @@ public:
     static void backward(const CudaMatrix& query, const CudaMatrix& key, const CudaMatrix& value, const CudaMatrix& out, const CudaMatrix& logSumExp, const CudaMatrix& outGradient, CudaMatrix& queryGradient, CudaMatrix& keyGradient, CudaMatrix& valueGradient, float scale, bool causal = true);
 
     /// <summary>multi-head backward matching forwardMultiHead layout and column window</summary>
-    static void backwardMultiHead(const CudaMatrix& query, const CudaMatrix& key, const CudaMatrix& value, const CudaMatrix& out, const CudaMatrix& logSumExp, const CudaMatrix& outGradient, CudaMatrix& queryGradient, CudaMatrix& keyGradient, CudaMatrix& valueGradient, int headCount, int headDimension, float scale, bool causal = true, int columnStart = 0, int columnCount = 0);
+    /// <param name="deltaWorkspace">reusable headCount x columnCount buffer for D = rowsum(dO odot O)</param>
+    static void backwardMultiHead(const CudaMatrix& query, const CudaMatrix& key, const CudaMatrix& value, const CudaMatrix& out, const CudaMatrix& logSumExp, const CudaMatrix& outGradient, CudaMatrix& queryGradient, CudaMatrix& keyGradient, CudaMatrix& valueGradient, CudaMatrix& deltaWorkspace, int headCount, int headDimension, float scale, bool causal = true, int columnStart = 0, int columnCount = 0);
 };
 
 #endif // CUDAFLASHATTENTION_HPP

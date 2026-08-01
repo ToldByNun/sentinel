@@ -84,6 +84,9 @@ public:
     /// <summary>set shape and ensure device capacity</summary>
     void ensureSize(size_t rowCount, size_t columnCount);
 
+    /// <summary>release device memory and clear shape</summary>
+    void free();
+
     /// <summary>copy host matrix to device growing capacity if needed</summary>
     void upload(const Matrix& host);
 

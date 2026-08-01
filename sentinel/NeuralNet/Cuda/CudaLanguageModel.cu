@@ -457,8 +457,13 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
     device.adam = CudaAdam(host.optimizer.learningRate, host.optimizer.beta1, host.optimizer.beta2, host.optimizer.epsilon);
     if (maxPackedColumns > 0)
         device.maxPackedColumns = maxPackedColumns;
-    for (CudaTransformerBlock& block : device.blocks)
+    for (CudaTransformerBlock& block : device.blocks) {
         block.attention.preferFlashAttention = preferFlash;
+        if (preferFlash)
+            block.attention.releaseDenseAttentionScratch();
+        else
+            block.attention.releaseFlashAttentionScratch();
+    }
     device.ensureTrainState();
     device.epochLossSum.ensureSize(1, 1);
     device.blockInputGradientScratch.ensureSize(static_cast<size_t>(embeddingDim), 1);

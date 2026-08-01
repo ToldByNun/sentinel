@@ -61,6 +61,7 @@ public:
     CudaMatrix temp;
     std::vector<CudaMatrix> cachedHeadProbabilities;
     CudaMatrix flashLogSumExp;
+    CudaMatrix flashDelta;
 
     CudaCausalSelfAttention();
 
@@ -69,6 +70,12 @@ public:
 
     /// <summary>create device attention from host</summary>
     static CudaCausalSelfAttention createFrom(const CausalSelfAttention& host);
+
+    /// <summary>release dense-only scratch (scores, P cache, pack segment copies)</summary>
+    void releaseDenseAttentionScratch();
+
+    /// <summary>release flash-only scratch (LSE, delta workspace)</summary>
+    void releaseFlashAttentionScratch();
 
     /// <summary>causal multi head attention writing into out</summary>
     void forward(const CudaMatrix& input, CudaMatrix& out, int segmentLength = 0);

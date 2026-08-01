@@ -121,8 +121,13 @@ void LanguageModel::setCudaMaxPackedColumns(int columns) {
 void LanguageModel::setCudaPreferFlashAttention(bool enabled) {
     if (this->device == nullptr) this->enableCuda();
     if (this->device == nullptr) return;
-    for (CudaTransformerBlock& block : this->device->blocks)
+    for (CudaTransformerBlock& block : this->device->blocks) {
         block.attention.preferFlashAttention = enabled;
+        if (enabled)
+            block.attention.releaseDenseAttentionScratch();
+        else
+            block.attention.releaseFlashAttentionScratch();
+    }
 }
 
 bool LanguageModel::cudaEnabled() const {
