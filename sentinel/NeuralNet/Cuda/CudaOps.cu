@@ -116,6 +116,28 @@ __device__ void CudaOps::runWriteColumnsInto(float* destination, const float* so
     destination[row * destinationStrideColumns + destinationColumn] = source[index];
 }
 
+__device__ void CudaOps::runExtractColumnsInto(const float* source, float* out, int embeddingDim, int sourceStrideColumns, int sourceStartColumn, int columnCount) {
+    const int elementCount = embeddingDim * columnCount;
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+
+    const int row = index / columnCount;
+    const int outColumn = index - row * columnCount;
+    const int sourceColumn = sourceStartColumn + outColumn;
+    out[index] = source[row * sourceStrideColumns + sourceColumn];
+}
+
+__device__ void CudaOps::runAddColumnsInPlace(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount) {
+    const int elementCount = embeddingDim * sourceColumnCount;
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+
+    const int row = index / sourceColumnCount;
+    const int sourceColumn = index - row * sourceColumnCount;
+    const int destinationColumn = destinationStartColumn + sourceColumn;
+    destination[row * destinationStrideColumns + destinationColumn] += source[index];
+}
+
 __device__ void CudaOps::runApplyCausalMaskInPlace(float* scores, int sequenceLength) {
     CudaOps::runApplySparseAttentionMaskInPlace(scores, sequenceLength, sequenceLength, 0, sequenceLength, 0, 0);
 }
@@ -451,6 +473,14 @@ __global__ void CudaOpsWriteColumnsEntry(float* destination, const float* source
     CudaOps::runWriteColumnsInto(destination, source, embeddingDim, destinationStrideColumns, destinationStartColumn, sourceColumnCount);
 }
 
+__global__ void CudaOpsExtractColumnsEntry(const float* source, float* out, int embeddingDim, int sourceStrideColumns, int sourceStartColumn, int columnCount) {
+    CudaOps::runExtractColumnsInto(source, out, embeddingDim, sourceStrideColumns, sourceStartColumn, columnCount);
+}
+
+__global__ void CudaOpsAddColumnsEntry(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount) {
+    CudaOps::runAddColumnsInPlace(destination, source, embeddingDim, destinationStrideColumns, destinationStartColumn, sourceColumnCount);
+}
+
 __global__ void CudaOpsCausalMaskEntry(float* scores, int sequenceLength) {
     CudaOps::runApplyCausalMaskInPlace(scores, sequenceLength);
 }
@@ -652,6 +682,40 @@ void CudaOps::writeColumnsInto(CudaMatrix& destination, int destinationStartColu
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
     CudaOpsWriteColumnsEntry<<<blockCount, CudaOps::threadCount>>>(destination.buffer.deviceData, source.buffer.deviceData, embeddingDim, destinationStrideColumns, destinationStartColumn, sourceColumnCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsWriteColumnsEntry launch");
+}
+
+void CudaOps::extractColumnsInto(const CudaMatrix& source, int sourceStartColumn, int columnCount, CudaMatrix& out) {
+    if (source.empty()) throw std::invalid_argument("CudaOps::extractColumnsInto empty source");
+    if (columnCount <= 0) throw std::invalid_argument("CudaOps::extractColumnsInto empty columnCount");
+    if (sourceStartColumn < 0) throw std::invalid_argument("CudaOps::extractColumnsInto negative start");
+    if (sourceStartColumn + columnCount > static_cast<int>(source.cols))
+        throw std::invalid_argument("CudaOps::extractColumnsInto exceeds source width");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::extractColumnsInto no CUDA device");
+
+    out.ensureSize(source.rows, static_cast<size_t>(columnCount));
+    const int embeddingDim = static_cast<int>(source.rows);
+    const int sourceStrideColumns = static_cast<int>(source.cols);
+    const int elementCount = embeddingDim * columnCount;
+    const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsExtractColumnsEntry<<<blockCount, CudaOps::threadCount>>>(source.buffer.deviceData, out.buffer.deviceData, embeddingDim, sourceStrideColumns, sourceStartColumn, columnCount);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsExtractColumnsEntry launch");
+}
+
+void CudaOps::addColumnsInPlace(CudaMatrix& destination, int destinationStartColumn, const CudaMatrix& source) {
+    if (destination.empty() || source.empty()) throw std::invalid_argument("CudaOps::addColumnsInPlace empty input");
+    if (destination.rows != source.rows) throw std::invalid_argument("CudaOps::addColumnsInPlace row mismatch");
+    if (destinationStartColumn < 0) throw std::invalid_argument("CudaOps::addColumnsInPlace negative start");
+    if (destinationStartColumn + static_cast<int>(source.cols) > static_cast<int>(destination.cols))
+        throw std::invalid_argument("CudaOps::addColumnsInPlace exceeds destination width");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::addColumnsInPlace no CUDA device");
+
+    const int embeddingDim = static_cast<int>(source.rows);
+    const int destinationStrideColumns = static_cast<int>(destination.cols);
+    const int sourceColumnCount = static_cast<int>(source.cols);
+    const int elementCount = embeddingDim * sourceColumnCount;
+    const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsAddColumnsEntry<<<blockCount, CudaOps::threadCount>>>(destination.buffer.deviceData, source.buffer.deviceData, embeddingDim, destinationStrideColumns, destinationStartColumn, sourceColumnCount);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsAddColumnsEntry launch");
 }
 
 void CudaOps::applyCausalMaskInPlace(CudaMatrix& scores) {

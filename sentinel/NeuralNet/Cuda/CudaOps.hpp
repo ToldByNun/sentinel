@@ -51,6 +51,12 @@ public:
     /// <summary>write packed source columns into dest starting at destStartColumn</summary>
     static void writeColumnsInto(CudaMatrix& destination, int destinationStartColumn, const CudaMatrix& source);
 
+    /// <summary>copy destination columns [start, start+count) into tightly packed out</summary>
+    static void extractColumnsInto(const CudaMatrix& source, int sourceStartColumn, int columnCount, CudaMatrix& out);
+
+    /// <summary>destination columns [start, ...) += source</summary>
+    static void addColumnsInPlace(CudaMatrix& destination, int destinationStartColumn, const CudaMatrix& source);
+
     /// <summary>set scores keyIndex greater than queryIndex to large negative</summary>
     static void applyCausalMaskInPlace(CudaMatrix& scores);
 
@@ -107,6 +113,8 @@ private:
     __device__ static void runExtractHeadInto(const float* full, float* head, int headIndex, int headDimension, int sourceStrideColumns, int usedColumnCount);
     __device__ static void runWriteHead(float* full, const float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim);
     __device__ static void runWriteColumnsInto(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount);
+    __device__ static void runExtractColumnsInto(const float* source, float* out, int embeddingDim, int sourceStrideColumns, int sourceStartColumn, int columnCount);
+    __device__ static void runAddColumnsInPlace(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount);
     __device__ static void runApplyCausalMaskInPlace(float* scores, int sequenceLength);
     __device__ static void runApplySparseAttentionMaskInPlace(float* scores, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount, int segmentLength);
     __device__ static void runSoftmaxInto(const float* logits, float* out, int rowCount, int columnCount);
@@ -134,6 +142,8 @@ private:
     friend __global__ void CudaOpsExtractHeadEntry(const float* full, float* head, int headIndex, int headDimension, int sourceStrideColumns, int usedColumnCount);
     friend __global__ void CudaOpsWriteHeadEntry(float* full, const float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim);
     friend __global__ void CudaOpsWriteColumnsEntry(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount);
+    friend __global__ void CudaOpsExtractColumnsEntry(const float* source, float* out, int embeddingDim, int sourceStrideColumns, int sourceStartColumn, int columnCount);
+    friend __global__ void CudaOpsAddColumnsEntry(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount);
     friend __global__ void CudaOpsCausalMaskEntry(float* scores, int sequenceLength);
     friend __global__ void CudaOpsSparseAttentionMaskEntry(float* scores, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount, int segmentLength);
     friend __global__ void CudaOpsSoftmaxEntry(const float* logits, float* out, int rowCount, int columnCount);
@@ -164,6 +174,8 @@ __global__ void CudaOpsZeroEntry(float* matrix, int elementCount);
 __global__ void CudaOpsExtractHeadEntry(const float* full, float* head, int headIndex, int headDimension, int sourceStrideColumns, int usedColumnCount);
 __global__ void CudaOpsWriteHeadEntry(float* full, const float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim);
 __global__ void CudaOpsWriteColumnsEntry(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount);
+__global__ void CudaOpsExtractColumnsEntry(const float* source, float* out, int embeddingDim, int sourceStrideColumns, int sourceStartColumn, int columnCount);
+__global__ void CudaOpsAddColumnsEntry(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount);
 __global__ void CudaOpsCausalMaskEntry(float* scores, int sequenceLength);
 __global__ void CudaOpsSparseAttentionMaskEntry(float* scores, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount, int segmentLength);
 __global__ void CudaOpsSoftmaxEntry(const float* logits, float* out, int rowCount, int columnCount);

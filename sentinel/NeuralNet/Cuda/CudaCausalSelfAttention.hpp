@@ -23,6 +23,7 @@ public:
     int windowSize;
     int globalTokenCount;
     int activeSegmentLength;
+    int activePackCount;
 
     CudaMatrix query;
     CudaMatrix key;
@@ -35,6 +36,15 @@ public:
     CudaMatrix attendedHead;
     CudaMatrix attended;
     CudaMatrix output;
+
+    CudaMatrix querySegment;
+    CudaMatrix keySegment;
+    CudaMatrix valueSegment;
+    CudaMatrix attendedSegment;
+    CudaMatrix attendedGradientSegment;
+    CudaMatrix queryGradientSegment;
+    CudaMatrix keyGradientSegment;
+    CudaMatrix valueGradientSegment;
 
     CudaMatrix inputCache;
     CudaMatrix attendedGradient;

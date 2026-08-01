@@ -146,6 +146,18 @@ public:
 
     int maximumPositionCount;
 
+    /// <summary>cap packed columns so attention stays manageable default high with segmented attention</summary>
+
+    int maxPackedColumns;
+
+    /// <summary>Adam every N microbatches of batchSize</summary>
+
+    int gradientAccumulationSteps;
+
+    /// <summary>recompute block activations during backward</summary>
+
+    bool activationCheckpointing;
+
 
 
     CudaAdam adam;
@@ -191,6 +203,8 @@ public:
     std::vector<int> packedInputTokenIds;
 
     std::vector<int> packedTargetTokenIds;
+
+    std::vector<CudaMatrix> blockInputCheckpoints;
 
 
 
@@ -272,7 +286,7 @@ public:
 
     /// <summary>sequential batch training loop on device</summary>
 
-    void train(const LanguageModelDataset& trainDataset, const LanguageModelDataset& testDataset, int epochs, int logEveryEpochs, int batchSize);
+    void train(const LanguageModelDataset& trainDataset, const LanguageModelDataset& testDataset, int epochs, int logEveryEpochs, int batchSize, int gradientAccumulationSteps = 1);
 
 
 

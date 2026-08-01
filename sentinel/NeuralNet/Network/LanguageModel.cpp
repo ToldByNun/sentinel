@@ -104,6 +104,13 @@ void LanguageModel::enableCudaTrain() {
     std::cout << "LanguageModel::enableCudaTrain: device training enabled (packed equal-length batches)\n";
 }
 
+void LanguageModel::enableActivationCheckpointing(bool enabled) {
+    if (this->device == nullptr) this->enableCuda();
+    if (this->device == nullptr) return;
+    this->device->activationCheckpointing = enabled;
+    std::cout << "LanguageModel::enableActivationCheckpointing: " << (enabled ? "on" : "off") << '\n';
+}
+
 bool LanguageModel::cudaEnabled() const {
     return this->device != nullptr;
 }
@@ -249,16 +256,17 @@ void LanguageModel::train(const LanguageModelDataset& dataset, int epochs, int l
     this->train(dataset, emptyTest, epochs, logEveryEpochs, 32);
 }
 
-void LanguageModel::train(const LanguageModelDataset& trainDataset, const LanguageModelDataset& testDataset, int epochs, int logEveryEpochs, int batchSize) {
+void LanguageModel::train(const LanguageModelDataset& trainDataset, const LanguageModelDataset& testDataset, int epochs, int logEveryEpochs, int batchSize, int gradientAccumulationSteps) {
     if (trainDataset.examples.empty()) return;
     if (logEveryEpochs <= 0) logEveryEpochs = 1;
     if (batchSize <= 0) batchSize = 32;
+    if (gradientAccumulationSteps <= 0) gradientAccumulationSteps = 1;
 
     if (this->cudaTrainEnabled()) {
         this->syncDeviceIfStale();
         this->device->adam = CudaAdam(this->optimizer.learningRate, this->optimizer.beta1, this->optimizer.beta2, this->optimizer.epsilon);
         this->device->adam.timeStep = this->optimizer.timeStep;
-        this->device->train(trainDataset, testDataset, epochs, logEveryEpochs, batchSize);
+        this->device->train(trainDataset, testDataset, epochs, logEveryEpochs, batchSize, gradientAccumulationSteps);
         this->device->downloadTo(*this);
         this->optimizer.timeStep = this->device->adam.timeStep;
         this->deviceStale = false;

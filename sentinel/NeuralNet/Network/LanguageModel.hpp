@@ -82,6 +82,9 @@ public:
     /// <summary>opt in to sequential device training instead of OpenMP host training</summary>
     void enableCudaTrain();
 
+    /// <summary>recompute transformer block activations on device backward</summary>
+    void enableActivationCheckpointing(bool enabled = true);
+
     /// <summary>true when device mirror is active</summary>
     bool cudaEnabled() const;
 
@@ -105,7 +108,7 @@ public:
     void train(const LanguageModelDataset& dataset, int epochs, int logEveryEpochs = 1);
 
     /// <summary>train and also report testLoss every logEveryEpochs</summary>
-    void train(const LanguageModelDataset& trainDataset, const LanguageModelDataset& testDataset, int epochs, int logEveryEpochs = 1, int batchSize = 32);
+    void train(const LanguageModelDataset& trainDataset, const LanguageModelDataset& testDataset, int epochs, int logEveryEpochs = 1, int batchSize = 32, int gradientAccumulationSteps = 1);
 
     /// <summary>next-token generation temperature&lt;=0 is greedy otherwise sample with optional topK</summary>
     std::vector<int> generate(const std::vector<int>& promptTokenIds, int newTokenCount, float temperature = 1.0f, int topK = 40, unsigned seed = 42u);

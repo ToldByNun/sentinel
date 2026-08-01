@@ -11,7 +11,7 @@
 #include <stdexcept>
 
 CudaCausalSelfAttention::CudaCausalSelfAttention()
-    : headCount(0), headDimension(0), pairCount(0), maximumPositionCount(0), windowSize(0), globalTokenCount(0), activeSegmentLength(0) {}
+    : headCount(0), headDimension(0), pairCount(0), maximumPositionCount(0), windowSize(0), globalTokenCount(0), activeSegmentLength(0), activePackCount(0) {}
 
 void CudaCausalSelfAttention::uploadFrom(const CausalSelfAttention& host) {
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaCausalSelfAttention::uploadFrom no CUDA device");
@@ -59,25 +59,67 @@ void CudaCausalSelfAttention::attendFullSequence(CudaMatrix& out, int segmentLen
     const size_t sequenceLength = this->query.cols;
     const float scale = 1.0f / std::sqrt(static_cast<float>(this->headDimension));
     if (segmentLength < 0) segmentLength = this->activeSegmentLength;
+    if (segmentLength <= 0) segmentLength = static_cast<int>(sequenceLength);
+    const int packCount = static_cast<int>(sequenceLength) / segmentLength;
+    this->activePackCount = packCount;
 
     this->attended.ensureSize(this->query.rows, sequenceLength);
     CudaOps::zeroInPlace(this->attended);
 
-    if (this->cachedHeadProbabilities.size() != static_cast<size_t>(this->headCount))
-        this->cachedHeadProbabilities.resize(static_cast<size_t>(this->headCount));
+    // prefer one dense scores GEMM when width is modest; segment loop for wide packs
+    const bool useDensePack = packCount <= 1 || static_cast<int>(sequenceLength) <= 384;
 
-    for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
-        CudaOps::extractHeadInto(this->query, headIndex, this->headDimension, this->queryHead);
-        CudaOps::extractHeadInto(this->key, headIndex, this->headDimension, this->keyHead);
-        CudaOps::extractHeadInto(this->value, headIndex, this->headDimension, this->valueHead);
+    if (useDensePack) {
+        if (this->cachedHeadProbabilities.size() != static_cast<size_t>(this->headCount))
+            this->cachedHeadProbabilities.resize(static_cast<size_t>(this->headCount));
 
-        CudaMatrix::multiplyInto(this->keyHead, this->queryHead, this->scores, true, false);
-        CudaOps::scaleInPlace(this->scores, scale);
-        CudaOps::applySparseAttentionMaskInPlace(this->scores, this->windowSize, this->globalTokenCount, 0, segmentLength);
-        CudaOps::softmaxInto(this->scores, this->probabilities);
-        CudaOps::copyInto(this->probabilities, this->cachedHeadProbabilities[static_cast<size_t>(headIndex)]);
-        CudaMatrix::multiplyInto(this->valueHead, this->probabilities, this->attendedHead);
-        CudaOps::writeHead(this->attended, headIndex, this->headDimension, this->attendedHead);
+        for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
+            CudaOps::extractHeadInto(this->query, headIndex, this->headDimension, this->queryHead);
+            CudaOps::extractHeadInto(this->key, headIndex, this->headDimension, this->keyHead);
+            CudaOps::extractHeadInto(this->value, headIndex, this->headDimension, this->valueHead);
+
+            CudaMatrix::multiplyInto(this->keyHead, this->queryHead, this->scores, true, false);
+            CudaOps::scaleInPlace(this->scores, scale);
+            CudaOps::applySparseAttentionMaskInPlace(this->scores, this->windowSize, this->globalTokenCount, 0, segmentLength);
+            CudaOps::softmaxInto(this->scores, this->probabilities);
+            CudaOps::copyInto(this->probabilities, this->cachedHeadProbabilities[static_cast<size_t>(headIndex)]);
+            CudaMatrix::multiplyInto(this->valueHead, this->probabilities, this->attendedHead);
+            CudaOps::writeHead(this->attended, headIndex, this->headDimension, this->attendedHead);
+        }
+
+        this->activePackCount = 1;
+        CudaMatrix::multiplyInto(this->outputWeight, this->attended, out);
+        return;
+    }
+
+    const size_t cacheCount = static_cast<size_t>(this->headCount) * static_cast<size_t>(packCount);
+    if (this->cachedHeadProbabilities.size() != cacheCount)
+        this->cachedHeadProbabilities.resize(cacheCount);
+
+    for (int segmentIndex = 0; segmentIndex < packCount; ++segmentIndex) {
+        const int columnStart = segmentIndex * segmentLength;
+        CudaOps::extractColumnsInto(this->query, columnStart, segmentLength, this->querySegment);
+        CudaOps::extractColumnsInto(this->key, columnStart, segmentLength, this->keySegment);
+        CudaOps::extractColumnsInto(this->value, columnStart, segmentLength, this->valueSegment);
+        this->attendedSegment.ensureSize(this->query.rows, static_cast<size_t>(segmentLength));
+        CudaOps::zeroInPlace(this->attendedSegment);
+
+        for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
+            CudaOps::extractHeadInto(this->querySegment, headIndex, this->headDimension, this->queryHead);
+            CudaOps::extractHeadInto(this->keySegment, headIndex, this->headDimension, this->keyHead);
+            CudaOps::extractHeadInto(this->valueSegment, headIndex, this->headDimension, this->valueHead);
+
+            CudaMatrix::multiplyInto(this->keyHead, this->queryHead, this->scores, true, false);
+            CudaOps::scaleInPlace(this->scores, scale);
+            CudaOps::applySparseAttentionMaskInPlace(this->scores, this->windowSize, this->globalTokenCount, 0, 0);
+            CudaOps::softmaxInto(this->scores, this->probabilities);
+            const size_t cacheIndex = static_cast<size_t>(headIndex) * static_cast<size_t>(packCount) + static_cast<size_t>(segmentIndex);
+            CudaOps::copyInto(this->probabilities, this->cachedHeadProbabilities[cacheIndex]);
+            CudaMatrix::multiplyInto(this->valueHead, this->probabilities, this->attendedHead);
+            CudaOps::writeHead(this->attendedSegment, headIndex, this->headDimension, this->attendedHead);
+        }
+
+        CudaOps::writeColumnsInto(this->attended, columnStart, this->attendedSegment);
     }
 
     CudaMatrix::multiplyInto(this->outputWeight, this->attended, out);
@@ -125,9 +167,15 @@ void CudaCausalSelfAttention::backward(const CudaMatrix& outputGradient, CudaMat
     if (this->inputCache.empty()) throw std::logic_error("CudaCausalSelfAttention::backward called before forward");
     if (outputGradient.rows != this->outputWeight.rows || outputGradient.cols != this->attended.cols)
         throw std::invalid_argument("CudaCausalSelfAttention::backward output gradient shape mismatch");
-    if (static_cast<int>(this->cachedHeadProbabilities.size()) != this->headCount)
-        throw std::invalid_argument("CudaCausalSelfAttention::backward head cache size mismatch");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaCausalSelfAttention::backward no CUDA device");
+
+    const int segmentLength = this->activeSegmentLength > 0 ? this->activeSegmentLength : static_cast<int>(this->query.cols);
+    const int packCount = this->activePackCount > 0 ? this->activePackCount : 1;
+    const size_t expectedCacheCount = packCount <= 1
+        ? static_cast<size_t>(this->headCount)
+        : static_cast<size_t>(this->headCount) * static_cast<size_t>(packCount);
+    if (this->cachedHeadProbabilities.size() != expectedCacheCount)
+        throw std::invalid_argument("CudaCausalSelfAttention::backward head cache size mismatch");
 
     CudaMatrix::multiplyInto(outputGradient, this->attended, outputWeightGradient, false, true);
     CudaMatrix::multiplyInto(this->outputWeight, outputGradient, this->attendedGradient, true, false);
@@ -141,24 +189,66 @@ void CudaCausalSelfAttention::backward(const CudaMatrix& outputGradient, CudaMat
 
     const float scale = 1.0f / std::sqrt(static_cast<float>(this->headDimension));
 
-    for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
-        CudaOps::extractHeadInto(this->attendedGradient, headIndex, this->headDimension, this->attendedHead);
-        CudaOps::extractHeadInto(this->query, headIndex, this->headDimension, this->queryHead);
-        CudaOps::extractHeadInto(this->key, headIndex, this->headDimension, this->keyHead);
-        CudaOps::extractHeadInto(this->value, headIndex, this->headDimension, this->valueHead);
-        const CudaMatrix& headProbabilities = this->cachedHeadProbabilities[static_cast<size_t>(headIndex)];
+    if (packCount <= 1) {
+        for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
+            CudaOps::extractHeadInto(this->attendedGradient, headIndex, this->headDimension, this->attendedHead);
+            CudaOps::extractHeadInto(this->query, headIndex, this->headDimension, this->queryHead);
+            CudaOps::extractHeadInto(this->key, headIndex, this->headDimension, this->keyHead);
+            CudaOps::extractHeadInto(this->value, headIndex, this->headDimension, this->valueHead);
+            const CudaMatrix& headProbabilities = this->cachedHeadProbabilities[static_cast<size_t>(headIndex)];
 
-        CudaMatrix::multiplyInto(this->attendedHead, headProbabilities, this->valueHeadGradient, false, true);
-        CudaMatrix::multiplyInto(this->valueHead, this->attendedHead, this->probabilityGradient, true, false);
-        CudaOps::softmaxBackwardInto(headProbabilities, this->probabilityGradient, this->scoreGradient);
-        CudaOps::zeroForbiddenScoreGradientsInPlace(this->scoreGradient, this->windowSize, this->globalTokenCount, 0, this->activeSegmentLength);
-        CudaOps::scaleInPlace(this->scoreGradient, scale);
-        CudaMatrix::multiplyInto(this->keyHead, this->scoreGradient, this->queryHeadGradient);
-        CudaMatrix::multiplyInto(this->queryHead, this->scoreGradient, this->keyHeadGradient, false, true);
+            CudaMatrix::multiplyInto(this->attendedHead, headProbabilities, this->valueHeadGradient, false, true);
+            CudaMatrix::multiplyInto(this->valueHead, this->attendedHead, this->probabilityGradient, true, false);
+            CudaOps::softmaxBackwardInto(headProbabilities, this->probabilityGradient, this->scoreGradient);
+            CudaOps::zeroForbiddenScoreGradientsInPlace(this->scoreGradient, this->windowSize, this->globalTokenCount, 0, this->activeSegmentLength);
+            CudaOps::scaleInPlace(this->scoreGradient, scale);
+            CudaMatrix::multiplyInto(this->keyHead, this->scoreGradient, this->queryHeadGradient);
+            CudaMatrix::multiplyInto(this->queryHead, this->scoreGradient, this->keyHeadGradient, false, true);
 
-        CudaOps::writeHead(this->queryGradient, headIndex, this->headDimension, this->queryHeadGradient);
-        CudaOps::writeHead(this->keyGradient, headIndex, this->headDimension, this->keyHeadGradient);
-        CudaOps::writeHead(this->valueGradient, headIndex, this->headDimension, this->valueHeadGradient);
+            CudaOps::writeHead(this->queryGradient, headIndex, this->headDimension, this->queryHeadGradient);
+            CudaOps::writeHead(this->keyGradient, headIndex, this->headDimension, this->keyHeadGradient);
+            CudaOps::writeHead(this->valueGradient, headIndex, this->headDimension, this->valueHeadGradient);
+        }
+    } else {
+        for (int segmentIndex = 0; segmentIndex < packCount; ++segmentIndex) {
+            const int columnStart = segmentIndex * segmentLength;
+            CudaOps::extractColumnsInto(this->attendedGradient, columnStart, segmentLength, this->attendedGradientSegment);
+            CudaOps::extractColumnsInto(this->query, columnStart, segmentLength, this->querySegment);
+            CudaOps::extractColumnsInto(this->key, columnStart, segmentLength, this->keySegment);
+            CudaOps::extractColumnsInto(this->value, columnStart, segmentLength, this->valueSegment);
+
+            this->queryGradientSegment.ensureSize(this->query.rows, static_cast<size_t>(segmentLength));
+            this->keyGradientSegment.ensureSize(this->key.rows, static_cast<size_t>(segmentLength));
+            this->valueGradientSegment.ensureSize(this->value.rows, static_cast<size_t>(segmentLength));
+            CudaOps::zeroInPlace(this->queryGradientSegment);
+            CudaOps::zeroInPlace(this->keyGradientSegment);
+            CudaOps::zeroInPlace(this->valueGradientSegment);
+
+            for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
+                CudaOps::extractHeadInto(this->attendedGradientSegment, headIndex, this->headDimension, this->attendedHead);
+                CudaOps::extractHeadInto(this->querySegment, headIndex, this->headDimension, this->queryHead);
+                CudaOps::extractHeadInto(this->keySegment, headIndex, this->headDimension, this->keyHead);
+                CudaOps::extractHeadInto(this->valueSegment, headIndex, this->headDimension, this->valueHead);
+                const size_t cacheIndex = static_cast<size_t>(headIndex) * static_cast<size_t>(packCount) + static_cast<size_t>(segmentIndex);
+                const CudaMatrix& headProbabilities = this->cachedHeadProbabilities[cacheIndex];
+
+                CudaMatrix::multiplyInto(this->attendedHead, headProbabilities, this->valueHeadGradient, false, true);
+                CudaMatrix::multiplyInto(this->valueHead, this->attendedHead, this->probabilityGradient, true, false);
+                CudaOps::softmaxBackwardInto(headProbabilities, this->probabilityGradient, this->scoreGradient);
+                CudaOps::zeroForbiddenScoreGradientsInPlace(this->scoreGradient, this->windowSize, this->globalTokenCount, 0, 0);
+                CudaOps::scaleInPlace(this->scoreGradient, scale);
+                CudaMatrix::multiplyInto(this->keyHead, this->scoreGradient, this->queryHeadGradient);
+                CudaMatrix::multiplyInto(this->queryHead, this->scoreGradient, this->keyHeadGradient, false, true);
+
+                CudaOps::writeHead(this->queryGradientSegment, headIndex, this->headDimension, this->queryHeadGradient);
+                CudaOps::writeHead(this->keyGradientSegment, headIndex, this->headDimension, this->keyHeadGradient);
+                CudaOps::writeHead(this->valueGradientSegment, headIndex, this->headDimension, this->valueHeadGradient);
+            }
+
+            CudaOps::addColumnsInPlace(this->queryGradient, columnStart, this->queryGradientSegment);
+            CudaOps::addColumnsInPlace(this->keyGradient, columnStart, this->keyGradientSegment);
+            CudaOps::addColumnsInPlace(this->valueGradient, columnStart, this->valueGradientSegment);
+        }
     }
 
     CudaOps::rotaryRotateInverseInPlace(this->queryGradient, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, 0, this->activeSegmentLength);

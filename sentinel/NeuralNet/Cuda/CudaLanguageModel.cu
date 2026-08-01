@@ -14,7 +14,8 @@
 
 #include "../Optimizers/Adam.hpp"
 
-CudaLanguageModel::CudaLanguageModel() : maximumPositionCount(0), adam(0.001f), trainStateReady(false) {}
+CudaLanguageModel::CudaLanguageModel()
+    : maximumPositionCount(0), maxPackedColumns(256), gradientAccumulationSteps(1), activationCheckpointing(false), adam(0.001f), trainStateReady(false) {}
 
 void CudaTransformerBlockAdamStates::ensureFrom(const CudaTransformerBlock& block) {
     this->queryWeight = CudaAdamState::zerosLike(block.attention.queryWeight);
@@ -166,6 +167,12 @@ float CudaLanguageModel::accumulatePackedExamples(const LanguageModelExample* co
     std::swap(this->hiddenGradient, this->normInputGradientScratch);
 
     for (int blockIndex = static_cast<int>(this->blocks.size()) - 1; blockIndex >= 0; --blockIndex) {
+        if (this->activationCheckpointing) {
+            this->blocks[static_cast<size_t>(blockIndex)].forward(
+                this->blockInputCheckpoints[static_cast<size_t>(blockIndex)],
+                this->normalized,
+                meanDivisor);
+        }
         this->blocks[static_cast<size_t>(blockIndex)].backward(this->hiddenGradient, this->blockInputGradientScratch, gradients.blocks[static_cast<size_t>(blockIndex)]);
         std::swap(this->hiddenGradient, this->blockInputGradientScratch);
     }
@@ -249,12 +256,14 @@ float CudaLanguageModel::averageLoss(const LanguageModelDataset& dataset) {
     return lossHost.at(0, 0) / static_cast<float>(dataset.size());
 }
 
-void CudaLanguageModel::train(const LanguageModelDataset& trainDataset, const LanguageModelDataset& testDataset, int epochs, int logEveryEpochs, int batchSize) {
+void CudaLanguageModel::train(const LanguageModelDataset& trainDataset, const LanguageModelDataset& testDataset, int epochs, int logEveryEpochs, int batchSize, int gradientAccumulationSteps) {
     if (trainDataset.examples.empty()) return;
     if (logEveryEpochs <= 0) logEveryEpochs = 1;
     if (batchSize <= 0) batchSize = 32;
+    if (gradientAccumulationSteps <= 0) gradientAccumulationSteps = 1;
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaLanguageModel::train no CUDA device");
 
+    this->gradientAccumulationSteps = gradientAccumulationSteps;
     this->ensureTrainState();
     this->epochLossSum.ensureSize(1, 1);
     this->blockInputGradientScratch.ensureSize(this->tokenEmbeddingWeight.cols, 1);
@@ -269,15 +278,17 @@ void CudaLanguageModel::train(const LanguageModelDataset& trainDataset, const La
         CudaOps::zeroInPlace(this->epochLossSum);
         const auto epochStart = std::chrono::steady_clock::now();
 
+        this->trainGradients.zeroInPlace();
+        int accumulatedExampleCount = 0;
+        int microbatchesSinceStep = 0;
+
         for (int batchStart = 0; batchStart < exampleCount; batchStart += batchSize) {
             int batchEnd = batchStart + batchSize;
             if (batchEnd > exampleCount) batchEnd = exampleCount;
-            const float batchCount = static_cast<float>(batchEnd - batchStart);
-
-            this->trainGradients.zeroInPlace();
+            const int batchCount = batchEnd - batchStart;
 
             std::vector<int> batchIndices;
-            batchIndices.reserve(static_cast<size_t>(batchEnd - batchStart));
+            batchIndices.reserve(static_cast<size_t>(batchCount));
             for (int index = batchStart; index < batchEnd; ++index)
                 batchIndices.push_back(index);
             std::stable_sort(batchIndices.begin(), batchIndices.end(), [&trainDataset](int left, int right) {
@@ -288,9 +299,14 @@ void CudaLanguageModel::train(const LanguageModelDataset& trainDataset, const La
             int packStart = 0;
             while (packStart < static_cast<int>(batchIndices.size())) {
                 const size_t segmentLength = trainDataset.examples[static_cast<size_t>(batchIndices[static_cast<size_t>(packStart)])].inputTokenIds.size();
+                int maxExamplesInPack = 1;
+                if (segmentLength > 0 && this->maxPackedColumns > 0)
+                    maxExamplesInPack = (std::max)(1, this->maxPackedColumns / static_cast<int>(segmentLength));
+
                 packPointers.clear();
                 int packEnd = packStart;
                 while (packEnd < static_cast<int>(batchIndices.size())
+                    && static_cast<int>(packPointers.size()) < maxExamplesInPack
                     && trainDataset.examples[static_cast<size_t>(batchIndices[static_cast<size_t>(packEnd)])].inputTokenIds.size() == segmentLength) {
                     packPointers.push_back(&trainDataset.examples[static_cast<size_t>(batchIndices[static_cast<size_t>(packEnd)])]);
                     ++packEnd;
@@ -299,8 +315,18 @@ void CudaLanguageModel::train(const LanguageModelDataset& trainDataset, const La
                 packStart = packEnd;
             }
 
-            this->trainGradients.scaleInPlace(1.0f / batchCount);
+            accumulatedExampleCount += batchCount;
+            ++microbatchesSinceStep;
+
+            const bool isLastBatch = batchEnd >= exampleCount;
+            if (microbatchesSinceStep < this->gradientAccumulationSteps && !isLastBatch)
+                continue;
+
+            this->trainGradients.scaleInPlace(1.0f / static_cast<float>(accumulatedExampleCount));
             this->applyGradients(this->trainGradients);
+            this->trainGradients.zeroInPlace();
+            accumulatedExampleCount = 0;
+            microbatchesSinceStep = 0;
         }
 
         CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaLanguageModel::train epoch synchronize");
@@ -336,7 +362,7 @@ void CudaLanguageModel::runTrainSmokeDemo(int vocabularySize, int embeddingDim, 
     device.adam = CudaAdam(host.optimizer.learningRate, host.optimizer.beta1, host.optimizer.beta2, host.optimizer.epsilon);
     device.ensureTrainState();
 
-    const int packBatchSize = 8;
+    const int packBatchSize = (std::max)(1, (std::min)(16, device.maxPackedColumns / sequenceLength));
     std::vector<LanguageModelExample> examples(static_cast<size_t>(packBatchSize));
     unsigned state = 103u;
     for (int exampleIndex = 0; exampleIndex < packBatchSize; ++exampleIndex) {
@@ -461,7 +487,14 @@ void CudaLanguageModel::forwardInto(const std::vector<int>& tokenIds, CudaMatrix
 
     CudaOps::embeddingGatherInto(this->tokenEmbeddingWeight, this->tokenIdsBuffer, tokenIds.size(), this->hidden);
 
+    if (this->activationCheckpointing) {
+        if (this->blockInputCheckpoints.size() != this->blocks.size())
+            this->blockInputCheckpoints.resize(this->blocks.size());
+    }
+
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+        if (this->activationCheckpointing)
+            CudaOps::copyInto(this->hidden, this->blockInputCheckpoints[blockIndex]);
         this->blocks[blockIndex].forward(this->hidden, this->normalized, segmentLength);
         CudaMatrix swapBuffer = std::move(this->hidden);
         this->hidden = std::move(this->normalized);

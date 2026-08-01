@@ -71,6 +71,7 @@ int main() {
     CudaLanguageModel::runSmokeDemo(128, 64, 32, 2, 4);
     CudaLanguageModel::runKvCacheSmokeDemo(128, 64, 32, 2, 4);
     CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);
+    CudaLanguageModel::runTrainSmokeDemo(1000, 64, 48, 2, 4);
 
     SmokeLog::section("sera train");
 
@@ -110,6 +111,7 @@ int main() {
     Matrix cpuLogits = model.forward(parityTokenIds);
 
     model.enableCuda();
+    model.enableCudaTrain();
     SmokeLog::result("model", "blocks=%zu  heads=%d  cuda=%s  train=%s",
         model.blocks.size(),
         model.blocks[0].attention.headCount,
@@ -124,8 +126,8 @@ int main() {
         SmokeLog::result("framework parity", "diff=%.2e", maximumDifference);
     }
 
-    // Device train is opt-in via enableCudaTrain(); packing is on for equal-length batches
-    model.train(trainDataset, testDataset, 5, 1, 64);
+    // segmented pack attn + grad accum=2 (Adam every 128 examples)
+    model.train(trainDataset, testDataset, 5, 1, 64, 2);
 
     SmokeLog::result("final", "trainLoss=%.6f", model.averageLoss(trainDataset));
     if (!testDataset.examples.empty())
