@@ -5,7 +5,7 @@
 #include "CudaKvCache.hpp"
 #include "CudaMatmul.hpp"
 
-/// <summary>device resident causal multi head attention forward with RoPE</summary>
+/// <summary>device resident causal multi head attention forward with RoPE and optional sparse mask</summary>
 class CudaCausalSelfAttention {
 public:
     CudaMatrix queryWeight;
@@ -18,6 +18,8 @@ public:
     int headDimension;
     int pairCount;
     int maximumPositionCount;
+    int windowSize;
+    int globalTokenCount;
 
     CudaMatrix query;
     CudaMatrix key;
@@ -53,6 +55,9 @@ public:
 
     /// <summary>compare prefill plus decode last token vs full forward last column</summary>
     static void runKvCacheSmokeDemo(int embeddingDim = 64, int headCount = 4, int sequenceLength = 32, int maximumPositionCount = 64);
+
+    /// <summary>compare CPU sparse window+global forward vs CUDA</summary>
+    static void runSparseSmokeDemo(int embeddingDim = 32, int headCount = 2, int sequenceLength = 16, int maximumPositionCount = 32, int windowSize = 4, int globalTokenCount = 2);
 
 private:
     void projectAndRotate(const CudaMatrix& input, int positionOffset);

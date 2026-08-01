@@ -52,6 +52,7 @@ int main() {
     CausalSelfAttention::runSparseComputeSmokeDemo(32, 2, 16, 32, 4, 2);
     CudaCausalSelfAttention::runSmokeDemo(64, 4, 32, 64);
     CudaCausalSelfAttention::runKvCacheSmokeDemo(64, 4, 32, 64);
+    CudaCausalSelfAttention::runSparseSmokeDemo(32, 2, 16, 32, 4, 2);
     CudaTransformerBlock::runSmokeDemo(64, 4, 32, 64);
     CudaLanguageModel::runSmokeDemo(128, 64, 32, 2, 4);
     CudaLanguageModel::runKvCacheSmokeDemo(128, 64, 32, 2, 4);

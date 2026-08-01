@@ -39,6 +39,9 @@ public:
     /// <summary>set scores keyIndex greater than queryIndex to large negative</summary>
     static void applyCausalMaskInPlace(CudaMatrix& scores);
 
+    /// <summary>causal window plus global token mask queryAbsolute = queryPositionStart + queryCol</summary>
+    static void applySparseAttentionMaskInPlace(CudaMatrix& scores, int windowSize, int globalTokenCount, int queryPositionStart = 0);
+
     /// <summary>column wise softmax writing into out</summary>
     static void softmaxInto(const CudaMatrix& logits, CudaMatrix& out);
 
@@ -62,6 +65,7 @@ private:
     __device__ static void runWriteHead(float* full, const float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim);
     __device__ static void runWriteColumnsInto(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount);
     __device__ static void runApplyCausalMaskInPlace(float* scores, int sequenceLength);
+    __device__ static void runApplySparseAttentionMaskInPlace(float* scores, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount);
     __device__ static void runSoftmaxInto(const float* logits, float* out, int rowCount, int columnCount);
     __device__ static void runRotaryRotateInPlace(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable);
     __device__ static void runEmbeddingGatherInto(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);
@@ -76,6 +80,7 @@ private:
     friend __global__ void CudaOpsWriteHeadEntry(float* full, const float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim);
     friend __global__ void CudaOpsWriteColumnsEntry(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount);
     friend __global__ void CudaOpsCausalMaskEntry(float* scores, int sequenceLength);
+    friend __global__ void CudaOpsSparseAttentionMaskEntry(float* scores, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount);
     friend __global__ void CudaOpsSoftmaxEntry(const float* logits, float* out, int rowCount, int columnCount);
     friend __global__ void CudaOpsRotaryRotateEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable);
     friend __global__ void CudaOpsEmbeddingGatherEntry(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);
@@ -93,6 +98,7 @@ __global__ void CudaOpsExtractHeadEntry(const float* full, float* head, int head
 __global__ void CudaOpsWriteHeadEntry(float* full, const float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim);
 __global__ void CudaOpsWriteColumnsEntry(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount);
 __global__ void CudaOpsCausalMaskEntry(float* scores, int sequenceLength);
+__global__ void CudaOpsSparseAttentionMaskEntry(float* scores, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount);
 __global__ void CudaOpsSoftmaxEntry(const float* logits, float* out, int rowCount, int columnCount);
 __global__ void CudaOpsRotaryRotateEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, const float* cosTable, const float* sinTable);
 __global__ void CudaOpsEmbeddingGatherEntry(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);

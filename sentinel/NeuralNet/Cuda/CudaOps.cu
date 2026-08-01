@@ -84,13 +84,30 @@ __device__ void CudaOps::runWriteColumnsInto(float* destination, const float* so
 }
 
 __device__ void CudaOps::runApplyCausalMaskInPlace(float* scores, int sequenceLength) {
-    const int elementCount = sequenceLength * sequenceLength;
+    CudaOps::runApplySparseAttentionMaskInPlace(scores, sequenceLength, sequenceLength, 0, sequenceLength, 0);
+}
+
+__device__ void CudaOps::runApplySparseAttentionMaskInPlace(float* scores, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount) {
+    const int elementCount = keyCount * queryCount;
     const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
     if (index >= elementCount) return;
 
-    const int keyIndex = index / sequenceLength;
-    const int queryIndex = index - keyIndex * sequenceLength;
-    if (keyIndex <= queryIndex) return;
+    const int keyIndex = index / queryCount;
+    const int queryIndex = index - keyIndex * queryCount;
+    const int absoluteQuery = queryPositionStart + queryIndex;
+    const int absoluteKey = keyIndex;
+
+    bool allowed = false;
+    if (absoluteKey <= absoluteQuery) {
+        if (absoluteKey < globalTokenCount)
+            allowed = true;
+        else if (windowSize <= 0)
+            allowed = true;
+        else if (absoluteKey >= absoluteQuery - windowSize + 1)
+            allowed = true;
+    }
+
+    if (allowed) return;
     scores[index] = -1.0e9f;
 }
 
@@ -192,6 +209,10 @@ __global__ void CudaOpsWriteColumnsEntry(float* destination, const float* source
 
 __global__ void CudaOpsCausalMaskEntry(float* scores, int sequenceLength) {
     CudaOps::runApplyCausalMaskInPlace(scores, sequenceLength);
+}
+
+__global__ void CudaOpsSparseAttentionMaskEntry(float* scores, int keyCount, int queryCount, int queryPositionStart, int windowSize, int globalTokenCount) {
+    CudaOps::runApplySparseAttentionMaskInPlace(scores, keyCount, queryCount, queryPositionStart, windowSize, globalTokenCount);
 }
 
 __global__ void CudaOpsSoftmaxEntry(const float* logits, float* out, int rowCount, int columnCount) {
@@ -326,13 +347,21 @@ void CudaOps::writeColumnsInto(CudaMatrix& destination, int destinationStartColu
 void CudaOps::applyCausalMaskInPlace(CudaMatrix& scores) {
     if (scores.empty()) throw std::invalid_argument("CudaOps::applyCausalMaskInPlace empty scores");
     if (scores.rows != scores.cols) throw std::invalid_argument("CudaOps::applyCausalMaskInPlace scores must be square");
-    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::applyCausalMaskInPlace no CUDA device");
+    CudaOps::applySparseAttentionMaskInPlace(scores, static_cast<int>(scores.rows), 0, 0);
+}
 
-    const int sequenceLength = static_cast<int>(scores.rows);
-    const int elementCount = sequenceLength * sequenceLength;
+void CudaOps::applySparseAttentionMaskInPlace(CudaMatrix& scores, int windowSize, int globalTokenCount, int queryPositionStart) {
+    if (scores.empty()) throw std::invalid_argument("CudaOps::applySparseAttentionMaskInPlace empty scores");
+    if (globalTokenCount < 0) throw std::invalid_argument("CudaOps::applySparseAttentionMaskInPlace globalTokenCount must be >= 0");
+    if (queryPositionStart < 0) throw std::invalid_argument("CudaOps::applySparseAttentionMaskInPlace queryPositionStart must be >= 0");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::applySparseAttentionMaskInPlace no CUDA device");
+
+    const int keyCount = static_cast<int>(scores.rows);
+    const int queryCount = static_cast<int>(scores.cols);
+    const int elementCount = keyCount * queryCount;
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsCausalMaskEntry<<<blockCount, CudaOps::threadCount>>>(scores.buffer.deviceData, sequenceLength);
-    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsCausalMaskEntry launch");
+    CudaOpsSparseAttentionMaskEntry<<<blockCount, CudaOps::threadCount>>>(scores.buffer.deviceData, keyCount, queryCount, queryPositionStart, windowSize, globalTokenCount);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSparseAttentionMaskEntry launch");
 }
 
 void CudaOps::softmaxInto(const CudaMatrix& logits, CudaMatrix& out) {

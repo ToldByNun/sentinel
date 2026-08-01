@@ -10,7 +10,7 @@
 #include <stdexcept>
 
 CudaCausalSelfAttention::CudaCausalSelfAttention()
-    : headCount(0), headDimension(0), pairCount(0), maximumPositionCount(0) {}
+    : headCount(0), headDimension(0), pairCount(0), maximumPositionCount(0), windowSize(0), globalTokenCount(0) {}
 
 void CudaCausalSelfAttention::uploadFrom(const CausalSelfAttention& host) {
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaCausalSelfAttention::uploadFrom no CUDA device");
@@ -23,6 +23,8 @@ void CudaCausalSelfAttention::uploadFrom(const CausalSelfAttention& host) {
     this->headDimension = host.headDimension;
     this->pairCount = host.rotaryEmbedding.pairCount;
     this->maximumPositionCount = host.rotaryEmbedding.maximumPositionCount;
+    this->windowSize = host.windowSize;
+    this->globalTokenCount = host.globalTokenCount;
 
     Matrix hostCos(static_cast<size_t>(this->maximumPositionCount), static_cast<size_t>(this->pairCount), 0.0f);
     Matrix hostSin(static_cast<size_t>(this->maximumPositionCount), static_cast<size_t>(this->pairCount), 0.0f);
@@ -65,7 +67,7 @@ void CudaCausalSelfAttention::attendFullSequence(CudaMatrix& out) {
 
         CudaMatrix::multiplyInto(this->keyHead, this->queryHead, this->scores, true, false);
         CudaOps::scaleInPlace(this->scores, scale);
-        CudaOps::applyCausalMaskInPlace(this->scores);
+        CudaOps::applySparseAttentionMaskInPlace(this->scores, this->windowSize, this->globalTokenCount, 0);
         CudaOps::softmaxInto(this->scores, this->probabilities);
         CudaMatrix::multiplyInto(this->valueHead, this->probabilities, this->attendedHead);
         CudaOps::writeHead(this->attended, headIndex, this->headDimension, this->attendedHead);
@@ -77,6 +79,7 @@ void CudaCausalSelfAttention::attendFullSequence(CudaMatrix& out) {
 void CudaCausalSelfAttention::attendCachedQuery(const CudaKvCache& cache, CudaMatrix& out) {
     const int usedLength = cache.length;
     const float scale = 1.0f / std::sqrt(static_cast<float>(this->headDimension));
+    const int queryPositionStart = usedLength - 1;
 
     this->attended.ensureSize(this->query.rows, this->query.cols);
     CudaOps::zeroInPlace(this->attended);
@@ -88,6 +91,7 @@ void CudaCausalSelfAttention::attendCachedQuery(const CudaKvCache& cache, CudaMa
 
         CudaMatrix::multiplyInto(this->keyHead, this->queryHead, this->scores, true, false);
         CudaOps::scaleInPlace(this->scores, scale);
+        CudaOps::applySparseAttentionMaskInPlace(this->scores, this->windowSize, this->globalTokenCount, queryPositionStart);
         CudaOps::softmaxInto(this->scores, this->probabilities);
         CudaMatrix::multiplyInto(this->valueHead, this->probabilities, this->attendedHead);
         CudaOps::writeHead(this->attended, headIndex, this->headDimension, this->attendedHead);
@@ -236,4 +240,68 @@ void CudaCausalSelfAttention::runKvCacheSmokeDemo(int embeddingDim, int headCoun
     }
 
     std::printf("CUDA Attention KV smoke: embed=%d heads=%d seq=%d  prefill+decode vs full last-col maxAbsDiff=%.6g  cacheLen=%d\n", embeddingDim, headCount, sequenceLength, maximumDifference, cache.length);
+}
+
+void CudaCausalSelfAttention::runSparseSmokeDemo(int embeddingDim, int headCount, int sequenceLength, int maximumPositionCount, int windowSize, int globalTokenCount) {
+    if (!CudaMatmul::isAvailable()) {
+        std::printf("CUDA Sparse Attention S4 smoke: no device\n");
+        return;
+    }
+    if (embeddingDim <= 0 || headCount <= 0 || sequenceLength < 2 || maximumPositionCount < sequenceLength)
+        throw std::invalid_argument("CudaCausalSelfAttention::runSparseSmokeDemo invalid dims");
+    if (windowSize <= 0 || globalTokenCount < 0)
+        throw std::invalid_argument("CudaCausalSelfAttention::runSparseSmokeDemo invalid sparse config");
+
+    CausalSelfAttention host = CausalSelfAttention::create(embeddingDim, headCount, maximumPositionCount, 29u, windowSize, globalTokenCount);
+    Matrix hostInput(static_cast<size_t>(embeddingDim), static_cast<size_t>(sequenceLength), 0.0f);
+    unsigned state = 101u;
+    for (size_t index = 0; index < hostInput.data.size(); ++index) {
+        state = state * 1664525u + 1013904223u;
+        hostInput.data[index] = (static_cast<float>(state >> 8) / 16777216.0f) * 2.0f - 1.0f;
+    }
+
+    CausalSelfAttentionCache hostCache;
+    Matrix hostOutput = host.forward(hostInput, hostCache);
+
+    CudaCausalSelfAttention device = CudaCausalSelfAttention::createFrom(host);
+    CudaMatrix deviceInput;
+    deviceInput.upload(hostInput);
+    CudaMatrix deviceOutput;
+    device.forward(deviceInput, deviceOutput);
+    Matrix deviceHostOutput = deviceOutput.download();
+
+    float forwardDifference = 0.0f;
+    for (size_t index = 0; index < hostOutput.data.size(); ++index)
+        forwardDifference = (std::max)(forwardDifference, std::fabs(hostOutput.data[index] - deviceHostOutput.data[index]));
+
+    Matrix hostPrefix(static_cast<size_t>(embeddingDim), static_cast<size_t>(sequenceLength - 1), 0.0f);
+    Matrix hostLast(static_cast<size_t>(embeddingDim), 1, 0.0f);
+    for (int row = 0; row < embeddingDim; ++row) {
+        for (int column = 0; column < sequenceLength - 1; ++column)
+            hostPrefix.at(static_cast<size_t>(row), static_cast<size_t>(column)) = hostInput.at(static_cast<size_t>(row), static_cast<size_t>(column));
+        hostLast.at(static_cast<size_t>(row), 0) = hostInput.at(static_cast<size_t>(row), static_cast<size_t>(sequenceLength - 1));
+    }
+
+    CudaMatrix devicePrefix;
+    CudaMatrix deviceLast;
+    devicePrefix.upload(hostPrefix);
+    deviceLast.upload(hostLast);
+
+    CudaKvCache cache;
+    CudaMatrix prefillOutput;
+    CudaMatrix decodeOutput;
+    device.prefill(devicePrefix, cache, prefillOutput);
+    device.decode(deviceLast, cache, decodeOutput);
+
+    Matrix decodeHost = decodeOutput.download();
+    float decodeDifference = 0.0f;
+    for (int row = 0; row < embeddingDim; ++row) {
+        const float fullValue = hostOutput.at(static_cast<size_t>(row), static_cast<size_t>(sequenceLength - 1));
+        const float decodeValue = decodeHost.at(static_cast<size_t>(row), 0);
+        decodeDifference = (std::max)(decodeDifference, std::fabs(fullValue - decodeValue));
+    }
+
+    std::printf("CUDA Sparse Attention S4 smoke: embed=%d heads=%d seq=%d W=%d G=%d\n", embeddingDim, headCount, sequenceLength, windowSize, globalTokenCount);
+    std::printf("  CPU vs CUDA forward maxAbsDiff=%.6g\n", forwardDifference);
+    std::printf("  sparse prefill+decode vs CPU last-col maxAbsDiff=%.6g  cacheLen=%d\n", decodeDifference, cache.length);
 }
