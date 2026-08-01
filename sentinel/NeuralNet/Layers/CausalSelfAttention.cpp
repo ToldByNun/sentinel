@@ -3,28 +3,54 @@
 #include "../Activations/Softmax.hpp"
 #include "../Initializers/UniformInit.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
-CausalSelfAttention::CausalSelfAttention(Matrix queryWeight, Matrix keyWeight, Matrix valueWeight, Matrix outputWeight, RotaryEmbedding rotaryEmbedding, int headCount)
-    : queryWeight(std::move(queryWeight)), keyWeight(std::move(keyWeight)), valueWeight(std::move(valueWeight)), outputWeight(std::move(outputWeight)), rotaryEmbedding(std::move(rotaryEmbedding)), headCount(headCount), headDimension(0) {
+CausalSelfAttention::CausalSelfAttention(Matrix queryWeight, Matrix keyWeight, Matrix valueWeight, Matrix outputWeight, RotaryEmbedding rotaryEmbedding, int headCount, int windowSize, int globalTokenCount)
+    : queryWeight(std::move(queryWeight)), keyWeight(std::move(keyWeight)), valueWeight(std::move(valueWeight)), outputWeight(std::move(outputWeight)), rotaryEmbedding(std::move(rotaryEmbedding)), headCount(headCount), headDimension(0), windowSize(windowSize), globalTokenCount(globalTokenCount) {
     if (this->headCount <= 0) throw std::invalid_argument("CausalSelfAttention headCount must be > 0");
     if (this->queryWeight.empty()) throw std::invalid_argument("CausalSelfAttention empty weights");
     if (static_cast<int>(this->queryWeight.rows) % this->headCount != 0) throw std::invalid_argument("CausalSelfAttention embeddingDim must be divisible by headCount");
+    if (this->globalTokenCount < 0) throw std::invalid_argument("CausalSelfAttention globalTokenCount must be >= 0");
     this->headDimension = static_cast<int>(this->queryWeight.rows) / this->headCount;
     if (this->headDimension % 2 != 0) throw std::invalid_argument("CausalSelfAttention headDimension must be even for RoPE");
 }
 
-CausalSelfAttention CausalSelfAttention::create(int embeddingDim, int headCount, int maximumPositionCount, unsigned seed) {
+CausalSelfAttention CausalSelfAttention::create(int embeddingDim, int headCount, int maximumPositionCount, unsigned seed, int windowSize, int globalTokenCount) {
     if (embeddingDim <= 0) throw std::invalid_argument("CausalSelfAttention::create embeddingDim must be > 0");
     if (headCount <= 0) throw std::invalid_argument("CausalSelfAttention::create headCount must be > 0");
+    if (maximumPositionCount <= 0) throw std::invalid_argument("CausalSelfAttention::create maximumPositionCount must be > 0");
     if (embeddingDim % headCount != 0) throw std::invalid_argument("CausalSelfAttention::create embeddingDim must be divisible by headCount");
     if ((embeddingDim / headCount) % 2 != 0) throw std::invalid_argument("CausalSelfAttention::create headDimension must be even for RoPE");
+    if (globalTokenCount < 0) throw std::invalid_argument("CausalSelfAttention::create globalTokenCount must be >= 0");
 
+    const int resolvedWindowSize = (windowSize <= 0) ? maximumPositionCount : windowSize;
     RotaryEmbedding rotaryEmbedding(embeddingDim / headCount, maximumPositionCount);
-    return CausalSelfAttention(UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed), UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 1u), UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 2u), UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 3u), std::move(rotaryEmbedding), headCount);
+    return CausalSelfAttention(UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed), UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 1u), UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 2u), UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 3u), std::move(rotaryEmbedding), headCount, resolvedWindowSize, globalTokenCount);
+}
+
+bool CausalSelfAttention::allowsKey(int queryIndex, int keyIndex, int windowSize, int globalTokenCount) {
+    if (keyIndex > queryIndex) return false;
+    if (keyIndex < globalTokenCount) return true;
+    if (windowSize <= 0) return true;
+    return keyIndex >= queryIndex - windowSize + 1;
+}
+
+void CausalSelfAttention::applyAttentionMaskInPlace(Matrix& scores, int windowSize, int globalTokenCount) {
+    if (scores.empty()) throw std::invalid_argument("CausalSelfAttention::applyAttentionMaskInPlace empty scores");
+    if (scores.rows != scores.cols) throw std::invalid_argument("CausalSelfAttention::applyAttentionMaskInPlace scores must be square");
+
+    const int sequenceLength = static_cast<int>(scores.rows);
+    for (int keyIndex = 0; keyIndex < sequenceLength; ++keyIndex) {
+        for (int queryIndex = 0; queryIndex < sequenceLength; ++queryIndex) {
+            if (CausalSelfAttention::allowsKey(queryIndex, keyIndex, windowSize, globalTokenCount)) continue;
+            scores.at(static_cast<size_t>(keyIndex), static_cast<size_t>(queryIndex)) = -1e9f;
+        }
+    }
 }
 
 void CausalSelfAttention::extractHeadInto(const Matrix& full, int headIndex, int headDimension, Matrix& head) {
@@ -90,12 +116,7 @@ Matrix CausalSelfAttention::forward(const Matrix& input, CausalSelfAttentionCach
 
         Matrix::gemm(cache.keyHead, cache.queryHead, scores, true, false);
         Matrix::scaleInPlace(scores, scale);
-        for (size_t keyIndex = 0; keyIndex < sequenceLength; ++keyIndex) {
-            for (size_t queryIndex = 0; queryIndex < sequenceLength; ++queryIndex) {
-                if (keyIndex <= queryIndex) continue;
-                scores.at(keyIndex, queryIndex) = -1e9f;
-            }
-        }
+        CausalSelfAttention::applyAttentionMaskInPlace(scores, this->windowSize, this->globalTokenCount);
 
         Softmax::applyInto(scores, probabilities);
         Matrix::gemm(cache.valueHead, probabilities, cache.attendedHead);
@@ -137,7 +158,7 @@ Matrix CausalSelfAttention::backward(const Matrix& outputGradient, CausalSelfAtt
 
         for (size_t keyIndex = 0; keyIndex < sequenceLength; ++keyIndex) {
             for (size_t queryIndex = 0; queryIndex < sequenceLength; ++queryIndex) {
-                if (keyIndex <= queryIndex) continue;
+                if (CausalSelfAttention::allowsKey(static_cast<int>(queryIndex), static_cast<int>(keyIndex), this->windowSize, this->globalTokenCount)) continue;
                 cache.scoreGradient.at(keyIndex, queryIndex) = 0.0f;
             }
         }
@@ -164,4 +185,55 @@ Matrix CausalSelfAttention::backward(const Matrix& outputGradient, CausalSelfAtt
     Matrix::gemm(this->valueWeight, cache.valueGradient, cache.temp, true, false);
     Matrix::addInPlace(cache.inputGradient, cache.temp);
     return cache.inputGradient;
+}
+
+void CausalSelfAttention::runSparseMaskSmokeDemo(int embeddingDim, int headCount, int sequenceLength, int maximumPositionCount, int windowSize, int globalTokenCount) {
+    if (embeddingDim <= 0 || headCount <= 0 || sequenceLength <= 0 || maximumPositionCount < sequenceLength)
+        throw std::invalid_argument("CausalSelfAttention::runSparseMaskSmokeDemo invalid dims");
+    if (windowSize <= 0 || globalTokenCount < 0)
+        throw std::invalid_argument("CausalSelfAttention::runSparseMaskSmokeDemo invalid sparse config");
+
+    Matrix hostInput(static_cast<size_t>(embeddingDim), static_cast<size_t>(sequenceLength), 0.0f);
+    unsigned state = 71u;
+    for (size_t index = 0; index < hostInput.data.size(); ++index) {
+        state = state * 1664525u + 1013904223u;
+        hostInput.data[index] = (static_cast<float>(state >> 8) / 16777216.0f) * 2.0f - 1.0f;
+    }
+
+    CausalSelfAttention dense = CausalSelfAttention::create(embeddingDim, headCount, maximumPositionCount, 11u);
+    CausalSelfAttention denseExplicit = CausalSelfAttention::create(embeddingDim, headCount, maximumPositionCount, 11u, maximumPositionCount, 0);
+    CausalSelfAttentionCache denseCache;
+    CausalSelfAttentionCache denseExplicitCache;
+    Matrix denseOutput = dense.forward(hostInput, denseCache);
+    Matrix denseExplicitOutput = denseExplicit.forward(hostInput, denseExplicitCache);
+
+    float denseParity = 0.0f;
+    for (size_t index = 0; index < denseOutput.data.size(); ++index)
+        denseParity = (std::max)(denseParity, std::fabs(denseOutput.data[index] - denseExplicitOutput.data[index]));
+
+    CausalSelfAttention sparse = CausalSelfAttention::create(embeddingDim, headCount, maximumPositionCount, 11u, windowSize, globalTokenCount);
+    CausalSelfAttentionCache sparseCache;
+    sparse.forward(hostInput, sparseCache);
+
+    float forbiddenProbabilityMass = 0.0f;
+    int forbiddenCount = 0;
+    int allowedCount = 0;
+    for (int headIndex = 0; headIndex < headCount; ++headIndex) {
+        const Matrix& probabilities = sparseCache.probabilities[static_cast<size_t>(headIndex)];
+        for (int keyIndex = 0; keyIndex < sequenceLength; ++keyIndex) {
+            for (int queryIndex = 0; queryIndex < sequenceLength; ++queryIndex) {
+                const float probability = probabilities.at(static_cast<size_t>(keyIndex), static_cast<size_t>(queryIndex));
+                if (CausalSelfAttention::allowsKey(queryIndex, keyIndex, windowSize, globalTokenCount)) {
+                    ++allowedCount;
+                    continue;
+                }
+                ++forbiddenCount;
+                forbiddenProbabilityMass = (std::max)(forbiddenProbabilityMass, std::fabs(probability));
+            }
+        }
+    }
+
+    std::printf("CPU Sparse Attention S1 smoke: embed=%d heads=%d seq=%d W=%d G=%d\n", embeddingDim, headCount, sequenceLength, windowSize, globalTokenCount);
+    std::printf("  dense default vs W=max G=0 maxAbsDiff=%.6g\n", denseParity);
+    std::printf("  forbiddenProbMax=%.6g  allowed=%d forbidden=%d\n", forbiddenProbabilityMass, allowedCount, forbiddenCount);
 }

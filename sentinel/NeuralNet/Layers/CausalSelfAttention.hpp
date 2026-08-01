@@ -38,6 +38,7 @@ public:
 
 /// <summary>
 /// multi head causal self attention with RoPE on Q and K
+/// optional block-sparse mask: sliding window plus first globalTokenCount keys
 /// input/output shape: embeddingDim x sequenceLength
 /// </summary>
 class CausalSelfAttention {
@@ -49,11 +50,13 @@ public:
     RotaryEmbedding rotaryEmbedding;
     int headCount;
     int headDimension;
+    int windowSize;
+    int globalTokenCount;
 
-    CausalSelfAttention(Matrix queryWeight, Matrix keyWeight, Matrix valueWeight, Matrix outputWeight, RotaryEmbedding rotaryEmbedding, int headCount);
+    CausalSelfAttention(Matrix queryWeight, Matrix keyWeight, Matrix valueWeight, Matrix outputWeight, RotaryEmbedding rotaryEmbedding, int headCount, int windowSize, int globalTokenCount);
 
-    /// <summary>create dim x dim weights headCount must divide embeddingDim</summary>
-    static CausalSelfAttention create(int embeddingDim, int headCount, int maximumPositionCount, unsigned seed = 11u);
+    /// <summary>create dim x dim weights headCount must divide embeddingDim windowSize&lt;=0 means full causal</summary>
+    static CausalSelfAttention create(int embeddingDim, int headCount, int maximumPositionCount, unsigned seed = 11u, int windowSize = -1, int globalTokenCount = 0);
 
     /// <summary>causal multi head attention writes intermediates into cache</summary>
     Matrix forward(const Matrix& input, CausalSelfAttentionCache& cache) const;
@@ -61,7 +64,16 @@ public:
     /// <summary>backprop through multi head attention fills weight gradients via out params</summary>
     Matrix backward(const Matrix& outputGradient, CausalSelfAttentionCache& cache, Matrix& queryWeightGradient, Matrix& keyWeightGradient, Matrix& valueWeightGradient, Matrix& outputWeightGradient) const;
 
+    /// <summary>smoke dense default vs sparse window+global mask probabilities</summary>
+    static void runSparseMaskSmokeDemo(int embeddingDim = 32, int headCount = 2, int sequenceLength = 16, int maximumPositionCount = 32, int windowSize = 4, int globalTokenCount = 2);
+
 private:
+    /// <summary>true when key may attend for this query under causal window/global rules</summary>
+    static bool allowsKey(int queryIndex, int keyIndex, int windowSize, int globalTokenCount);
+
+    /// <summary>set disallowed scores to large negative</summary>
+    static void applyAttentionMaskInPlace(Matrix& scores, int windowSize, int globalTokenCount);
+
     /// <summary>column wise softmax jacobian writing into scoreGradient</summary>
     static void softmaxBackwardInto(const Matrix& probabilities, const Matrix& probabilityGradient, Matrix& scoreGradient);
 

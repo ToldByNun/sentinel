@@ -4,6 +4,7 @@
 #include "NeuralNet/Cuda/CudaRMSNorm.hpp"
 #include "NeuralNet/Cuda/CudaCausalSelfAttention.hpp"
 #include "NeuralNet/Cuda/CudaTransformerBlock.hpp"
+#include "NeuralNet/Layers/CausalSelfAttention.hpp"
 #include "NeuralNet/Tokenizer/BPETokenizer.hpp"
 #include "NeuralNet/Data/DatasetSplit.hpp"
 #include "NeuralNet/Data/JsonlLoader.hpp"
@@ -46,6 +47,7 @@ int main() {
     CudaMatmul::runSmokeDemo(512);
     CudaFeedForward::runSmokeDemo(128, 64);
     CudaRMSNorm::runSmokeDemo(128, 64);
+    CausalSelfAttention::runSparseMaskSmokeDemo(32, 2, 16, 32, 4, 2);
     CudaCausalSelfAttention::runSmokeDemo(64, 4, 32, 64);
     CudaCausalSelfAttention::runKvCacheSmokeDemo(64, 4, 32, 64);
     CudaTransformerBlock::runSmokeDemo(64, 4, 32, 64);
