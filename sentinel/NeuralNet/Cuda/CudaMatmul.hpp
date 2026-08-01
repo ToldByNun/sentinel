@@ -152,6 +152,7 @@ private:
     friend class CudaFeedForward;
     friend class CudaRMSNorm;
     friend class CudaCausalSelfAttention;
+    friend class CudaFlashAttention;
     friend class CudaTransformerBlock;
     friend class CudaLanguageModel;
     friend class CudaAdam;

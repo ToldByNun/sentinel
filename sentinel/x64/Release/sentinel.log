@@ -1,13 +1,58 @@
-﻿  Compiling CUDA source file NeuralNet\Cuda\CudaLanguageModel.cu...
+﻿  Compiling CUDA source file NeuralNet\Cuda\CudaMatmul.cu...
+  Compiling CUDA source file NeuralNet\Cuda\CudaOps.cu...
+  Compiling CUDA source file NeuralNet\Cuda\CudaFlashAttention.cu...
+  Compiling CUDA source file NeuralNet\Cuda\CudaTransformerBlock.cu...
+  Compiling CUDA source file NeuralNet\Cuda\CudaFeedForward.cu...
+  Compiling CUDA source file NeuralNet\Cuda\CudaCausalSelfAttention.cu...
+  Compiling CUDA source file NeuralNet\Cuda\CudaLanguageModel.cu...
+  Compiling CUDA source file NeuralNet\Cuda\CudaKvCache.cu...
+  Compiling CUDA source file NeuralNet\Cuda\CudaAdam.cu...
+  Compiling CUDA source file NeuralNet\Cuda\CudaRMSNorm.cu...
+  
+  C:\Users\mikaj\source\repos\sentinel\sentinel>"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\nvcc.exe" -gencode=arch=compute_120,code=\"sm_120,compute_120\" --use-local-env -ccbin "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\HostX64\x64" -x cu   -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include" -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include"     --keep-dir x64\Release  -maxrregcount=0     --machine 64 --compile -cudart hybrid    -DNDEBUG -D_CONSOLE -D_UNICODE -DUNICODE -Xcompiler "/EHsc /W3 /nologo /O2 /FS   /MD " -Xcompiler "/Fdx64\Release\vc145.pdb" -o C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\CudaMatmul.cu.obj "C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaMatmul.cu" 
+  
+  C:\Users\mikaj\source\repos\sentinel\sentinel>"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\nvcc.exe" -gencode=arch=compute_120,code=\"sm_120,compute_120\" --use-local-env -ccbin "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\HostX64\x64" -x cu   -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include" -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include"     --keep-dir x64\Release  -maxrregcount=0     --machine 64 --compile -cudart hybrid    -DNDEBUG -D_CONSOLE -D_UNICODE -DUNICODE -Xcompiler "/EHsc /W3 /nologo /O2 /FS   /MD " -Xcompiler "/Fdx64\Release\vc145.pdb" -o C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\CudaOps.cu.obj "C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaOps.cu" 
+  
+  C:\Users\mikaj\source\repos\sentinel\sentinel>"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\nvcc.exe" -gencode=arch=compute_120,code=\"sm_120,compute_120\" --use-local-env -ccbin "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\HostX64\x64" -x cu   -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include" -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include"     --keep-dir x64\Release  -maxrregcount=0     --machine 64 --compile -cudart hybrid    -DNDEBUG -D_CONSOLE -D_UNICODE -DUNICODE -Xcompiler "/EHsc /W3 /nologo /O2 /FS   /MD " -Xcompiler "/Fdx64\Release\vc145.pdb" -o C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\CudaTransformerBlock.cu.obj "C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaTransformerBlock.cu" 
+  
+  C:\Users\mikaj\source\repos\sentinel\sentinel>"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\nvcc.exe" -gencode=arch=compute_120,code=\"sm_120,compute_120\" --use-local-env -ccbin "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\HostX64\x64" -x cu   -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include" -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include"     --keep-dir x64\Release  -maxrregcount=0     --machine 64 --compile -cudart hybrid    -DNDEBUG -D_CONSOLE -D_UNICODE -DUNICODE -Xcompiler "/EHsc /W3 /nologo /O2 /FS   /MD " -Xcompiler "/Fdx64\Release\vc145.pdb" -o C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\CudaRMSNorm.cu.obj "C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaRMSNorm.cu" 
+  
+  C:\Users\mikaj\source\repos\sentinel\sentinel>"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\nvcc.exe" -gencode=arch=compute_120,code=\"sm_120,compute_120\" --use-local-env -ccbin "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\HostX64\x64" -x cu   -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include" -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include"     --keep-dir x64\Release  -maxrregcount=0     --machine 64 --compile -cudart hybrid    -DNDEBUG -D_CONSOLE -D_UNICODE -DUNICODE -Xcompiler "/EHsc /W3 /nologo /O2 /FS   /MD " -Xcompiler "/Fdx64\Release\vc145.pdb" -o C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\CudaCausalSelfAttention.cu.obj "C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaCausalSelfAttention.cu" 
+  
+  C:\Users\mikaj\source\repos\sentinel\sentinel>"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\nvcc.exe" -gencode=arch=compute_120,code=\"sm_120,compute_120\" --use-local-env -ccbin "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\HostX64\x64" -x cu   -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include" -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include"     --keep-dir x64\Release  -maxrregcount=0     --machine 64 --compile -cudart hybrid    -DNDEBUG -D_CONSOLE -D_UNICODE -DUNICODE -Xcompiler "/EHsc /W3 /nologo /O2 /FS   /MD " -Xcompiler "/Fdx64\Release\vc145.pdb" -o C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\CudaKvCache.cu.obj "C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaKvCache.cu" 
+  
+  C:\Users\mikaj\source\repos\sentinel\sentinel>"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\nvcc.exe" -gencode=arch=compute_120,code=\"sm_120,compute_120\" --use-local-env -ccbin "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\HostX64\x64" -x cu   -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include" -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include"     --keep-dir x64\Release  -maxrregcount=0     --machine 64 --compile -cudart hybrid    -DNDEBUG -D_CONSOLE -D_UNICODE -DUNICODE -Xcompiler "/EHsc /W3 /nologo /O2 /FS   /MD " -Xcompiler "/Fdx64\Release\vc145.pdb" -o C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\CudaAdam.cu.obj "C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaAdam.cu" 
+  
+  C:\Users\mikaj\source\repos\sentinel\sentinel>"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\nvcc.exe" -gencode=arch=compute_120,code=\"sm_120,compute_120\" --use-local-env -ccbin "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\HostX64\x64" -x cu   -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include" -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include"     --keep-dir x64\Release  -maxrregcount=0     --machine 64 --compile -cudart hybrid    -DNDEBUG -D_CONSOLE -D_UNICODE -DUNICODE -Xcompiler "/EHsc /W3 /nologo /O2 /FS   /MD " -Xcompiler "/Fdx64\Release\vc145.pdb" -o C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\CudaFeedForward.cu.obj "C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaFeedForward.cu" 
+  
+  C:\Users\mikaj\source\repos\sentinel\sentinel>"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\nvcc.exe" -gencode=arch=compute_120,code=\"sm_120,compute_120\" --use-local-env -ccbin "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\HostX64\x64" -x cu   -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include" -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include"     --keep-dir x64\Release  -maxrregcount=0     --machine 64 --compile -cudart hybrid    -DNDEBUG -D_CONSOLE -D_UNICODE -DUNICODE -Xcompiler "/EHsc /W3 /nologo /O2 /FS   /MD " -Xcompiler "/Fdx64\Release\vc145.pdb" -o C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\CudaFlashAttention.cu.obj "C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaFlashAttention.cu" 
   
   C:\Users\mikaj\source\repos\sentinel\sentinel>"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin\nvcc.exe" -gencode=arch=compute_120,code=\"sm_120,compute_120\" --use-local-env -ccbin "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\HostX64\x64" -x cu   -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include" -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include"     --keep-dir x64\Release  -maxrregcount=0     --machine 64 --compile -cudart hybrid    -DNDEBUG -D_CONSOLE -D_UNICODE -DUNICODE -Xcompiler "/EHsc /W3 /nologo /O2 /FS   /MD " -Xcompiler "/Fdx64\Release\vc145.pdb" -o C:\Users\mikaj\source\repos\sentinel\sentinel\x64\Release\CudaLanguageModel.cu.obj "C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaLanguageModel.cu" 
+  CudaKvCache.cu
+  CudaFeedForward.cu
+  CudaAdam.cu
+  CudaFlashAttention.cu
+  CudaCausalSelfAttention.cu
+  CudaTransformerBlock.cu
+  CudaRMSNorm.cu
+  tmpxft_00006fe0_00000000-7_CudaKvCache.cudafe1.cpp
+  CudaOps.cu
+  tmpxft_000095ec_00000000-7_CudaFlashAttention.cudafe1.cpp
+  tmpxft_000073f0_00000000-7_CudaAdam.cudafe1.cpp
+  CudaMatmul.cu
+  tmpxft_000092a8_00000000-7_CudaFeedForward.cudafe1.cpp
   CudaLanguageModel.cu
-  tmpxft_00009320_00000000-7_CudaLanguageModel.cudafe1.cpp
+  tmpxft_00008f28_00000000-7_CudaCausalSelfAttention.cudafe1.cpp
+  tmpxft_000075bc_00000000-7_CudaTransformerBlock.cudafe1.cpp
+  tmpxft_0000961c_00000000-7_CudaRMSNorm.cudafe1.cpp
+  tmpxft_00007488_00000000-7_CudaOps.cudafe1.cpp
+  tmpxft_00007b28_00000000-7_CudaMatmul.cudafe1.cpp
+  tmpxft_00009198_00000000-7_CudaLanguageModel.cudafe1.cpp
   LanguageModel.cpp
   main.cpp
   Code wird generiert.
-  2 of 1831 functions ( 0.1%) were compiled, the rest were copied from previous compilation.
+  0 of 1831 functions ( 0.0%) were compiled, the rest were copied from previous compilation.
     0 functions were new in current compilation
-    3 functions had inline decision re-evaluated but remain unchanged
+    0 functions had inline decision re-evaluated but remain unchanged
   Codegenerierung ist abgeschlossen.
   sentinel.vcxproj -> C:\Users\mikaj\source\repos\sentinel\x64\Release\sentinel.exe
