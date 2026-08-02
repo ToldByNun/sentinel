@@ -226,6 +226,17 @@ public:
 
     std::vector<int> packedTargetTokenIds;
 
+    std::vector<int> packedMeanDivisors;
+
+    CudaIntBuffer meanDivisorBuffer;
+
+    static constexpr int padTargetId = -1;
+    static constexpr int padInputId = 0;
+    static constexpr int lengthBucketStep = 32;
+
+    /// <summary>round true length up to bucket (capped by maximumPositionCount)</summary>
+    static int lengthBucket(int trueLength, int maximumPositionCount);
+
     std::vector<CudaMatrix> blockInputCheckpoints;
 
     /// <summary>FP16 block input checkpoints when mixed precision is on</summary>
@@ -329,8 +340,13 @@ public:
 
 
     /// <summary>forward backward one packed batch of equal-length examples</summary>
-
     float accumulatePackedExamples(const LanguageModelExample* const* examples, int exampleCount, CudaLanguageModelGradients& gradients);
+
+    /// <summary>pack examples padded to bucketLength; pad targets ignored in CE</summary>
+    float accumulateBucketPackedExamples(const LanguageModelExample* const* examples, int exampleCount, int bucketLength, CudaLanguageModelGradients& gradients);
+
+    /// <summary>run packed train step from packedInput/Target/MeanDivisor host buffers</summary>
+    float flushPackedHostBuffers(int segmentLength, int exampleCount, CudaLanguageModelGradients& gradients);
 
 
 
@@ -349,6 +365,7 @@ public:
     /// <summary>
     /// train batches from one in-memory slice
     /// keeps Adam accum state across calls; flushRemainder forces a step at the end
+    /// packStats counters are accumulated (caller zeros per epoch)
     /// </summary>
     void trainOnExamples(
         const LanguageModelDataset& dataset,
@@ -357,7 +374,11 @@ public:
         int& accumulatedExampleCount,
         int& microbatchesSinceStep,
         int& processedExampleCount,
-        int& processedPredictionCount
+        int& processedPredictionCount,
+        int& packCount,
+        int& singleExamplePackCount,
+        long long& packedExampleSum,
+        long long& packedTokenSum
     );
 
     /// <summary>mean cross entropy over dataset examples on device</summary>

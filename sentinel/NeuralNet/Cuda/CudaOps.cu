@@ -999,16 +999,21 @@ __global__ void CudaOpsCaptureTargetLogitEntry(const float* logitChunk, const in
     const int column = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
     if (column >= tokenCount) return;
     const int targetId = targetTokenIds[column];
+    if (targetId < 0) return;
     if (targetId < rowStart) return;
     if (targetId >= rowStart + chunkRows) return;
     targetLogits[column] = logitChunk[(targetId - rowStart) * tokenCount + column];
 }
 
-__global__ void CudaOpsOnlineSoftmaxAddCeEntry(const float* targetLogits, const float* maximumLogits, const float* sumExp, float* lossSum, int tokenCount, float lossScale, int meanDivisor) {
+__global__ void CudaOpsOnlineSoftmaxAddCeEntry(const float* targetLogits, const float* maximumLogits, const float* sumExp, float* lossSum, int tokenCount, float lossScale, int meanDivisor, const int* targetTokenIds, int ignoreIndex, const int* perColumnMeanDivisor) {
     const int column = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
     if (column >= tokenCount) return;
+    if (targetTokenIds != nullptr && targetTokenIds[column] == ignoreIndex) return;
     if (!isfinite(targetLogits[column]) || !isfinite(maximumLogits[column]) || !isfinite(sumExp[column])) return;
-    const float inverseMeanDivisor = 1.0f / static_cast<float>(meanDivisor);
+    int divisor = meanDivisor;
+    if (perColumnMeanDivisor != nullptr) divisor = perColumnMeanDivisor[column];
+    if (divisor <= 0) return;
+    const float inverseMeanDivisor = 1.0f / static_cast<float>(divisor);
     float safeSum = sumExp[column];
     if (safeSum < 1e-20f) safeSum = 1e-20f;
     const float loss = (-targetLogits[column] + maximumLogits[column] + logf(safeSum)) * inverseMeanDivisor * lossScale;
@@ -1016,17 +1021,28 @@ __global__ void CudaOpsOnlineSoftmaxAddCeEntry(const float* targetLogits, const 
     atomicAdd(lossSum, loss);
 }
 
-__global__ void CudaOpsOnlineSoftmaxLogitGradChunkEntry(const float* logitChunk, const int* targetTokenIds, int rowStart, int chunkRows, int tokenCount, const float* maximumLogits, const float* sumExp, float* logitGradientChunk, float gradScale, int meanDivisor) {
+__global__ void CudaOpsOnlineSoftmaxLogitGradChunkEntry(const float* logitChunk, const int* targetTokenIds, int rowStart, int chunkRows, int tokenCount, const float* maximumLogits, const float* sumExp, float* logitGradientChunk, float gradScale, int meanDivisor, int ignoreIndex, const int* perColumnMeanDivisor) {
     const int elementCount = chunkRows * tokenCount;
     const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
     if (index >= elementCount) return;
 
     const int row = index / tokenCount;
     const int column = index - row * tokenCount;
+    if (targetTokenIds[column] == ignoreIndex) {
+        logitGradientChunk[index] = 0.0f;
+        return;
+    }
+
     float safeSum = sumExp[column];
     if (safeSum < 1e-20f) safeSum = 1e-20f;
     const float probability = expf(logitChunk[index] - maximumLogits[column]) / safeSum;
-    const float inverseMeanDivisor = 1.0f / static_cast<float>(meanDivisor);
+    int divisor = meanDivisor;
+    if (perColumnMeanDivisor != nullptr) divisor = perColumnMeanDivisor[column];
+    if (divisor <= 0) {
+        logitGradientChunk[index] = 0.0f;
+        return;
+    }
+    const float inverseMeanDivisor = 1.0f / static_cast<float>(divisor);
     float gradient = probability * inverseMeanDivisor;
     if (rowStart + row == targetTokenIds[column])
         gradient -= inverseMeanDivisor;
@@ -1115,29 +1131,60 @@ void CudaOps::captureTargetLogitFromChunk(const CudaMatrix& logitChunk, const Cu
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsCaptureTargetLogitEntry launch");
 }
 
-void CudaOps::onlineSoftmaxAddMeanCrossEntropy(const CudaMatrix& targetLogits, const CudaMatrix& maximumLogits, const CudaMatrix& sumExp, size_t tokenCount, CudaMatrix& lossSum, float lossScale, int meanDivisor) {
+void CudaOps::onlineSoftmaxAddMeanCrossEntropy(const CudaMatrix& targetLogits, const CudaMatrix& maximumLogits, const CudaMatrix& sumExp, size_t tokenCount, CudaMatrix& lossSum, float lossScale, int meanDivisor, const CudaIntBuffer* targetTokenIds, int ignoreIndex, const CudaIntBuffer* perColumnMeanDivisor) {
     if (tokenCount == 0) throw std::invalid_argument("CudaOps::onlineSoftmaxAddMeanCrossEntropy empty tokenCount");
     if (lossSum.rows != 1 || lossSum.cols != 1) throw std::invalid_argument("CudaOps::onlineSoftmaxAddMeanCrossEntropy lossSum must be 1x1");
     if (meanDivisor <= 0) meanDivisor = static_cast<int>(tokenCount);
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::onlineSoftmaxAddMeanCrossEntropy no CUDA device");
+    if (targetTokenIds != nullptr && tokenCount > targetTokenIds->capacityCount)
+        throw std::invalid_argument("CudaOps::onlineSoftmaxAddMeanCrossEntropy target capacity");
+    if (perColumnMeanDivisor != nullptr && tokenCount > perColumnMeanDivisor->capacityCount)
+        throw std::invalid_argument("CudaOps::onlineSoftmaxAddMeanCrossEntropy meanDivisor capacity");
 
     const int tokenCountInt = static_cast<int>(tokenCount);
     const int blockCount = (tokenCountInt + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsOnlineSoftmaxAddCeEntry<<<blockCount, CudaOps::threadCount>>>(targetLogits.buffer.deviceData, maximumLogits.buffer.deviceData, sumExp.buffer.deviceData, lossSum.buffer.deviceData, tokenCountInt, lossScale, meanDivisor);
+    CudaOpsOnlineSoftmaxAddCeEntry<<<blockCount, CudaOps::threadCount>>>(
+        targetLogits.buffer.deviceData,
+        maximumLogits.buffer.deviceData,
+        sumExp.buffer.deviceData,
+        lossSum.buffer.deviceData,
+        tokenCountInt,
+        lossScale,
+        meanDivisor,
+        targetTokenIds != nullptr ? targetTokenIds->deviceData : nullptr,
+        ignoreIndex,
+        perColumnMeanDivisor != nullptr ? perColumnMeanDivisor->deviceData : nullptr
+    );
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsOnlineSoftmaxAddCeEntry launch");
 }
 
-void CudaOps::onlineSoftmaxLogitGradientChunkInto(const CudaMatrix& logitChunk, const CudaIntBuffer& targetTokenIds, int rowStart, int chunkRows, size_t tokenCount, const CudaMatrix& maximumLogits, const CudaMatrix& sumExp, CudaMatrix& logitGradientChunk, float gradScale, int meanDivisor) {
+void CudaOps::onlineSoftmaxLogitGradientChunkInto(const CudaMatrix& logitChunk, const CudaIntBuffer& targetTokenIds, int rowStart, int chunkRows, size_t tokenCount, const CudaMatrix& maximumLogits, const CudaMatrix& sumExp, CudaMatrix& logitGradientChunk, float gradScale, int meanDivisor, int ignoreIndex, const CudaIntBuffer* perColumnMeanDivisor) {
     if (logitChunk.empty()) throw std::invalid_argument("CudaOps::onlineSoftmaxLogitGradientChunkInto empty logitChunk");
     if (chunkRows <= 0) throw std::invalid_argument("CudaOps::onlineSoftmaxLogitGradientChunkInto invalid chunkRows");
     if (meanDivisor <= 0) meanDivisor = static_cast<int>(tokenCount);
+    if (tokenCount > targetTokenIds.capacityCount) throw std::invalid_argument("CudaOps::onlineSoftmaxLogitGradientChunkInto target capacity");
+    if (perColumnMeanDivisor != nullptr && tokenCount > perColumnMeanDivisor->capacityCount)
+        throw std::invalid_argument("CudaOps::onlineSoftmaxLogitGradientChunkInto meanDivisor capacity");
     logitGradientChunk.ensureSize(static_cast<size_t>(chunkRows), tokenCount);
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::onlineSoftmaxLogitGradientChunkInto no CUDA device");
 
     const int tokenCountInt = static_cast<int>(tokenCount);
     const int elementCount = chunkRows * tokenCountInt;
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsOnlineSoftmaxLogitGradChunkEntry<<<blockCount, CudaOps::threadCount>>>(logitChunk.buffer.deviceData, targetTokenIds.deviceData, rowStart, chunkRows, tokenCountInt, maximumLogits.buffer.deviceData, sumExp.buffer.deviceData, logitGradientChunk.buffer.deviceData, gradScale, meanDivisor);
+    CudaOpsOnlineSoftmaxLogitGradChunkEntry<<<blockCount, CudaOps::threadCount>>>(
+        logitChunk.buffer.deviceData,
+        targetTokenIds.deviceData,
+        rowStart,
+        chunkRows,
+        tokenCountInt,
+        maximumLogits.buffer.deviceData,
+        sumExp.buffer.deviceData,
+        logitGradientChunk.buffer.deviceData,
+        gradScale,
+        meanDivisor,
+        ignoreIndex,
+        perColumnMeanDivisor != nullptr ? perColumnMeanDivisor->deviceData : nullptr
+    );
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsOnlineSoftmaxLogitGradChunkEntry launch");
 }
 

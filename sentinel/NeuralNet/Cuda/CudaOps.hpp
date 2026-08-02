@@ -114,11 +114,11 @@ public:
     /// <summary>if target id falls in chunk write that logit into targetLogits</summary>
     static void captureTargetLogitFromChunk(const CudaMatrix& logitChunk, const CudaIntBuffer& targetTokenIds, int rowStart, int chunkRows, size_t tokenCount, CudaMatrix& targetLogits);
 
-    /// <summary>add mean CE from online softmax stats into lossSum 1x1</summary>
-    static void onlineSoftmaxAddMeanCrossEntropy(const CudaMatrix& targetLogits, const CudaMatrix& maximumLogits, const CudaMatrix& sumExp, size_t tokenCount, CudaMatrix& lossSum, float lossScale, int meanDivisor);
+    /// <summary>add mean CE from online softmax stats into lossSum 1x1; skips ignoreIndex targets</summary>
+    static void onlineSoftmaxAddMeanCrossEntropy(const CudaMatrix& targetLogits, const CudaMatrix& maximumLogits, const CudaMatrix& sumExp, size_t tokenCount, CudaMatrix& lossSum, float lossScale, int meanDivisor, const CudaIntBuffer* targetTokenIds = nullptr, int ignoreIndex = -1, const CudaIntBuffer* perColumnMeanDivisor = nullptr);
 
-    /// <summary>write chunk logit grads (p - onehot) / meanDivisor * gradScale</summary>
-    static void onlineSoftmaxLogitGradientChunkInto(const CudaMatrix& logitChunk, const CudaIntBuffer& targetTokenIds, int rowStart, int chunkRows, size_t tokenCount, const CudaMatrix& maximumLogits, const CudaMatrix& sumExp, CudaMatrix& logitGradientChunk, float gradScale, int meanDivisor);
+    /// <summary>write chunk logit grads (p - onehot) / meanDivisor * gradScale; ignored targets get zero grad</summary>
+    static void onlineSoftmaxLogitGradientChunkInto(const CudaMatrix& logitChunk, const CudaIntBuffer& targetTokenIds, int rowStart, int chunkRows, size_t tokenCount, const CudaMatrix& maximumLogits, const CudaMatrix& sumExp, CudaMatrix& logitGradientChunk, float gradScale, int meanDivisor, int ignoreIndex = -1, const CudaIntBuffer* perColumnMeanDivisor = nullptr);
 
     /// <summary>sum gradient columns into biasGradient rows starting at rowStart</summary>
     static void sumColumnsAddIntoRows(const CudaMatrix& gradient, CudaMatrix& biasGradient, int rowStart);

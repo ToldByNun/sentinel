@@ -96,6 +96,7 @@ void CudaLanguageModel::ensureTrainWorkspaces() {
     this->epochLossSum.ensureSize(1, 1);
     this->tokenIdsBuffer.ensureCapacity(maxColumns);
     this->targetTokenIdsBuffer.ensureCapacity(maxColumns);
+    this->meanDivisorBuffer.ensureCapacity(maxColumns);
 
     // full vocab x seq tensors are not needed for chunked train head
     this->logits.free();
@@ -250,41 +251,30 @@ float CudaLanguageModel::accumulateExample(const LanguageModelExample& example, 
     return this->accumulatePackedExamples(&pointer, 1, gradients);
 }
 
-float CudaLanguageModel::accumulatePackedExamples(const LanguageModelExample* const* examples, int exampleCount, CudaLanguageModelGradients& gradients) {
-    if (examples == nullptr || exampleCount <= 0) throw std::invalid_argument("CudaLanguageModel::accumulatePackedExamples empty examples");
+float CudaLanguageModel::flushPackedHostBuffers(int segmentLength, int exampleCount, CudaLanguageModelGradients& gradients) {
+    if (segmentLength <= 0) throw std::invalid_argument("CudaLanguageModel::flushPackedHostBuffers segmentLength must be > 0");
+    if (exampleCount <= 0) throw std::invalid_argument("CudaLanguageModel::flushPackedHostBuffers exampleCount must be > 0");
     if (gradients.blocks.size() != this->blocks.size())
-        throw std::invalid_argument("CudaLanguageModel::accumulatePackedExamples gradients not initialized");
-    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaLanguageModel::accumulatePackedExamples no CUDA device");
-
-    const size_t segmentTokenCount = examples[0]->inputTokenIds.size();
-    if (segmentTokenCount == 0) throw std::invalid_argument("CudaLanguageModel::accumulatePackedExamples empty inputTokenIds");
-
-    this->packedInputTokenIds.clear();
-    this->packedTargetTokenIds.clear();
-    this->packedInputTokenIds.reserve(segmentTokenCount * static_cast<size_t>(exampleCount));
-    this->packedTargetTokenIds.reserve(segmentTokenCount * static_cast<size_t>(exampleCount));
-
-    for (int exampleIndex = 0; exampleIndex < exampleCount; ++exampleIndex) {
-        const LanguageModelExample& example = *examples[exampleIndex];
-        if (example.inputTokenIds.size() != segmentTokenCount)
-            throw std::invalid_argument("CudaLanguageModel::accumulatePackedExamples unequal input lengths");
-        if (example.targetTokenIds.size() != segmentTokenCount)
-            throw std::invalid_argument("CudaLanguageModel::accumulatePackedExamples target length mismatch");
-        this->packedInputTokenIds.insert(this->packedInputTokenIds.end(), example.inputTokenIds.begin(), example.inputTokenIds.end());
-        this->packedTargetTokenIds.insert(this->packedTargetTokenIds.end(), example.targetTokenIds.begin(), example.targetTokenIds.end());
-    }
+        throw std::invalid_argument("CudaLanguageModel::flushPackedHostBuffers gradients not initialized");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaLanguageModel::flushPackedHostBuffers no CUDA device");
 
     const size_t tokenCount = this->packedInputTokenIds.size();
-    const int segmentLength = static_cast<int>(segmentTokenCount);
-    const int exampleCountInPack = static_cast<int>(tokenCount / segmentTokenCount);
+    if (tokenCount == 0) throw std::invalid_argument("CudaLanguageModel::flushPackedHostBuffers empty pack");
+    if (tokenCount != this->packedTargetTokenIds.size() || tokenCount != this->packedMeanDivisors.size())
+        throw std::invalid_argument("CudaLanguageModel::flushPackedHostBuffers pack buffer size mismatch");
+    if (static_cast<size_t>(segmentLength) * static_cast<size_t>(exampleCount) != tokenCount)
+        throw std::invalid_argument("CudaLanguageModel::flushPackedHostBuffers tokenCount mismatch");
+
     this->forwardTrunkInto(this->packedInputTokenIds, segmentLength);
 
     this->targetTokenIdsBuffer.ensureCapacity(tokenCount);
     this->targetTokenIdsBuffer.copyFromHost(this->packedTargetTokenIds.data(), tokenCount);
+    this->meanDivisorBuffer.ensureCapacity(tokenCount);
+    this->meanDivisorBuffer.copyFromHost(this->packedMeanDivisors.data(), tokenCount);
 
     if (this->epochLossSum.rows != 1 || this->epochLossSum.cols != 1)
         this->epochLossSum.ensureSize(1, 1);
-    this->accumulateChunkedProjection(tokenCount, segmentLength, exampleCountInPack, gradients);
+    this->accumulateChunkedProjection(tokenCount, segmentLength, exampleCount, gradients);
 
     this->finalNorm.backward(this->hiddenGradient, this->normInputGradientScratch, this->finalNormGammaGradient);
     CudaOps::addInPlace(gradients.finalNormGamma, this->finalNormGammaGradient);
@@ -303,6 +293,82 @@ float CudaLanguageModel::accumulatePackedExamples(const LanguageModelExample* co
 
     CudaOps::embeddingScatterAddInto(gradients.tokenEmbedding, this->tokenIdsBuffer, tokenCount, this->hiddenGradient);
     return 0.0f;
+}
+
+float CudaLanguageModel::accumulatePackedExamples(const LanguageModelExample* const* examples, int exampleCount, CudaLanguageModelGradients& gradients) {
+    if (examples == nullptr || exampleCount <= 0) throw std::invalid_argument("CudaLanguageModel::accumulatePackedExamples empty examples");
+
+    const size_t segmentTokenCount = examples[0]->inputTokenIds.size();
+    if (segmentTokenCount == 0) throw std::invalid_argument("CudaLanguageModel::accumulatePackedExamples empty inputTokenIds");
+
+    this->packedInputTokenIds.clear();
+    this->packedTargetTokenIds.clear();
+    this->packedMeanDivisors.clear();
+    this->packedInputTokenIds.reserve(segmentTokenCount * static_cast<size_t>(exampleCount));
+    this->packedTargetTokenIds.reserve(segmentTokenCount * static_cast<size_t>(exampleCount));
+    this->packedMeanDivisors.reserve(segmentTokenCount * static_cast<size_t>(exampleCount));
+
+    for (int exampleIndex = 0; exampleIndex < exampleCount; ++exampleIndex) {
+        const LanguageModelExample& example = *examples[exampleIndex];
+        if (example.inputTokenIds.size() != segmentTokenCount)
+            throw std::invalid_argument("CudaLanguageModel::accumulatePackedExamples unequal input lengths");
+        if (example.targetTokenIds.size() != segmentTokenCount)
+            throw std::invalid_argument("CudaLanguageModel::accumulatePackedExamples target length mismatch");
+        this->packedInputTokenIds.insert(this->packedInputTokenIds.end(), example.inputTokenIds.begin(), example.inputTokenIds.end());
+        this->packedTargetTokenIds.insert(this->packedTargetTokenIds.end(), example.targetTokenIds.begin(), example.targetTokenIds.end());
+        for (size_t position = 0; position < segmentTokenCount; ++position)
+            this->packedMeanDivisors.push_back(static_cast<int>(segmentTokenCount));
+    }
+
+    return this->flushPackedHostBuffers(static_cast<int>(segmentTokenCount), exampleCount, gradients);
+}
+
+float CudaLanguageModel::accumulateBucketPackedExamples(const LanguageModelExample* const* examples, int exampleCount, int bucketLength, CudaLanguageModelGradients& gradients) {
+    if (examples == nullptr || exampleCount <= 0) throw std::invalid_argument("CudaLanguageModel::accumulateBucketPackedExamples empty examples");
+    if (bucketLength <= 0) throw std::invalid_argument("CudaLanguageModel::accumulateBucketPackedExamples bucketLength must be > 0");
+    if (bucketLength > this->maximumPositionCount)
+        throw std::invalid_argument("CudaLanguageModel::accumulateBucketPackedExamples bucket exceeds maximumPositionCount");
+
+    this->packedInputTokenIds.clear();
+    this->packedTargetTokenIds.clear();
+    this->packedMeanDivisors.clear();
+    this->packedInputTokenIds.reserve(static_cast<size_t>(bucketLength) * static_cast<size_t>(exampleCount));
+    this->packedTargetTokenIds.reserve(static_cast<size_t>(bucketLength) * static_cast<size_t>(exampleCount));
+    this->packedMeanDivisors.reserve(static_cast<size_t>(bucketLength) * static_cast<size_t>(exampleCount));
+
+    for (int exampleIndex = 0; exampleIndex < exampleCount; ++exampleIndex) {
+        const LanguageModelExample& example = *examples[exampleIndex];
+        const int trueLength = static_cast<int>(example.inputTokenIds.size());
+        if (trueLength <= 0) throw std::invalid_argument("CudaLanguageModel::accumulateBucketPackedExamples empty example");
+        if (static_cast<int>(example.targetTokenIds.size()) != trueLength)
+            throw std::invalid_argument("CudaLanguageModel::accumulateBucketPackedExamples target length mismatch");
+        if (trueLength > bucketLength)
+            throw std::invalid_argument("CudaLanguageModel::accumulateBucketPackedExamples example longer than bucket");
+        if (CudaLanguageModel::lengthBucket(trueLength, this->maximumPositionCount) != bucketLength)
+            throw std::invalid_argument("CudaLanguageModel::accumulateBucketPackedExamples bucket mismatch");
+
+        this->packedInputTokenIds.insert(this->packedInputTokenIds.end(), example.inputTokenIds.begin(), example.inputTokenIds.end());
+        this->packedTargetTokenIds.insert(this->packedTargetTokenIds.end(), example.targetTokenIds.begin(), example.targetTokenIds.end());
+        for (int position = trueLength; position < bucketLength; ++position) {
+            this->packedInputTokenIds.push_back(CudaLanguageModel::padInputId);
+            this->packedTargetTokenIds.push_back(CudaLanguageModel::padTargetId);
+        }
+        for (int position = 0; position < bucketLength; ++position)
+            this->packedMeanDivisors.push_back(trueLength);
+    }
+
+    return this->flushPackedHostBuffers(bucketLength, exampleCount, gradients);
+}
+
+int CudaLanguageModel::lengthBucket(int trueLength, int maximumPositionCount) {
+    if (maximumPositionCount <= 0) throw std::invalid_argument("CudaLanguageModel::lengthBucket maximumPositionCount must be > 0");
+    if (trueLength <= 0) return (std::min)(CudaLanguageModel::lengthBucketStep, maximumPositionCount);
+    if (trueLength > maximumPositionCount) trueLength = maximumPositionCount;
+
+    int bucket = ((trueLength + CudaLanguageModel::lengthBucketStep - 1) / CudaLanguageModel::lengthBucketStep) * CudaLanguageModel::lengthBucketStep;
+    if (bucket > maximumPositionCount) bucket = maximumPositionCount;
+    if (bucket < trueLength) bucket = trueLength;
+    return bucket;
 }
 
 void CudaLanguageModel::forwardTrunkInto(const std::vector<int>& tokenIds, int segmentLength) {
@@ -384,17 +450,19 @@ void CudaLanguageModel::accumulateChunkedProjection(size_t tokenCount, int segme
         CudaOps::captureTargetLogitFromChunk(this->logitChunk, this->targetTokenIdsBuffer, rowStart, chunkRows, tokenCount, this->targetLogits);
     }
 
-    // mean over each example length (segmentLength) => same units as averageLoss (sum of per-example means)
+    // mean over each example's true length; pad targets (padTargetId) are ignored
     CudaOps::onlineSoftmaxAddMeanCrossEntropy(
         this->targetLogits, this->onlineSoftmaxMax, this->onlineSoftmaxSumExp, tokenCount,
-        this->epochLossSum, 1.0f, segmentLength);
+        this->epochLossSum, 1.0f, segmentLength,
+        &this->targetTokenIdsBuffer, CudaLanguageModel::padTargetId, &this->meanDivisorBuffer);
 
     for (int rowStart = 0; rowStart < vocabularySize; rowStart += chunkCap) {
         const int chunkRows = (std::min)(chunkCap, vocabularySize - rowStart);
         projectChunk(rowStart, chunkRows);
         CudaOps::onlineSoftmaxLogitGradientChunkInto(
             this->logitChunk, this->targetTokenIdsBuffer, rowStart, chunkRows, tokenCount,
-            this->onlineSoftmaxMax, this->onlineSoftmaxSumExp, this->logitGradientChunk, gradScale, segmentLength);
+            this->onlineSoftmaxMax, this->onlineSoftmaxSumExp, this->logitGradientChunk, gradScale, segmentLength,
+            CudaLanguageModel::padTargetId, &this->meanDivisorBuffer);
 
         this->projectionWeightGradientChunk.ensureSize(static_cast<size_t>(chunkRows), static_cast<size_t>(embeddingDim));
         const bool previousAmp = CudaAmp::preferMixedPrecision;
@@ -532,7 +600,11 @@ void CudaLanguageModel::trainOnExamples(
     int& accumulatedExampleCount,
     int& microbatchesSinceStep,
     int& processedExampleCount,
-    int& processedPredictionCount
+    int& processedPredictionCount,
+    int& packCount,
+    int& singleExamplePackCount,
+    long long& packedExampleSum,
+    long long& packedTokenSum
 ) {
     if (batchSize <= 0) batchSize = 32;
     if (this->gradientAccumulationSteps <= 0) this->gradientAccumulationSteps = 1;
@@ -562,20 +634,34 @@ void CudaLanguageModel::trainOnExamples(
 
         int packStart = 0;
         while (packStart < static_cast<int>(batchIndices.size())) {
-            const size_t segmentLength = dataset.examples[static_cast<size_t>(batchIndices[static_cast<size_t>(packStart)])].inputTokenIds.size();
+            const int trueLength = static_cast<int>(
+                dataset.examples[static_cast<size_t>(batchIndices[static_cast<size_t>(packStart)])].inputTokenIds.size()
+            );
+            const int bucketLength = CudaLanguageModel::lengthBucket(trueLength, this->maximumPositionCount);
             int maxExamplesInPack = 1;
-            if (segmentLength > 0 && this->maxPackedColumns > 0)
-                maxExamplesInPack = (std::max)(1, this->maxPackedColumns / static_cast<int>(segmentLength));
+            if (bucketLength > 0 && this->maxPackedColumns > 0)
+                maxExamplesInPack = (std::max)(1, this->maxPackedColumns / bucketLength);
 
             packPointers.clear();
             int packEnd = packStart;
             while (packEnd < static_cast<int>(batchIndices.size())
-                && static_cast<int>(packPointers.size()) < maxExamplesInPack
-                && dataset.examples[static_cast<size_t>(batchIndices[static_cast<size_t>(packEnd)])].inputTokenIds.size() == segmentLength) {
+                && static_cast<int>(packPointers.size()) < maxExamplesInPack) {
+                const int candidateLength = static_cast<int>(
+                    dataset.examples[static_cast<size_t>(batchIndices[static_cast<size_t>(packEnd)])].inputTokenIds.size()
+                );
+                if (CudaLanguageModel::lengthBucket(candidateLength, this->maximumPositionCount) != bucketLength)
+                    break;
                 packPointers.push_back(&dataset.examples[static_cast<size_t>(batchIndices[static_cast<size_t>(packEnd)])]);
                 ++packEnd;
             }
-            this->accumulatePackedExamples(packPointers.data(), static_cast<int>(packPointers.size()), this->trainGradients);
+
+            const int packExampleCount = static_cast<int>(packPointers.size());
+            ++packCount;
+            if (packExampleCount <= 1) ++singleExamplePackCount;
+            packedExampleSum += packExampleCount;
+            packedTokenSum += static_cast<long long>(packExampleCount) * static_cast<long long>(bucketLength);
+
+            this->accumulateBucketPackedExamples(packPointers.data(), packExampleCount, bucketLength, this->trainGradients);
             packStart = packEnd;
         }
 
@@ -620,7 +706,23 @@ void CudaLanguageModel::train(const LanguageModelDataset& trainDataset, const La
         int microbatchesSinceStep = 0;
         int processedExampleCount = 0;
         int processedPredictionCount = 0;
-        this->trainOnExamples(trainDataset, batchSize, true, accumulatedExampleCount, microbatchesSinceStep, processedExampleCount, processedPredictionCount);
+        int packCount = 0;
+        int singleExamplePackCount = 0;
+        long long packedExampleSum = 0;
+        long long packedTokenSum = 0;
+        this->trainOnExamples(
+            trainDataset,
+            batchSize,
+            true,
+            accumulatedExampleCount,
+            microbatchesSinceStep,
+            processedExampleCount,
+            processedPredictionCount,
+            packCount,
+            singleExamplePackCount,
+            packedExampleSum,
+            packedTokenSum
+        );
 
         CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaLanguageModel::train epoch synchronize");
         const auto epochEnd = std::chrono::steady_clock::now();
@@ -641,6 +743,14 @@ void CudaLanguageModel::train(const LanguageModelDataset& trainDataset, const La
         if (!testDataset.examples.empty()) {
             const float testLoss = this->averageLoss(testDataset);
             std::printf("  testLoss=%.6f", testLoss);
+        }
+
+        if (packCount > 0) {
+            const double avgPackExamples = static_cast<double>(packedExampleSum) / static_cast<double>(packCount);
+            const double avgPackTokens = static_cast<double>(packedTokenSum) / static_cast<double>(packCount);
+            const double size1Percent = 100.0 * static_cast<double>(singleExamplePackCount) / static_cast<double>(packCount);
+            std::printf("\n  pack  packs=%d  avgEx=%.2f  avgTok=%.0f  size1=%.1f%%",
+                packCount, avgPackExamples, avgPackTokens, size1Percent);
         }
 
         std::printf("\n");
@@ -669,12 +779,28 @@ void CudaLanguageModel::train(LanguageModelChunkSource& source, int epochs, int 
         int microbatchesSinceStep = 0;
         int processedExampleCount = 0;
         int processedPredictionCount = 0;
+        int packCount = 0;
+        int singleExamplePackCount = 0;
+        long long packedExampleSum = 0;
+        long long packedTokenSum = 0;
 
         source.rewindTrain();
         for (;;) {
             const bool more = source.nextTrainChunk(chunk);
             if (chunk.examples.empty()) break;
-            this->trainOnExamples(chunk, batchSize, !more, accumulatedExampleCount, microbatchesSinceStep, processedExampleCount, processedPredictionCount);
+            this->trainOnExamples(
+                chunk,
+                batchSize,
+                !more,
+                accumulatedExampleCount,
+                microbatchesSinceStep,
+                processedExampleCount,
+                processedPredictionCount,
+                packCount,
+                singleExamplePackCount,
+                packedExampleSum,
+                packedTokenSum
+            );
             if (!more) break;
         }
         if (accumulatedExampleCount > 0) {
@@ -703,6 +829,14 @@ void CudaLanguageModel::train(LanguageModelChunkSource& source, int epochs, int 
         if (!testDataset.examples.empty()) {
             const float testLoss = this->averageLoss(testDataset);
             std::printf("  testLoss=%.6f", testLoss);
+        }
+
+        if (packCount > 0) {
+            const double avgPackExamples = static_cast<double>(packedExampleSum) / static_cast<double>(packCount);
+            const double avgPackTokens = static_cast<double>(packedTokenSum) / static_cast<double>(packCount);
+            const double size1Percent = 100.0 * static_cast<double>(singleExamplePackCount) / static_cast<double>(packCount);
+            std::printf("\n  pack  packs=%d  avgEx=%.2f  avgTok=%.0f  size1=%.1f%%",
+                packCount, avgPackExamples, avgPackTokens, size1Percent);
         }
 
         std::printf("\n");
