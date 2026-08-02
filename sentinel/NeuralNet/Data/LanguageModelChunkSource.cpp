@@ -2,6 +2,7 @@
 
 #include "../Utils/TextUtil.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -153,8 +154,29 @@ void LanguageModelChunkSource::prepareTestReservoir() {
     this->materialize();
 }
 
+void LanguageModelChunkSource::sortTrainByLength() {
+    if (!this->materialized) return;
+
+    std::stable_sort(
+        this->trainExamples.begin(),
+        this->trainExamples.end(),
+        [](const LanguageModelExample& left, const LanguageModelExample& right) {
+            return left.inputTokenIds.size() < right.inputTokenIds.size();
+        }
+    );
+}
+
 void LanguageModelChunkSource::rewindTrain() {
+    this->sortTrainByLength();
     this->trainCursor = 0;
+}
+
+void LanguageModelChunkSource::fillTrainDataset(LanguageModelDataset& out) const {
+    if (!this->materialized) throw std::logic_error("LanguageModelChunkSource::fillTrainDataset call materialize() first");
+    if (this->tokenizer == nullptr) throw std::logic_error("LanguageModelChunkSource::fillTrainDataset tokenizer not set");
+
+    out.examples = this->trainExamples;
+    out.vocabularySize = this->tokenizer->vocabSize();
 }
 
 bool LanguageModelChunkSource::nextTrainChunk(LanguageModelDataset& out) {

@@ -767,7 +767,7 @@ void CudaLanguageModel::train(LanguageModelChunkSource& source, int epochs, int 
     this->ensureTrainState();
     this->ensureTrainWorkspaces();
 
-    LanguageModelDataset chunk;
+    LanguageModelDataset epochDataset;
     const LanguageModelDataset& testDataset = source.testDataset();
 
     for (int epoch = 0; epoch < epochs; ++epoch) {
@@ -785,13 +785,13 @@ void CudaLanguageModel::train(LanguageModelChunkSource& source, int epochs, int 
         long long packedTokenSum = 0;
 
         source.rewindTrain();
-        for (;;) {
-            const bool more = source.nextTrainChunk(chunk);
-            if (chunk.examples.empty()) break;
+        LanguageModelDataset epochDataset;
+        source.fillTrainDataset(epochDataset);
+        if (!epochDataset.examples.empty()) {
             this->trainOnExamples(
-                chunk,
+                epochDataset,
                 batchSize,
-                !more,
+                true,
                 accumulatedExampleCount,
                 microbatchesSinceStep,
                 processedExampleCount,
@@ -801,7 +801,6 @@ void CudaLanguageModel::train(LanguageModelChunkSource& source, int epochs, int 
                 packedExampleSum,
                 packedTokenSum
             );
-            if (!more) break;
         }
         if (accumulatedExampleCount > 0) {
             this->applyGradients(this->trainGradients, 1.0f / static_cast<float>(accumulatedExampleCount));

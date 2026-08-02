@@ -469,7 +469,6 @@ void LanguageModel::train(LanguageModelChunkSource& source, int epochs, int logE
         threadGradients[static_cast<size_t>(threadIndex)] = LanguageModelGradients::zerosFrom(*this);
 
     LanguageModelGradients merged = LanguageModelGradients::zerosFrom(*this);
-    LanguageModelDataset chunk;
     const LanguageModelDataset& testDataset = source.testDataset();
 
     for (int epoch = 0; epoch < epochs; ++epoch) {
@@ -479,13 +478,12 @@ void LanguageModel::train(LanguageModelChunkSource& source, int epochs, int logE
         int processedPredictionCount = 0;
 
         source.rewindTrain();
-        for (;;) {
-            const bool more = source.nextTrainChunk(chunk);
-            if (chunk.examples.empty()) break;
-            epochLoss += this->trainOnExamples(chunk, batchSize, threadGradients, threadCaches, merged);
-            processedExampleCount += chunk.size();
-            processedPredictionCount += chunk.totalPredictionCount();
-            if (!more) break;
+        LanguageModelDataset epochDataset;
+        source.fillTrainDataset(epochDataset);
+        if (!epochDataset.examples.empty()) {
+            epochLoss += this->trainOnExamples(epochDataset, batchSize, threadGradients, threadCaches, merged);
+            processedExampleCount += epochDataset.size();
+            processedPredictionCount += epochDataset.totalPredictionCount();
         }
 
         if (epoch % logEveryEpochs != 0) continue;

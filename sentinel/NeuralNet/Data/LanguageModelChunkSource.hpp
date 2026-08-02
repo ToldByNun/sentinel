@@ -39,8 +39,14 @@ public:
     /// <summary>alias for materialize (fills testDataset)</summary>
     void prepareTestReservoir();
 
-    /// <summary>seek to start for a new train epoch</summary>
+    /// <summary>seek to start for a new train epoch; length-sorts materialized examples</summary>
     void rewindTrain();
+
+    /// <summary>stable-sort materialized train examples by sequence length (short to long)</summary>
+    void sortTrainByLength();
+
+    /// <summary>copy all materialized train examples into out (call after rewindTrain for sorted order)</summary>
+    void fillTrainDataset(LanguageModelDataset& out) const;
 
     /// <summary>
     /// fill out with up to chunkExampleCount train examples from the materialized cache
