@@ -120,6 +120,9 @@
     <ClCompile Include="NeuralNet\Data\JsonlLoader.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
+    <ClCompile Include="NeuralNet\Data\TextRowReader.cpp">
+      <Filter>Quelldateien</Filter>
+    </ClCompile>
     <ClCompile Include="NeuralNet\Data\LanguageModelChunkSource.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
@@ -237,6 +240,9 @@
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Data\JsonlLoader.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Data\TextRowReader.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Data\LanguageModelChunkSource.hpp">
