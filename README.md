@@ -83,14 +83,16 @@ model.train(trainSet, testSet, epochs, logEvery, batchSize, gradAccum);
 
 ### Consumer VRAM proof (RTX 5070 Ti 16 GB)
 
-`CudaLanguageModel::runConsumerVramDemo()` — vocab 8k, embed 256, pos 512, 4 blocks / 8 heads, flash, int8 Adam, auto pack budget, loss scale on:
+Measured with `runScale100M` in `main.cpp` (SERA scale JSONL, Release|x64) — full-train causal LM, **no LoRA**:
 
 | | |
 |---|---|
-| maxPackCols | 16384 (auto, free≈15 GiB × 0.55) |
-| setup VRAM | ~460 MiB (weights + workspaces, FP16 checkpoints) |
-| after 1 epoch | free still ~11 GiB (Adam moments grow lazily) |
-| throughput | ~66k tok/s (epoch, packed) |
-| pack | packs=47 avgTok≈12.5k size1=0% |
+| model | **97.32M** params (tied embed), vocab 16k, d=768, L=12, H=12, maxTok=512 (~371 MiB FP32 weights) |
+| flags | activation ckpt, FP16 AMP, int8 Adam, flash attention, CUDA graph |
+| VRAM after setup | free **~13.0 GiB** / 15.9 GiB total; auto `maxPackCols`≈3840 |
+| probe | **~21.8k** tok/s (seq=256, pack≤32) |
+| 1 epoch | trainLoss 6.76, testLoss 7.50, **~19.0k** tok/s, ~603 s |
+| data | 37 989 train / 512 test / ~11.4M prediction positions |
 
-Fits comfortably on 16 GB; setup footprint leaves headroom for larger packs/models.
+Fits on a 16 GB consumer card with several GiB free after setup. Smaller footprint smoke: `CudaLanguageModel::runConsumerVramDemo()` (8k/256/4L — ~66k tok/s packed).
+

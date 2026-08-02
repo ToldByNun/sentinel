@@ -1,6 +1,7 @@
 #include "LanguageModelChunkSource.hpp"
 
 #include "../Utils/TextUtil.hpp"
+#include "../Utils/SmokeLog.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -113,6 +114,7 @@ std::vector<std::string> LanguageModelChunkSource::prepareTokenizerSample(int ma
 
     std::vector<std::string> texts;
     texts.reserve(static_cast<size_t>(maxRows));
+    const auto start = std::chrono::steady_clock::now();
 
     while (static_cast<int>(texts.size()) < maxRows && this->refillPendingRows()) {
         const size_t rowIndex = this->pendingBaseIndex + this->pendingCursor;
@@ -121,7 +123,19 @@ std::vector<std::string> LanguageModelChunkSource::prepareTokenizerSample(int ma
 
         if (!this->isTrainRow(rowIndex)) continue;
         texts.push_back(this->truncateText(row.text));
+
+        if (texts.size() == 1 || texts.size() % 256 == 0) {
+            SmokeLog::progress(
+                "tokenizer sample",
+                "%zu/%d rows",
+                texts.size(),
+                maxRows);
+        }
     }
+
+    SmokeLog::progressDone();
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    SmokeLog::result("tokenizer sample", "rows=%zu sec=%.2f", texts.size(), seconds);
 
     this->resetRowCursor();
     return texts;
@@ -195,6 +209,15 @@ void LanguageModelChunkSource::materialize() {
             this->encodeBatchIntoDatasets(batchIndices, batchTexts);
             batchIndices.clear();
             batchTexts.clear();
+
+            const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            SmokeLog::progress(
+                "materialize",
+                "rows=%zu train=%d test=%d sec=%.1f",
+                rowsSeen,
+                this->trainExampleCount(),
+                static_cast<int>(this->testReservoir.examples.size()),
+                elapsed);
         }
     }
 
@@ -202,14 +225,16 @@ void LanguageModelChunkSource::materialize() {
     this->resetRowCursor();
     this->materialized = true;
 
+    SmokeLog::progressDone();
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 #if defined(_OPENMP)
     const int threads = omp_get_max_threads();
 #else
     const int threads = 1;
 #endif
-    std::printf(
-        "LanguageModelChunkSource::materialize: rows=%zu train=%d test=%d threads=%d sec=%.2f\n",
+    SmokeLog::result(
+        "materialize",
+        "rows=%zu train=%d test=%d threads=%d sec=%.2f",
         rowsSeen,
         this->trainExampleCount(),
         static_cast<int>(this->testReservoir.examples.size()),

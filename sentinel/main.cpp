@@ -49,8 +49,13 @@ int main() {
     const bool runPackBudgetBench = false;
     const bool runScaleProfile = false;
     const bool runArrowCorpusSmoke = false;
+    const bool runBpeBench = false;
 
-    const std::string samplePath = "../SERA-Data/sera_sample.jsonl";
+    // Arrow HF disk layout (sera_best_subset) via from-scratch ArrowChunkReader; JSONL still works
+    const bool useArrowCorpus = true;
+    const std::string samplePath = useArrowCorpus
+        ? "../SERA-Data/sera_best_subset"
+        : "../SERA-Data/sera_sample.jsonl";
     const size_t maximumTextCharacters = 1200;
     const size_t maximumTokenCount = 512;
     const float trainRatio = 0.8f;
@@ -67,6 +72,34 @@ int main() {
     const int testReservoirCap = 512;
     const bool preferCpuAdamOffload = false;
     const bool useCheckpointing = false;
+
+    if (runBpeBench) {
+        SmokeLog::section("bpe bench");
+        const std::string path = useArrowCorpus
+            ? "../SERA-Data/sera_best_subset"
+            : "../SERA-Data/sera_sample.jsonl";
+        LanguageModelChunkSource source(path, maximumTextCharacters, maximumTokenCount, chunkExampleCount, trainRatio, 42u, testReservoirCap);
+        std::vector<std::string> sample = source.prepareTokenizerSample(tokenizerSampleRows);
+        if (sample.empty()) {
+            SmokeLog::note("bpe bench: empty sample");
+            return 1;
+        }
+        BPETokenizer tokenizer;
+        tokenizer.train(sample, tokenizerVocabSize);
+        const auto encodeStart = std::chrono::steady_clock::now();
+        size_t tokenCount = 0;
+        for (const std::string& text : sample)
+            tokenCount += tokenizer.encode(text).size();
+        const double encodeSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - encodeStart).count();
+        SmokeLog::result(
+            "bpe encode",
+            "docs=%zu tokens=%zu sec=%.2f tokens/s=%.0f",
+            sample.size(),
+            tokenCount,
+            encodeSec,
+            encodeSec > 0.0 ? static_cast<double>(tokenCount) / encodeSec : 0.0);
+        return 0;
+    }
 
     if (runArrowCorpusSmoke) {
         SmokeLog::section("arrow-corpus");
@@ -1012,6 +1045,9 @@ int main() {
     }
 
     SmokeLog::section("sera train");
+    SmokeLog::note(useArrowCorpus
+        ? "corpus=Arrow IPC (HF save_to_disk)"
+        : "corpus=JSONL");
 
     LanguageModelChunkSource source(samplePath, maximumTextCharacters, maximumTokenCount, chunkExampleCount, trainRatio, 42u, testReservoirCap);
     std::vector<std::string> tokenizerSample = source.prepareTokenizerSample(tokenizerSampleRows);
