@@ -1411,6 +1411,138 @@ void CudaLanguageModel::runTrainInt8AdamSmokeDemo(int vocabularySize, int embedd
     CudaAdam::preferInt8Moments = previousInt8;
 }
 
+void CudaLanguageModel::runTrainCpuAdamOffloadSmokeDemo(int vocabularySize, int embeddingDim, int sequenceLength, int blockCount, int headCount) {
+    if (!CudaMatmul::isAvailable()) {
+        SmokeLog::skip("LanguageModel train CPU Adam offload");
+        return;
+    }
+    if (vocabularySize <= 0 || embeddingDim <= 0 || sequenceLength <= 0 || blockCount <= 0 || headCount <= 0)
+        throw std::invalid_argument("CudaLanguageModel::runTrainCpuAdamOffloadSmokeDemo invalid dims");
+
+    const bool previousAmp = CudaAmp::preferMixedPrecision;
+    const bool previousInt8 = CudaAdam::preferInt8Moments;
+    const bool previousCpuOffload = CudaAdam::preferCpuOffload;
+    CudaAmp::preferMixedPrecision = false;
+    CudaAdam::preferInt8Moments = false;
+
+    LanguageModel host(vocabularySize, embeddingDim, sequenceLength, Adam(0.001f), blockCount, headCount);
+
+    const int packBatchSize = (std::max)(1, (std::min)(8, 8192 / sequenceLength));
+    std::vector<LanguageModelExample> examples(static_cast<size_t>(packBatchSize));
+    unsigned state = 307u;
+    for (int exampleIndex = 0; exampleIndex < packBatchSize; ++exampleIndex) {
+        examples[static_cast<size_t>(exampleIndex)].inputTokenIds.resize(static_cast<size_t>(sequenceLength));
+        examples[static_cast<size_t>(exampleIndex)].targetTokenIds.resize(static_cast<size_t>(sequenceLength));
+        for (size_t index = 0; index < static_cast<size_t>(sequenceLength); ++index) {
+            state = state * 1664525u + 1013904223u;
+            examples[static_cast<size_t>(exampleIndex)].inputTokenIds[index] = static_cast<int>(state % static_cast<unsigned>(vocabularySize));
+            state = state * 1664525u + 1013904223u;
+            examples[static_cast<size_t>(exampleIndex)].targetTokenIds[index] = static_cast<int>(state % static_cast<unsigned>(vocabularySize));
+        }
+    }
+    std::vector<const LanguageModelExample*> packPointers(static_cast<size_t>(packBatchSize));
+    for (int exampleIndex = 0; exampleIndex < packBatchSize; ++exampleIndex)
+        packPointers[static_cast<size_t>(exampleIndex)] = &examples[static_cast<size_t>(exampleIndex)];
+
+    const int stepCount = 16;
+    size_t totalBytes = 0;
+    double gpuUsedMiB = 0.0;
+    double cpuUsedMiB = 0.0;
+
+    {
+        CudaAdam::preferCpuOffload = false;
+        CudaLanguageModel gpuDevice = CudaLanguageModel::createFrom(host);
+        gpuDevice.adam = CudaAdam(host.optimizer.learningRate, host.optimizer.beta1, host.optimizer.beta2, host.optimizer.epsilon);
+        size_t freeBefore = 0;
+        CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeBefore, &totalBytes), "cpu Adam offload memGetInfo before gpu");
+        gpuDevice.ensureTrainState();
+        for (int step = 0; step < stepCount; ++step) {
+            gpuDevice.trainGradients.zeroInPlace();
+            gpuDevice.accumulatePackedExamples(packPointers.data(), packBatchSize, gpuDevice.trainGradients);
+            gpuDevice.applyGradients(gpuDevice.trainGradients, 1.0f / static_cast<float>(packBatchSize));
+        }
+        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "cpu Adam offload gpu steps synchronize");
+        size_t freeAfter = 0;
+        CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeAfter, &totalBytes), "cpu Adam offload memGetInfo after gpu");
+        gpuUsedMiB = static_cast<double>(freeBefore - freeAfter) / (1024.0 * 1024.0);
+    }
+
+    {
+        CudaAdam::preferCpuOffload = true;
+        CudaLanguageModel cpuDevice = CudaLanguageModel::createFrom(host);
+        cpuDevice.adam = CudaAdam(host.optimizer.learningRate, host.optimizer.beta1, host.optimizer.beta2, host.optimizer.epsilon);
+        size_t freeBefore = 0;
+        CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeBefore, &totalBytes), "cpu Adam offload memGetInfo before cpu");
+        cpuDevice.ensureTrainState();
+        for (int step = 0; step < stepCount; ++step) {
+            cpuDevice.trainGradients.zeroInPlace();
+            cpuDevice.accumulatePackedExamples(packPointers.data(), packBatchSize, cpuDevice.trainGradients);
+            cpuDevice.applyGradients(cpuDevice.trainGradients, 1.0f / static_cast<float>(packBatchSize));
+        }
+        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "cpu Adam offload cpu steps synchronize");
+        size_t freeAfter = 0;
+        CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeAfter, &totalBytes), "cpu Adam offload memGetInfo after cpu");
+        cpuUsedMiB = static_cast<double>(freeBefore - freeAfter) / (1024.0 * 1024.0);
+    }
+
+    LanguageModel parityHost(vocabularySize, embeddingDim, sequenceLength, Adam(0.001f), blockCount, headCount);
+    CudaLanguageModel parityGpu = CudaLanguageModel::createFrom(parityHost);
+    CudaLanguageModel parityCpu = CudaLanguageModel::createFrom(parityHost);
+    parityGpu.adam = CudaAdam(0.001f);
+    parityCpu.adam = CudaAdam(0.001f);
+
+    CudaAdam::preferCpuOffload = false;
+    parityGpu.ensureTrainState();
+    CudaAdam::preferCpuOffload = true;
+    parityCpu.ensureTrainState();
+
+    for (int step = 0; step < stepCount; ++step) {
+        CudaAdam::preferCpuOffload = false;
+        parityGpu.trainGradients.zeroInPlace();
+        parityGpu.accumulatePackedExamples(packPointers.data(), packBatchSize, parityGpu.trainGradients);
+        parityGpu.applyGradients(parityGpu.trainGradients, 1.0f / static_cast<float>(packBatchSize));
+
+        CudaAdam::preferCpuOffload = true;
+        parityCpu.trainGradients.zeroInPlace();
+        parityCpu.accumulatePackedExamples(packPointers.data(), packBatchSize, parityCpu.trainGradients);
+        parityCpu.applyGradients(parityCpu.trainGradients, 1.0f / static_cast<float>(packBatchSize));
+    }
+    CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "cpu Adam offload parity synchronize");
+
+    CudaAdam::preferCpuOffload = false;
+    parityGpu.epochLossSum.ensureSize(1, 1);
+    CudaOps::zeroInPlace(parityGpu.epochLossSum);
+    parityGpu.accumulatePackedExamples(packPointers.data(), packBatchSize, parityGpu.trainGradients);
+    const float gpuLoss = parityGpu.epochLossSum.download().at(0, 0) / static_cast<float>(packBatchSize);
+
+    CudaAdam::preferCpuOffload = true;
+    parityCpu.epochLossSum.ensureSize(1, 1);
+    CudaOps::zeroInPlace(parityCpu.epochLossSum);
+    parityCpu.accumulatePackedExamples(packPointers.data(), packBatchSize, parityCpu.trainGradients);
+    const float cpuLoss = parityCpu.epochLossSum.download().at(0, 0) / static_cast<float>(packBatchSize);
+
+    Matrix gpuWeight = parityGpu.lmHeadWeight().download();
+    Matrix cpuWeight = parityCpu.lmHeadWeight().download();
+    float weightDifference = 0.0f;
+    bool anyNonFinite = false;
+    for (size_t index = 0; index < gpuWeight.data.size(); ++index) {
+        if (!std::isfinite(gpuWeight.data[index]) || !std::isfinite(cpuWeight.data[index]))
+            anyNonFinite = true;
+        weightDifference = (std::max)(weightDifference, std::fabs(gpuWeight.data[index] - cpuWeight.data[index]));
+    }
+
+    SmokeLog::result(
+        "LanguageModel train CPU Adam offload",
+        "vocab=%d embed=%d seq=%d steps=%d  loss gpu=%.4f cpu=%.4f  weightDiff=%.2e  nonFinite=%s  usedMiB gpu=%.1f cpu=%.1f saved=%.1f",
+        vocabularySize, embeddingDim, sequenceLength, stepCount,
+        gpuLoss, cpuLoss, weightDifference, anyNonFinite ? "yes" : "no",
+        gpuUsedMiB, cpuUsedMiB, gpuUsedMiB - cpuUsedMiB);
+
+    CudaAmp::preferMixedPrecision = previousAmp;
+    CudaAdam::preferInt8Moments = previousInt8;
+    CudaAdam::preferCpuOffload = previousCpuOffload;
+}
+
 void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim, int sequenceLength, int blockCount, int headCount, bool preferFlash, int maxPackedColumns) {
     if (!CudaMatmul::isAvailable()) {
         SmokeLog::skip("LanguageModel profile");

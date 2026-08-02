@@ -147,14 +147,19 @@ void LanguageModel::enableCudaTrain() {
     // loss scaling only helps when FP16 GEMMs can run (shared dim gate is 256)
     CudaAmp::useLossScaling = this->tokenEmbedding.embeddingDim() >= 256;
     CudaAmp::resetLossScaler();
-    // int8 moments default-on for consumer VRAM; opt-out via setCudaPreferInt8AdamMoments(false)
-    CudaAdam::preferInt8Moments = true;
+    // int8 moments default-on unless CPU Adam offload already requested
+    if (CudaAdam::preferCpuOffload)
+        CudaAdam::preferInt8Moments = false;
+    else
+        CudaAdam::preferInt8Moments = true;
     this->device->applyVramPackBudget();
+    this->device->trainStateReady = false;
     this->device->ensureTrainState();
     std::cout << "LanguageModel::enableCudaTrain: device training enabled (packed batches, checkpointing on, FP16 amp "
               << (CudaAmp::preferMixedPrecision ? "on" : "off")
               << ", lossScale=" << (CudaAmp::useLossScaling ? "on" : "off")
               << ", int8 adam " << (CudaAdam::preferInt8Moments ? "on" : "off")
+              << ", cpuAdam=" << (CudaAdam::preferCpuOffload ? "on" : "off")
               << ", halfCkpt=" << (this->device->useHalfActivationCheckpoints() ? "on" : "off")
               << ", tieEmbed=" << (this->tieEmbeddingProjection ? "on" : "off")
               << ", maxPackCols=" << this->device->maxPackedColumns << ")\n";
@@ -209,8 +214,29 @@ void LanguageModel::setCudaPreferInt8AdamMoments(bool enabled) {
     if (this->device == nullptr) this->enableCuda();
     if (this->device == nullptr) return;
     CudaAdam::preferInt8Moments = enabled;
+    if (enabled)
+        CudaAdam::preferCpuOffload = false;
+    if (this->device != nullptr) {
+        this->device->trainStateReady = false;
+        if (this->deviceTrainEnabled)
+            this->device->ensureTrainState();
+    }
     std::cout << "LanguageModel::setCudaPreferInt8AdamMoments: " << (enabled ? "on" : "off")
-              << "  blockSize=" << CudaAdam::int8BlockSize << '\n';
+              << "  blockSize=" << CudaAdam::int8BlockSize
+              << "  cpuAdam=" << (CudaAdam::preferCpuOffload ? "on" : "off") << '\n';
+}
+
+void LanguageModel::setCudaPreferCpuAdamOffload(bool enabled) {
+    if (this->device == nullptr) this->enableCuda();
+    if (this->device == nullptr) return;
+    CudaAdam::preferCpuOffload = enabled;
+    if (enabled)
+        CudaAdam::preferInt8Moments = false;
+    this->device->trainStateReady = false;
+    if (this->deviceTrainEnabled)
+        this->device->ensureTrainState();
+    std::cout << "LanguageModel::setCudaPreferCpuAdamOffload: " << (enabled ? "on" : "off")
+              << "  int8 adam " << (CudaAdam::preferInt8Moments ? "on" : "off") << '\n';
 }
 
 void LanguageModel::setCudaPreferFlashAttention(bool enabled) {

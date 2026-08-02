@@ -105,6 +105,9 @@ public:
     /// <summary>store Adam m/v as int8 block scales for low VRAM</summary>
     void setCudaPreferInt8AdamMoments(bool enabled);
 
+    /// <summary>ZeRO-Offload Stage-1: keep Adam m/v on host RAM (disables int8 device moments)</summary>
+    void setCudaPreferCpuAdamOffload(bool enabled);
+
     /// <summary>toggle flash attention on device blocks</summary>
     void setCudaPreferFlashAttention(bool enabled);
 

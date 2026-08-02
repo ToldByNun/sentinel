@@ -438,6 +438,9 @@ public:
     /// <summary>compare FP32 vs int8 Adam after several packed train steps</summary>
     static void runTrainInt8AdamSmokeDemo(int vocabularySize = 1000, int embeddingDim = 64, int sequenceLength = 48, int blockCount = 2, int headCount = 4);
 
+    /// <summary>compare GPU FP32 Adam vs CPU-offloaded Adam: weight parity + VRAM delta after moments allocate</summary>
+    static void runTrainCpuAdamOffloadSmokeDemo(int vocabularySize = 2000, int embeddingDim = 128, int sequenceLength = 64, int blockCount = 2, int headCount = 4);
+
     /// <summary>breakdown of one packed train step embed attn ffn ce adam</summary>
     static void runTrainProfileDemo(int vocabularySize = 1000, int embeddingDim = 64, int sequenceLength = 48, int blockCount = 2, int headCount = 4, bool preferFlash = true, int maxPackedColumns = 0);
 

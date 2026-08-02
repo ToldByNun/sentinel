@@ -31,24 +31,26 @@
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
 
-    // set false to jump straight into the heavy SERA train (GPU load test)
+    // Scale-to-VRAM run: larger LM + CPU Adam offload (ZeRO-Offload Stage-1)
+    // set false → skip smokes and go straight into SERA train
     const bool runSmokes = false;
 
     const std::string samplePath = "../SERA-Data/sera_sample.jsonl";
     const size_t maximumTextCharacters = 1200;
     const size_t maximumTokenCount = 512;
     const float trainRatio = 0.8f;
-    const int embeddingDim = 256;
-    const int blockCount = 4;
+    const int embeddingDim = 512;
+    const int blockCount = 8;
     const int headCount = 8;
     const int maximumPositionCount = static_cast<int>(maximumTokenCount);
-    const int trainEpochs = 10;
-    const int trainBatchSize = 256;
+    const int trainEpochs = 2;
+    const int trainBatchSize = 128;
     const int trainGradAccum = 2;
     const int chunkExampleCount = 2048;
-    const int tokenizerVocabSize = 2000;
+    const int tokenizerVocabSize = 4000;
     const int tokenizerSampleRows = 2000;
     const int testReservoirCap = 512;
+    const bool preferCpuAdamOffload = true;
 
     if (runSmokes) {
         SmokeLog::section("runtime");
@@ -87,6 +89,7 @@ int main() {
         CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);
         CudaLanguageModel::runTrainSmokeDemo(1000, 64, 48, 2, 4);
         CudaLanguageModel::runTrainInt8AdamSmokeDemo(1000, 64, 48, 2, 4);
+        CudaLanguageModel::runTrainCpuAdamOffloadSmokeDemo(2000, 128, 64, 2, 4);
         CudaLanguageModel::runTrainProfileDemo(1000, 64, 48, 2, 4, true, 256);
         CudaLanguageModel::runTrainProfileDemo(1000, 64, 48, 2, 4, false, 256);
         CudaLanguageModel::runTrainProfileDemo(1000, 64, 256, 2, 4, true, 2048);
@@ -139,17 +142,20 @@ int main() {
     Matrix cpuLogits = model.forward(parityTokenIds);
 
     model.enableCuda();
+    model.setCudaPreferCpuAdamOffload(preferCpuAdamOffload);
     model.enableCudaTrain();
     model.setCudaPreferFlashAttention(true);
-    SmokeLog::result("model", "blocks=%zu  heads=%d  cuda=%s  train=%s  maxTok=%zu maxPackCols=%d flash=on stream=on batch=%d accum=%d",
+    SmokeLog::result("model", "blocks=%zu  heads=%d  embed=%d  cuda=%s  train=%s  maxTok=%zu maxPackCols=%d flash=on stream=on batch=%d accum=%d cpuAdam=%s",
         model.blocks.size(),
         model.blocks[0].attention.headCount,
+        embeddingDim,
         model.cudaEnabled() ? "on" : "off",
         model.cudaTrainEnabled() ? "cuda" : "cpu-openmp",
         maximumTokenCount,
         model.cudaMaxPackedColumns(),
         trainBatchSize,
-        trainGradAccum);
+        trainGradAccum,
+        preferCpuAdamOffload ? "on" : "off");
 
     if (model.cudaEnabled()) {
         Matrix deviceLogits = model.forward(parityTokenIds);
