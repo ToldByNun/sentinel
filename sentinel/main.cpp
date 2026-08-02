@@ -11,6 +11,7 @@
 #include "NeuralNet/Tokenizer/BPETokenizer.hpp"
 #include "NeuralNet/Data/LanguageModelChunkSource.hpp"
 #include "NeuralNet/Data/LanguageModelDataset.hpp"
+#include "NeuralNet/Data/ArrowChunkReader.hpp"
 #include "NeuralNet/Network/LanguageModel.hpp"
 #include "NeuralNet/Optimizers/Adam.hpp"
 #include "NeuralNet/Utils/SmokeLog.hpp"
@@ -47,6 +48,7 @@ int main() {
     const bool runQkvCheck = false;
     const bool runPackBudgetBench = false;
     const bool runScaleProfile = false;
+    const bool runArrowCorpusSmoke = false;
 
     const std::string samplePath = "../SERA-Data/sera_sample.jsonl";
     const size_t maximumTextCharacters = 1200;
@@ -65,6 +67,46 @@ int main() {
     const int testReservoirCap = 512;
     const bool preferCpuAdamOffload = false;
     const bool useCheckpointing = false;
+
+    if (runArrowCorpusSmoke) {
+        SmokeLog::section("arrow-corpus");
+        const std::string arrowPath = "../SERA-Data/sera_best_subset";
+        ArrowChunkReader reader;
+        reader.open(arrowPath);
+        SmokeLog::note(
+            ("shards=" + std::to_string(reader.shards().size())
+                + " kind=" + std::string(reader.ipcKind() == ArrowChunkReader::IpcKind::Stream ? "stream" : "file"))
+                .c_str());
+
+        std::vector<CorpusRow> rows;
+        reader.nextRows(rows, 3);
+        if (rows.empty()) {
+            SmokeLog::note("no rows decoded");
+            return 1;
+        }
+
+        for (size_t index = 0; index < rows.size(); ++index) {
+            const std::string preview = rows[index].text.size() > 80
+                ? rows[index].text.substr(0, 80) + "..."
+                : rows[index].text;
+            SmokeLog::result(
+                "arrow-row",
+                "i=%zu source=%s textLen=%zu preview=%s",
+                index,
+                rows[index].source.c_str(),
+                rows[index].text.size(),
+                preview.c_str());
+        }
+
+        // Drain a bit further to ensure multi-batch works.
+        size_t total = rows.size();
+        while (reader.nextRows(rows, 512) || !rows.empty()) {
+            total += rows.size();
+            if (total >= 2500) break;
+        }
+        SmokeLog::result("arrow-corpus", "ok rowsRead=%zu sampled>=%zu", reader.rowsRead(), total);
+        return 0;
+    }
 
     if (runScale100M) {
         SmokeLog::section("scale-100M");
