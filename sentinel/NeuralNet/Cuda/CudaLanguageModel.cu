@@ -826,38 +826,46 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
         if (this->hostBlockAdamStates.size() != this->blocks.size())
             this->hostBlockAdamStates.resize(this->blocks.size());
 
-        auto updateHost = [this, effectiveGradientScale](CudaMatrix& parameter, AdamState& state, const CudaMatrix& gradient) {
+        std::vector<CudaAdamCpuOffloadItem> offloadItems;
+        offloadItems.reserve(16 + this->blocks.size() * 12);
+
+        auto pushOffload = [&offloadItems](CudaMatrix& parameter, AdamState& state, CudaMatrix& gradient) {
             if (parameter.elementCount() == 0) throw std::invalid_argument("CudaLanguageModel::applyGradients empty parameter");
             if (gradient.elementCount() != parameter.elementCount())
                 throw std::invalid_argument("CudaLanguageModel::applyGradients gradient/parameter size mismatch");
-            this->adam.updateCpuOffloaded(parameter, state, gradient, effectiveGradientScale);
+            CudaAdamCpuOffloadItem item;
+            item.parameter = &parameter;
+            item.gradient = &gradient;
+            item.hostState = &state;
+            offloadItems.push_back(item);
         };
 
         if (!this->tieEmbeddingProjection)
-            updateHost(this->projectionWeight, this->hostProjectionWeightState, gradients.projectionWeight);
-        updateHost(this->projectionBias, this->hostProjectionBiasState, gradients.projectionBias);
-        updateHost(this->finalNorm.gamma, this->hostFinalNormGammaState, gradients.finalNormGamma);
+            pushOffload(this->projectionWeight, this->hostProjectionWeightState, gradients.projectionWeight);
+        pushOffload(this->projectionBias, this->hostProjectionBiasState, gradients.projectionBias);
+        pushOffload(this->finalNorm.gamma, this->hostFinalNormGammaState, gradients.finalNormGamma);
 
         for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
             CudaTransformerBlock& block = this->blocks[blockIndex];
             CudaTransformerBlockGradients& blockGradients = gradients.blocks[blockIndex];
             CudaTransformerBlockHostAdamStates& blockStates = this->hostBlockAdamStates[blockIndex];
 
-            updateHost(block.attention.queryWeight, blockStates.queryWeight, blockGradients.queryWeight);
-            updateHost(block.attention.keyWeight, blockStates.keyWeight, blockGradients.keyWeight);
-            updateHost(block.attention.valueWeight, blockStates.valueWeight, blockGradients.valueWeight);
-            updateHost(block.attention.outputWeight, blockStates.attentionOutputWeight, blockGradients.attentionOutputWeight);
-            updateHost(block.attentionNorm.gamma, blockStates.attentionNormGamma, blockGradients.attentionNormGamma);
-            updateHost(block.feedForwardNorm.gamma, blockStates.feedForwardNormGamma, blockGradients.feedForwardNormGamma);
-            updateHost(block.feedForward.gateWeight, blockStates.feedForwardGateWeight, blockGradients.feedForwardGateWeight);
-            updateHost(block.feedForward.gateBias, blockStates.feedForwardGateBias, blockGradients.feedForwardGateBias);
-            updateHost(block.feedForward.upWeight, blockStates.feedForwardUpWeight, blockGradients.feedForwardUpWeight);
-            updateHost(block.feedForward.upBias, blockStates.feedForwardUpBias, blockGradients.feedForwardUpBias);
-            updateHost(block.feedForward.downWeight, blockStates.feedForwardDownWeight, blockGradients.feedForwardDownWeight);
-            updateHost(block.feedForward.downBias, blockStates.feedForwardDownBias, blockGradients.feedForwardDownBias);
+            pushOffload(block.attention.queryWeight, blockStates.queryWeight, blockGradients.queryWeight);
+            pushOffload(block.attention.keyWeight, blockStates.keyWeight, blockGradients.keyWeight);
+            pushOffload(block.attention.valueWeight, blockStates.valueWeight, blockGradients.valueWeight);
+            pushOffload(block.attention.outputWeight, blockStates.attentionOutputWeight, blockGradients.attentionOutputWeight);
+            pushOffload(block.attentionNorm.gamma, blockStates.attentionNormGamma, blockGradients.attentionNormGamma);
+            pushOffload(block.feedForwardNorm.gamma, blockStates.feedForwardNormGamma, blockGradients.feedForwardNormGamma);
+            pushOffload(block.feedForward.gateWeight, blockStates.feedForwardGateWeight, blockGradients.feedForwardGateWeight);
+            pushOffload(block.feedForward.gateBias, blockStates.feedForwardGateBias, blockGradients.feedForwardGateBias);
+            pushOffload(block.feedForward.upWeight, blockStates.feedForwardUpWeight, blockGradients.feedForwardUpWeight);
+            pushOffload(block.feedForward.upBias, blockStates.feedForwardUpBias, blockGradients.feedForwardUpBias);
+            pushOffload(block.feedForward.downWeight, blockStates.feedForwardDownWeight, blockGradients.feedForwardDownWeight);
+            pushOffload(block.feedForward.downBias, blockStates.feedForwardDownBias, blockGradients.feedForwardDownBias);
         }
 
-        updateHost(this->tokenEmbeddingWeight, this->hostTokenEmbeddingState, gradients.tokenEmbedding);
+        pushOffload(this->tokenEmbeddingWeight, this->hostTokenEmbeddingState, gradients.tokenEmbedding);
+        this->adam.updateCpuOffloadedMany(offloadItems.data(), static_cast<int>(offloadItems.size()), effectiveGradientScale);
 
         if (CudaAmp::lossScalingActive())
             CudaAmp::lossScaler.updateOnSuccess();
