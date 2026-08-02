@@ -113,6 +113,104 @@ void LanguageModel::setTieEmbeddingProjection(bool enabled) {
         this->deviceStale = true;
 }
 
+size_t LanguageModel::parameterElementCount() const {
+    auto matrixElements = [](const Matrix& matrix) -> size_t {
+        return matrix.empty() ? 0ull : matrix.data.size();
+    };
+
+    size_t total = 0;
+    total += matrixElements(this->tokenEmbedding.weight);
+    total += matrixElements(this->finalNorm.gamma);
+    if (!this->tieEmbeddingProjection)
+        total += matrixElements(this->outputProjection.weight);
+    total += matrixElements(this->outputProjection.bias);
+
+    for (const TransformerBlock& block : this->blocks) {
+        total += matrixElements(block.attentionNorm.gamma);
+        total += matrixElements(block.attention.queryWeight);
+        total += matrixElements(block.attention.keyWeight);
+        total += matrixElements(block.attention.valueWeight);
+        total += matrixElements(block.attention.outputWeight);
+        total += matrixElements(block.feedForwardNorm.gamma);
+        total += matrixElements(block.feedForward.gateWeight);
+        total += matrixElements(block.feedForward.gateBias);
+        total += matrixElements(block.feedForward.upWeight);
+        total += matrixElements(block.feedForward.upBias);
+        total += matrixElements(block.feedForward.downWeight);
+        total += matrixElements(block.feedForward.downBias);
+    }
+    return total;
+}
+
+void LanguageModel::applyCudaVramPackBudget(float freeFraction, size_t safetyReserveBytes) {
+    if (this->device == nullptr) this->enableCuda();
+    if (this->device == nullptr) return;
+    this->device->maxPackedColumnsManual = false;
+    this->device->applyVramPackBudget(freeFraction, safetyReserveBytes);
+    if (this->deviceTrainEnabled) {
+        this->device->trainStateReady = false;
+        this->device->ensureTrainState();
+    }
+}
+
+void LanguageModel::setCudaPreferTrainGraph(bool enabled) {
+    if (this->device == nullptr) this->enableCuda();
+    if (this->device == nullptr) return;
+    this->device->preferTrainGraph = enabled;
+}
+
+double LanguageModel::probeCudaPackedTrainTokensPerSecond(int sequenceLength, int warmupSteps, int timedSteps) {
+    if (this->device == nullptr || !this->deviceTrainEnabled)
+        throw std::logic_error("LanguageModel::probeCudaPackedTrainTokensPerSecond requires enableCudaTrain");
+    if (sequenceLength <= 0 || sequenceLength > this->maximumPositionCount)
+        throw std::invalid_argument("LanguageModel::probeCudaPackedTrainTokensPerSecond invalid sequenceLength");
+    if (warmupSteps < 0 || timedSteps <= 0)
+        throw std::invalid_argument("LanguageModel::probeCudaPackedTrainTokensPerSecond invalid step counts");
+
+    CudaLanguageModel& device = *this->device;
+    device.preferTrainGraph = true;
+    device.adam = CudaAdam(this->optimizer.learningRate, this->optimizer.beta1, this->optimizer.beta2, this->optimizer.epsilon);
+    device.ensureTrainState();
+
+    const int vocab = this->tokenEmbedding.vocabSize();
+    const int packBatch = (std::max)(1, (std::min)(32, device.maxPackExamplesForSegment(sequenceLength)));
+    std::vector<LanguageModelExample> examples(static_cast<size_t>(packBatch));
+    unsigned rng = 100003u;
+    for (int exampleIndex = 0; exampleIndex < packBatch; ++exampleIndex) {
+        examples[static_cast<size_t>(exampleIndex)].inputTokenIds.resize(static_cast<size_t>(sequenceLength));
+        examples[static_cast<size_t>(exampleIndex)].targetTokenIds.resize(static_cast<size_t>(sequenceLength));
+        for (size_t index = 0; index < static_cast<size_t>(sequenceLength); ++index) {
+            rng = rng * 1664525u + 1013904223u;
+            examples[static_cast<size_t>(exampleIndex)].inputTokenIds[index] = static_cast<int>(rng % static_cast<unsigned>(vocab));
+            rng = rng * 1664525u + 1013904223u;
+            examples[static_cast<size_t>(exampleIndex)].targetTokenIds[index] = static_cast<int>(rng % static_cast<unsigned>(vocab));
+        }
+    }
+    std::vector<const LanguageModelExample*> packPointers(static_cast<size_t>(packBatch));
+    for (int exampleIndex = 0; exampleIndex < packBatch; ++exampleIndex)
+        packPointers[static_cast<size_t>(exampleIndex)] = &examples[static_cast<size_t>(exampleIndex)];
+
+    for (int step = 0; step < warmupSteps; ++step) {
+        device.trainGradients.zeroInPlace();
+        device.accumulatePackedExamples(packPointers.data(), packBatch, device.trainGradients);
+        device.applyGradients(device.trainGradients, 1.0f / static_cast<float>(packBatch));
+    }
+    if (cudaDeviceSynchronize() != cudaSuccess)
+        throw std::runtime_error("LanguageModel::probeCudaPackedTrainTokensPerSecond warmup sync failed");
+
+    const auto start = std::chrono::steady_clock::now();
+    for (int step = 0; step < timedSteps; ++step) {
+        device.trainGradients.zeroInPlace();
+        device.accumulatePackedExamples(packPointers.data(), packBatch, device.trainGradients);
+        device.applyGradients(device.trainGradients, 1.0f / static_cast<float>(packBatch));
+    }
+    if (cudaDeviceSynchronize() != cudaSuccess)
+        throw std::runtime_error("LanguageModel::probeCudaPackedTrainTokensPerSecond timed sync failed");
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    if (seconds <= 0.0) return 0.0;
+    return static_cast<double>(sequenceLength) * static_cast<double>(packBatch) * static_cast<double>(timedSteps) / seconds;
+}
+
 LanguageModel::~LanguageModel() = default;
 
 LanguageModel::LanguageModel(LanguageModel&&) noexcept = default;

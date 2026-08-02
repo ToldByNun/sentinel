@@ -127,6 +127,18 @@ public:
     /// <summary>enable/disable embed↔head tying; frees untied projection weight when enabling</summary>
     void setTieEmbeddingProjection(bool enabled);
 
+    /// <summary>trainable parameter element count (tied head shares embedding weight)</summary>
+    size_t parameterElementCount() const;
+
+    /// <summary>recompute VRAM pack budget on the device train mirror</summary>
+    void applyCudaVramPackBudget(float freeFraction = 0.55f, size_t safetyReserveBytes = 1536ull * 1024ull * 1024ull);
+
+    /// <summary>capture fixed-shape CUDA graph for packed microsteps when possible</summary>
+    void setCudaPreferTrainGraph(bool enabled);
+
+    /// <summary>synthetic packed train throughput probe (tokens/s); requires enableCudaTrain</summary>
+    double probeCudaPackedTrainTokensPerSecond(int sequenceLength, int warmupSteps = 3, int timedSteps = 8);
+
     /// <summary>causal LM forward to vocab logits (device mirror if enabled)</summary>
     Matrix forward(const std::vector<int>& tokenIds);
 

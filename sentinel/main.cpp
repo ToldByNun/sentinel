@@ -38,6 +38,9 @@ int main() {
 
     const bool runSmokes = false;
     const bool runSpeedBench = false;
+    const bool runGate40k = false;
+    const bool runFlashParity256 = false;
+    const bool runScale100M = false;
     const bool runGraphCheck = false;
     const bool runEpilogueCheck = false;
     const bool runFfnBwdCheck = false;
@@ -62,6 +65,243 @@ int main() {
     const int testReservoirCap = 512;
     const bool preferCpuAdamOffload = false;
     const bool useCheckpointing = false;
+
+    if (runScale100M) {
+        SmokeLog::section("scale-100M");
+        if (!CudaMatmul::isAvailable()) {
+            SmokeLog::skip("scale-100M (no CUDA)");
+            return 1;
+        }
+
+        const std::string scalePath = "../SERA-Data/sera_scale.jsonl";
+        const size_t scaleMaxTextChars = 4000;
+        const size_t scaleMaxTokens = 512;
+        const int scaleVocab = 16000;
+        const int scaleEmbed = 768;
+        const int scaleBlocks = 12;
+        const int scaleHeads = 12;
+        const int scalePos = static_cast<int>(scaleMaxTokens);
+        const int scaleTokenizerRows = 8000;
+        const int scaleChunkExamples = 2048;
+        const int scaleTestCap = 512;
+        const int scaleBatch = 32;
+        const int scaleAccum = 4;
+        const int scaleEpochs = 1;
+        const int probeSeq = 256;
+
+        try {
+            LanguageModelChunkSource source(scalePath, scaleMaxTextChars, scaleMaxTokens, scaleChunkExamples, 0.8f, 42u, scaleTestCap);
+            std::vector<std::string> tokenizerSample = source.prepareTokenizerSample(scaleTokenizerRows);
+            if (tokenizerSample.empty()) {
+                SmokeLog::note(("no usable rows from " + scalePath + " (run SERA-Data/export_sample.py)").c_str());
+                return 1;
+            }
+
+            BPETokenizer tokenizer;
+            tokenizer.train(tokenizerSample, scaleVocab);
+            source.setTokenizer(&tokenizer);
+            source.materialize();
+            if (source.trainExampleCount() <= 0) {
+                SmokeLog::note("scale-100M: no train examples");
+                return 1;
+            }
+
+            LanguageModelDataset promptChunk;
+            source.rewindTrain();
+            source.nextTrainChunk(promptChunk);
+            source.rewindTrain();
+            if (promptChunk.examples.empty()) {
+                SmokeLog::note("scale-100M: empty prompt chunk");
+                return 1;
+            }
+
+            SmokeLog::result(
+                "data",
+                "stream=%s  train=%d  test=%d  vocab=%d  positions=%d  chunk=%d",
+                scalePath.c_str(),
+                source.trainExampleCount(),
+                source.testDataset().size(),
+                tokenizer.vocabSize(),
+                source.trainPredictionCount(),
+                source.chunkExampleCount());
+
+            SmokeLog::note("building ~100M LanguageModel (CPU init may take a while)...");
+            LanguageModel model(tokenizer.vocabSize(), scaleEmbed, scalePos, Adam(0.001f), scaleBlocks, scaleHeads);
+            const size_t paramCount = model.parameterElementCount();
+            SmokeLog::result(
+                "model",
+                "params=%.2fM  fp32MiB=%.0f  blocks=%d  heads=%d  embed=%d  vocab=%d  maxTok=%d  tieEmbed=on",
+                static_cast<double>(paramCount) / 1.0e6,
+                static_cast<double>(paramCount) * 4.0 / (1024.0 * 1024.0),
+                scaleBlocks,
+                scaleHeads,
+                scaleEmbed,
+                tokenizer.vocabSize(),
+                scalePos);
+
+            model.enableCuda();
+            model.setCudaPreferCpuAdamOffload(false);
+            model.setCudaPreferInt8AdamMoments(true);
+            model.setCudaPreferFlashAttention(true);
+            model.enableCudaTrain();
+            model.enableActivationCheckpointing(true);
+            model.setCudaPreferTrainGraph(true);
+            model.applyCudaVramPackBudget(0.55f);
+
+            size_t freeAfterSetup = 0;
+            size_t totalBytes = 0;
+            if (cudaMemGetInfo(&freeAfterSetup, &totalBytes) != cudaSuccess)
+                throw std::runtime_error("scale-100M memGetInfo failed");
+
+            SmokeLog::result(
+                "vram",
+                "maxPackCols=%d  freeMiB=%.0f  totalMiB=%.0f  ckpt=on  int8Adam=on  flash=on  graph=on",
+                model.cudaMaxPackedColumns(),
+                static_cast<double>(freeAfterSetup) / (1024.0 * 1024.0),
+                static_cast<double>(totalBytes) / (1024.0 * 1024.0));
+
+            const double tokensPerSecond = model.probeCudaPackedTrainTokensPerSecond(probeSeq, 3, 8);
+            SmokeLog::result(
+                "throughput",
+                "seq=%d  pack<=32  tokens/s=%.0f",
+                probeSeq,
+                tokensPerSecond);
+
+            SmokeLog::note("starting 1 epoch streamed train...");
+            model.train(source, scaleEpochs, 1, scaleBatch, scaleAccum);
+            model.saveCheckpoint("sera_100m.snlm", true);
+
+            if (!source.testDataset().examples.empty())
+                SmokeLog::result("final", "testLoss=%.6f", model.averageLoss(source.testDataset()));
+            SmokeLog::result("checkpoint", "saved sera_100m.snlm (weights+adam)");
+
+            const std::vector<int> prompt = promptChunk.examples[0].inputTokenIds;
+            const std::vector<int> greedy = model.generate(prompt, 32, 0.0f, 0, 7u);
+            SmokeLog::section("generate");
+            std::cout << "  prompt:  " << tokenizer.decode(prompt) << '\n';
+            std::cout << "  greedy:  " << tokenizer.decode(greedy) << '\n';
+
+            SmokeLog::result("scale-100M", "PASS  tokens/s=%.0f  params=%.2fM", tokensPerSecond, static_cast<double>(paramCount) / 1.0e6);
+            return 0;
+        } catch (const std::exception& ex) {
+            SmokeLog::result("scale-100M", "FAILED: %s", ex.what());
+            return 1;
+        }
+    }
+
+    if (runFlashParity256) {
+        SmokeLog::section("flash parity seq256");
+        if (!CudaMatmul::isAvailable()) {
+            SmokeLog::skip("flash parity (no CUDA)");
+            return 1;
+        }
+        try {
+            CudaCausalSelfAttention::runFlashParitySmokeDemo(768, 12, 128, 512);
+            CudaCausalSelfAttention::runFlashParitySmokeDemo(768, 12, 256, 512);
+            CudaCausalSelfAttention::runFlashParitySmokeDemo(768, 12, 1024, 1024);
+            return 0;
+        } catch (const std::exception& ex) {
+            SmokeLog::result("flash parity", "FAILED: %s", ex.what());
+            return 1;
+        }
+    }
+
+    if (runGate40k) {
+        SmokeLog::section("gate-40k");
+        if (!CudaMatmul::isAvailable()) {
+            SmokeLog::skip("gate-40k (no CUDA)");
+            return 1;
+        }
+        try {
+            CudaCausalSelfAttention::runFlashParitySmokeDemo(768, 12, 128, 512);
+            CudaFeedForward::runBackwardSmokeDemo(256, 128);
+
+            const bool previousAmp = CudaAmp::preferMixedPrecision;
+            const bool previousInt8 = CudaAdam::preferInt8Moments;
+            const bool previousCpu = CudaAdam::preferCpuOffload;
+            CudaAmp::preferMixedPrecision = true;
+            CudaAmp::useLossScaling = true;
+            CudaAmp::resetLossScaler();
+            CudaAdam::preferCpuOffload = false;
+            CudaAdam::preferInt8Moments = true;
+
+            const int vocab = 4000;
+            const int seq = 256;
+            const int warmupSteps = 6;
+            const int timedSteps = 16;
+            LanguageModel host(vocab, embeddingDim, maximumPositionCount, Adam(0.001f), blockCount, headCount);
+            CudaLanguageModel device = CudaLanguageModel::createFrom(host);
+            device.adam = CudaAdam(0.001f);
+            device.activationCheckpointing = false;
+            device.preferTrainGraph = true;
+            device.maxPackedColumnsManual = false;
+            device.applyVramPackBudget(0.58f, 1024ull * 1024ull * 1024ull);
+            for (CudaTransformerBlock& block : device.blocks)
+                block.attention.preferFlashAttention = true;
+            device.ensureTrainState();
+
+            const int packBatch = (std::max)(1, (std::min)(32, device.maxPackExamplesForSegment(seq)));
+            std::vector<LanguageModelExample> examples(static_cast<size_t>(packBatch));
+            unsigned rng = 91u;
+            for (int exampleIndex = 0; exampleIndex < packBatch; ++exampleIndex) {
+                examples[static_cast<size_t>(exampleIndex)].inputTokenIds.resize(static_cast<size_t>(seq));
+                examples[static_cast<size_t>(exampleIndex)].targetTokenIds.resize(static_cast<size_t>(seq));
+                for (size_t index = 0; index < static_cast<size_t>(seq); ++index) {
+                    rng = rng * 1664525u + 1013904223u;
+                    examples[static_cast<size_t>(exampleIndex)].inputTokenIds[index] = static_cast<int>(rng % static_cast<unsigned>(vocab));
+                    rng = rng * 1664525u + 1013904223u;
+                    examples[static_cast<size_t>(exampleIndex)].targetTokenIds[index] = static_cast<int>(rng % static_cast<unsigned>(vocab));
+                }
+            }
+            std::vector<const LanguageModelExample*> packPointers(static_cast<size_t>(packBatch));
+            for (int exampleIndex = 0; exampleIndex < packBatch; ++exampleIndex)
+                packPointers[static_cast<size_t>(exampleIndex)] = &examples[static_cast<size_t>(exampleIndex)];
+
+            for (int step = 0; step < warmupSteps; ++step) {
+                device.trainGradients.zeroInPlace();
+                device.accumulatePackedExamples(packPointers.data(), packBatch, device.trainGradients);
+                device.applyGradients(device.trainGradients, 1.0f / static_cast<float>(packBatch));
+            }
+            if (cudaDeviceSynchronize() != cudaSuccess)
+                throw std::runtime_error("gate-40k warmup sync failed");
+
+            const auto start = std::chrono::steady_clock::now();
+            for (int step = 0; step < timedSteps; ++step) {
+                device.trainGradients.zeroInPlace();
+                device.accumulatePackedExamples(packPointers.data(), packBatch, device.trainGradients);
+                device.applyGradients(device.trainGradients, 1.0f / static_cast<float>(packBatch));
+            }
+            if (cudaDeviceSynchronize() != cudaSuccess)
+                throw std::runtime_error("gate-40k timed sync failed");
+            const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            const double tokensPerSecond = seconds > 0.0
+                ? static_cast<double>(seq * packBatch) * static_cast<double>(timedSteps) / seconds
+                : 0.0;
+
+            size_t freeAfter = 0;
+            size_t totalBytes = 0;
+            cudaMemGetInfo(&freeAfter, &totalBytes);
+            SmokeLog::result(
+                "gate int8+noCkpt",
+                "pack=%d maxPackCols=%d graph=%s tokens/s=%.0f freeMiB=%.0f %s",
+                packBatch, device.maxPackedColumns,
+                device.trainGraphExec != nullptr ? "on" : "off",
+                tokensPerSecond,
+                static_cast<double>(freeAfter) / (1024.0 * 1024.0),
+                tokensPerSecond >= 40000.0 ? "PASS" : "BELOW_40k");
+
+            CudaAmp::preferMixedPrecision = previousAmp;
+            CudaAdam::preferInt8Moments = previousInt8;
+            CudaAdam::preferCpuOffload = previousCpu;
+
+            if (tokensPerSecond < 40000.0)
+                return 2;
+        } catch (const std::exception& ex) {
+            SmokeLog::result("gate-40k", "FAILED: %s", ex.what());
+            return 1;
+        }
+        return 0;
+    }
 
     if (runGraphCheck) {
         SmokeLog::section("cuda graph microstep check");
