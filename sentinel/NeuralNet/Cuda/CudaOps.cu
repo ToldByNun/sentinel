@@ -327,6 +327,19 @@ __device__ void CudaOps::runEmbeddingScatterAddInto(float* weightGradient, const
     atomicAdd(&weightGradient[tokenId * embeddingDim + dimensionIndex], outputGradient[index]);
 }
 
+__device__ void CudaOps::runEmbeddingZeroRows(float* weightGradient, const int* tokenIds, int embeddingDim, int tokenCount, int vocabularySize) {
+    const int elementCount = embeddingDim * tokenCount;
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+
+    const int dimensionIndex = index / tokenCount;
+    const int tokenIndex = index - dimensionIndex * tokenCount;
+    const int tokenId = tokenIds[tokenIndex];
+    if (tokenId < 0 || tokenId >= vocabularySize) return;
+
+    weightGradient[tokenId * embeddingDim + dimensionIndex] = 0.0f;
+}
+
 __device__ void CudaOps::runCrossEntropyLossFromIds(const float* probabilities, const int* targetTokenIds, float* columnLosses, int vocabularySize, int tokenCount) {
     const int column = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
     if (column >= tokenCount) return;
@@ -516,6 +529,10 @@ __global__ void CudaOpsEmbeddingGatherEntry(const float* weight, const int* toke
 
 __global__ void CudaOpsEmbeddingScatterAddEntry(float* weightGradient, const int* tokenIds, const float* outputGradient, int embeddingDim, int tokenCount, int vocabularySize) {
     CudaOps::runEmbeddingScatterAddInto(weightGradient, tokenIds, outputGradient, embeddingDim, tokenCount, vocabularySize);
+}
+
+__global__ void CudaOpsEmbeddingZeroRowsEntry(float* weightGradient, const int* tokenIds, int embeddingDim, int tokenCount, int vocabularySize) {
+    CudaOps::runEmbeddingZeroRows(weightGradient, tokenIds, embeddingDim, tokenCount, vocabularySize);
 }
 
 void CudaOps::broadcastBiasAddInPlace(CudaMatrix& product, const CudaMatrix& bias) {
@@ -824,10 +841,15 @@ void CudaOps::rotaryRotateInverseInPlace(CudaMatrix& tensor, int headCount, int 
 }
 
 void CudaOps::embeddingGatherInto(const CudaMatrix& weight, const CudaIntBuffer& tokenIds, size_t tokenCount, CudaMatrix& out) {
-    if (weight.empty()) throw std::invalid_argument("CudaOps::embeddingGatherInto empty weight");
-    if (tokenCount == 0) throw std::invalid_argument("CudaOps::embeddingGatherInto empty tokenCount");
     if (tokenIds.deviceData == nullptr) throw std::invalid_argument("CudaOps::embeddingGatherInto empty tokenIds");
     if (tokenCount > tokenIds.capacityCount) throw std::invalid_argument("CudaOps::embeddingGatherInto tokenCount exceeds capacity");
+    CudaOps::embeddingGatherInto(weight, tokenIds.deviceData, tokenCount, out);
+}
+
+void CudaOps::embeddingGatherInto(const CudaMatrix& weight, const int* tokenIdsDevice, size_t tokenCount, CudaMatrix& out) {
+    if (weight.empty()) throw std::invalid_argument("CudaOps::embeddingGatherInto empty weight");
+    if (tokenCount == 0) throw std::invalid_argument("CudaOps::embeddingGatherInto empty tokenCount");
+    if (tokenIdsDevice == nullptr) throw std::invalid_argument("CudaOps::embeddingGatherInto empty tokenIds");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::embeddingGatherInto no CUDA device");
 
     const int vocabularySize = static_cast<int>(weight.rows);
@@ -836,16 +858,21 @@ void CudaOps::embeddingGatherInto(const CudaMatrix& weight, const CudaIntBuffer&
 
     const int elementCount = embeddingDim * static_cast<int>(tokenCount);
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsEmbeddingGatherEntry<<<blockCount, CudaOps::threadCount>>>(weight.buffer.deviceData, tokenIds.deviceData, out.buffer.deviceData, embeddingDim, static_cast<int>(tokenCount), vocabularySize);
+    CudaOpsEmbeddingGatherEntry<<<blockCount, CudaOps::threadCount>>>(weight.buffer.deviceData, tokenIdsDevice, out.buffer.deviceData, embeddingDim, static_cast<int>(tokenCount), vocabularySize);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsEmbeddingGatherEntry launch");
 }
 
 void CudaOps::embeddingScatterAddInto(CudaMatrix& weightGradient, const CudaIntBuffer& tokenIds, size_t tokenCount, const CudaMatrix& outputGradient) {
+    if (tokenIds.deviceData == nullptr) throw std::invalid_argument("CudaOps::embeddingScatterAddInto empty tokenIds");
+    if (tokenCount > tokenIds.capacityCount) throw std::invalid_argument("CudaOps::embeddingScatterAddInto tokenCount exceeds capacity");
+    CudaOps::embeddingScatterAddInto(weightGradient, tokenIds.deviceData, tokenCount, outputGradient);
+}
+
+void CudaOps::embeddingScatterAddInto(CudaMatrix& weightGradient, const int* tokenIdsDevice, size_t tokenCount, const CudaMatrix& outputGradient) {
     if (weightGradient.empty()) throw std::invalid_argument("CudaOps::embeddingScatterAddInto empty weightGradient");
     if (outputGradient.empty()) throw std::invalid_argument("CudaOps::embeddingScatterAddInto empty outputGradient");
     if (tokenCount == 0) throw std::invalid_argument("CudaOps::embeddingScatterAddInto empty tokenCount");
-    if (tokenIds.deviceData == nullptr) throw std::invalid_argument("CudaOps::embeddingScatterAddInto empty tokenIds");
-    if (tokenCount > tokenIds.capacityCount) throw std::invalid_argument("CudaOps::embeddingScatterAddInto tokenCount exceeds capacity");
+    if (tokenIdsDevice == nullptr) throw std::invalid_argument("CudaOps::embeddingScatterAddInto empty tokenIds");
     if (outputGradient.cols != tokenCount) throw std::invalid_argument("CudaOps::embeddingScatterAddInto tokenCount mismatch");
     if (static_cast<size_t>(outputGradient.rows) != weightGradient.cols) throw std::invalid_argument("CudaOps::embeddingScatterAddInto embedding dim mismatch");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::embeddingScatterAddInto no CUDA device");
@@ -854,8 +881,22 @@ void CudaOps::embeddingScatterAddInto(CudaMatrix& weightGradient, const CudaIntB
     const int embeddingDim = static_cast<int>(weightGradient.cols);
     const int elementCount = embeddingDim * static_cast<int>(tokenCount);
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsEmbeddingScatterAddEntry<<<blockCount, CudaOps::threadCount>>>(weightGradient.buffer.deviceData, tokenIds.deviceData, outputGradient.buffer.deviceData, embeddingDim, static_cast<int>(tokenCount), vocabularySize);
+    CudaOpsEmbeddingScatterAddEntry<<<blockCount, CudaOps::threadCount>>>(weightGradient.buffer.deviceData, tokenIdsDevice, outputGradient.buffer.deviceData, embeddingDim, static_cast<int>(tokenCount), vocabularySize);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsEmbeddingScatterAddEntry launch");
+}
+
+void CudaOps::embeddingZeroRows(CudaMatrix& weightGradient, const int* tokenIdsDevice, size_t tokenCount) {
+    if (weightGradient.empty()) throw std::invalid_argument("CudaOps::embeddingZeroRows empty weightGradient");
+    if (tokenCount == 0) return;
+    if (tokenIdsDevice == nullptr) throw std::invalid_argument("CudaOps::embeddingZeroRows empty tokenIds");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::embeddingZeroRows no CUDA device");
+
+    const int vocabularySize = static_cast<int>(weightGradient.rows);
+    const int embeddingDim = static_cast<int>(weightGradient.cols);
+    const int elementCount = embeddingDim * static_cast<int>(tokenCount);
+    const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsEmbeddingZeroRowsEntry<<<blockCount, CudaOps::threadCount>>>(weightGradient.buffer.deviceData, tokenIdsDevice, embeddingDim, static_cast<int>(tokenCount), vocabularySize);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsEmbeddingZeroRowsEntry launch");
 }
 
 float CudaOps::crossEntropyLossFromIds(const CudaMatrix& probabilities, const CudaIntBuffer& targetTokenIds, size_t tokenCount) {

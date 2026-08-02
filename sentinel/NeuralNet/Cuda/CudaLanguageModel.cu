@@ -42,6 +42,14 @@ void CudaLanguageModelGradients::zeroInPlace() {
     CudaOps::zeroInPlace(this->projectionBias);
 }
 
+void CudaLanguageModelGradients::zeroInPlaceExceptEmbedding() {
+    for (CudaTransformerBlockGradients& block : this->blocks)
+        block.zeroInPlace();
+    CudaOps::zeroInPlace(this->finalNormGamma);
+    CudaOps::zeroInPlace(this->projectionWeight);
+    CudaOps::zeroInPlace(this->projectionBias);
+}
+
 void CudaLanguageModelGradients::addInPlace(const CudaLanguageModelGradients& other) {
     CudaOps::addInPlace(this->tokenEmbedding, other.tokenEmbedding);
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex)
@@ -97,6 +105,8 @@ void CudaLanguageModel::ensureTrainWorkspaces() {
     this->tokenIdsBuffer.ensureCapacity(maxColumns);
     this->targetTokenIdsBuffer.ensureCapacity(maxColumns);
     this->meanDivisorBuffer.ensureCapacity(maxColumns);
+    this->packH2dDevice.ensureCapacity(3 * maxColumns);
+    this->adamWindowTokenIdsBuffer.ensureCapacity(maxColumns);
 
     // full vocab x seq tensors are not needed for chunked train head
     this->logits.free();
@@ -265,12 +275,35 @@ float CudaLanguageModel::flushPackedHostBuffers(int segmentLength, int exampleCo
     if (static_cast<size_t>(segmentLength) * static_cast<size_t>(exampleCount) != tokenCount)
         throw std::invalid_argument("CudaLanguageModel::flushPackedHostBuffers tokenCount mismatch");
 
-    this->forwardTrunkInto(this->packedInputTokenIds, segmentLength);
+    // One H2D for [inputs | targets | meanDivisors], then cheap D2D splits.
+    this->packH2dHost.resize(3 * tokenCount);
+    std::copy(this->packedInputTokenIds.begin(), this->packedInputTokenIds.end(), this->packH2dHost.begin());
+    std::copy(this->packedTargetTokenIds.begin(), this->packedTargetTokenIds.end(), this->packH2dHost.begin() + tokenCount);
+    std::copy(this->packedMeanDivisors.begin(), this->packedMeanDivisors.end(), this->packH2dHost.begin() + 2 * tokenCount);
 
+    this->packH2dDevice.ensureCapacity(3 * tokenCount);
+    this->packH2dDevice.copyFromHost(this->packH2dHost.data(), 3 * tokenCount);
+
+    this->tokenIdsBuffer.ensureCapacity(tokenCount);
     this->targetTokenIdsBuffer.ensureCapacity(tokenCount);
-    this->targetTokenIdsBuffer.copyFromHost(this->packedTargetTokenIds.data(), tokenCount);
     this->meanDivisorBuffer.ensureCapacity(tokenCount);
-    this->meanDivisorBuffer.copyFromHost(this->packedMeanDivisors.data(), tokenCount);
+    const size_t bytes = tokenCount * sizeof(int);
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpy(this->tokenIdsBuffer.deviceData, this->packH2dDevice.deviceData, bytes, cudaMemcpyDeviceToDevice),
+        "CudaLanguageModel::flushPackedHostBuffers D2D inputs");
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpy(this->targetTokenIdsBuffer.deviceData, this->packH2dDevice.deviceData + tokenCount, bytes, cudaMemcpyDeviceToDevice),
+        "CudaLanguageModel::flushPackedHostBuffers D2D targets");
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpy(this->meanDivisorBuffer.deviceData, this->packH2dDevice.deviceData + 2 * tokenCount, bytes, cudaMemcpyDeviceToDevice),
+        "CudaLanguageModel::flushPackedHostBuffers D2D meanDivisors");
+
+    this->adamWindowTokenIds.insert(
+        this->adamWindowTokenIds.end(),
+        this->packedInputTokenIds.begin(),
+        this->packedInputTokenIds.end());
+
+    this->forwardTrunkFromDevice(tokenCount, segmentLength);
 
     if (this->epochLossSum.rows != 1 || this->epochLossSum.cols != 1)
         this->epochLossSum.ensureSize(1, 1);
@@ -387,13 +420,32 @@ void CudaLanguageModel::forwardTrunkInto(const std::vector<int>& tokenIds, int s
 
     this->tokenIdsBuffer.ensureCapacity(tokenIds.size());
     this->tokenIdsBuffer.copyFromHost(tokenIds.data(), tokenIds.size());
-    CudaOps::embeddingGatherInto(this->tokenEmbeddingWeight, this->tokenIdsBuffer, tokenIds.size(), this->hidden);
+    this->forwardTrunkFromDevice(tokenIds.size(), segmentLength);
+}
+
+void CudaLanguageModel::forwardTrunkFromDevice(size_t tokenCount, int segmentLength) {
+    if (tokenCount == 0) throw std::invalid_argument("CudaLanguageModel::forwardTrunkFromDevice empty tokenCount");
+    if (this->tokenEmbeddingWeight.empty()) throw std::logic_error("CudaLanguageModel::forwardTrunkFromDevice weights not uploaded");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaLanguageModel::forwardTrunkFromDevice no CUDA device");
+    if (this->tokenIdsBuffer.deviceData == nullptr || tokenCount > this->tokenIdsBuffer.capacityCount)
+        throw std::invalid_argument("CudaLanguageModel::forwardTrunkFromDevice tokenIdsBuffer not ready");
+
+    if (segmentLength > 0) {
+        if (static_cast<int>(tokenCount) % segmentLength != 0)
+            throw std::invalid_argument("CudaLanguageModel::forwardTrunkFromDevice tokenCount not divisible by segmentLength");
+        if (segmentLength > this->maximumPositionCount)
+            throw std::invalid_argument("CudaLanguageModel::forwardTrunkFromDevice segmentLength exceeds maximumPositionCount");
+    } else if (static_cast<int>(tokenCount) > this->maximumPositionCount) {
+        throw std::invalid_argument("CudaLanguageModel::forwardTrunkFromDevice sequence longer than maximumPositionCount");
+    }
+
+    CudaOps::embeddingGatherInto(this->tokenEmbeddingWeight, this->tokenIdsBuffer, tokenCount, this->hidden);
 
     if (this->activationCheckpointing) {
         if (this->blockInputCheckpoints.size() != this->blocks.size())
             this->blockInputCheckpoints.resize(this->blocks.size());
         for (CudaMatrix& checkpoint : this->blockInputCheckpoints)
-            checkpoint.ensureSize(this->tokenEmbeddingWeight.cols, tokenIds.size());
+            checkpoint.ensureSize(this->tokenEmbeddingWeight.cols, tokenCount);
     }
 
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
@@ -406,6 +458,35 @@ void CudaLanguageModel::forwardTrunkInto(const std::vector<int>& tokenIds, int s
     }
 
     this->finalNorm.forward(this->hidden, this->normalized);
+}
+
+void CudaLanguageModel::zeroTrainGradientsAfterAdam() {
+    this->trainGradients.zeroInPlaceExceptEmbedding();
+    if (this->adamWindowTokenIds.empty()) {
+        CudaOps::zeroInPlace(this->trainGradients.tokenEmbedding);
+        return;
+    }
+
+    const size_t vocabularySize = this->trainGradients.tokenEmbedding.rows;
+    std::sort(this->adamWindowTokenIds.begin(), this->adamWindowTokenIds.end());
+    this->adamWindowTokenIds.erase(
+        std::unique(this->adamWindowTokenIds.begin(), this->adamWindowTokenIds.end()),
+        this->adamWindowTokenIds.end());
+
+    // Dense memset is cheaper once unique rows approach vocab size.
+    if (this->adamWindowTokenIds.size() * 2 >= vocabularySize) {
+        CudaOps::zeroInPlace(this->trainGradients.tokenEmbedding);
+        this->adamWindowTokenIds.clear();
+        return;
+    }
+
+    this->adamWindowTokenIdsBuffer.ensureCapacity(this->adamWindowTokenIds.size());
+    this->adamWindowTokenIdsBuffer.copyFromHost(this->adamWindowTokenIds.data(), this->adamWindowTokenIds.size());
+    CudaOps::embeddingZeroRows(
+        this->trainGradients.tokenEmbedding,
+        this->adamWindowTokenIdsBuffer.deviceData,
+        this->adamWindowTokenIds.size());
+    this->adamWindowTokenIds.clear();
 }
 
 void CudaLanguageModel::accumulateChunkedProjection(size_t tokenCount, int segmentLength, int exampleCountInPack, CudaLanguageModelGradients& gradients) {
@@ -617,7 +698,7 @@ void CudaLanguageModel::trainOnExamples(
     if (exampleCount <= 0) {
         if (flushRemainder && accumulatedExampleCount > 0) {
             this->applyGradients(this->trainGradients, 1.0f / static_cast<float>(accumulatedExampleCount));
-            this->trainGradients.zeroInPlace();
+            this->zeroTrainGradientsAfterAdam();
             accumulatedExampleCount = 0;
             microbatchesSinceStep = 0;
         }
@@ -682,7 +763,7 @@ void CudaLanguageModel::trainOnExamples(
             const bool isLastPack = flushRemainder && packEnd >= exampleCount;
             if (accumulatedExampleCount >= examplesPerAdamStep || isLastPack) {
                 this->applyGradients(this->trainGradients, 1.0f / static_cast<float>(accumulatedExampleCount));
-                this->trainGradients.zeroInPlace();
+                this->zeroTrainGradientsAfterAdam();
                 accumulatedExampleCount = 0;
                 microbatchesSinceStep = 0;
             }
@@ -693,7 +774,7 @@ void CudaLanguageModel::trainOnExamples(
 
     if (flushRemainder && accumulatedExampleCount > 0) {
         this->applyGradients(this->trainGradients, 1.0f / static_cast<float>(accumulatedExampleCount));
-        this->trainGradients.zeroInPlace();
+        this->zeroTrainGradientsAfterAdam();
         accumulatedExampleCount = 0;
         microbatchesSinceStep = 0;
     }
@@ -715,6 +796,7 @@ void CudaLanguageModel::train(const LanguageModelDataset& trainDataset, const La
         const auto epochStart = std::chrono::steady_clock::now();
 
         this->trainGradients.zeroInPlace();
+        this->adamWindowTokenIds.clear();
         int accumulatedExampleCount = 0;
         int microbatchesSinceStep = 0;
         int processedExampleCount = 0;
@@ -788,6 +870,7 @@ void CudaLanguageModel::train(LanguageModelChunkSource& source, int epochs, int 
         const auto epochStart = std::chrono::steady_clock::now();
 
         this->trainGradients.zeroInPlace();
+        this->adamWindowTokenIds.clear();
         int accumulatedExampleCount = 0;
         int microbatchesSinceStep = 0;
         int processedExampleCount = 0;
@@ -817,7 +900,7 @@ void CudaLanguageModel::train(LanguageModelChunkSource& source, int epochs, int 
         }
         if (accumulatedExampleCount > 0) {
             this->applyGradients(this->trainGradients, 1.0f / static_cast<float>(accumulatedExampleCount));
-            this->trainGradients.zeroInPlace();
+            this->zeroTrainGradientsAfterAdam();
             accumulatedExampleCount = 0;
             microbatchesSinceStep = 0;
         }

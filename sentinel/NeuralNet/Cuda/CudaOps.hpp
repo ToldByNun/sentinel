@@ -81,8 +81,17 @@ public:
     /// <summary>gather embedding rows into embedDim x tokenCount matrix</summary>
     static void embeddingGatherInto(const CudaMatrix& weight, const CudaIntBuffer& tokenIds, size_t tokenCount, CudaMatrix& out);
 
+    /// <summary>gather using a raw device token-id pointer</summary>
+    static void embeddingGatherInto(const CudaMatrix& weight, const int* tokenIdsDevice, size_t tokenCount, CudaMatrix& out);
+
     /// <summary>scatter add outputGradient into weightGradient rows by tokenId with atomicAdd</summary>
     static void embeddingScatterAddInto(CudaMatrix& weightGradient, const CudaIntBuffer& tokenIds, size_t tokenCount, const CudaMatrix& outputGradient);
+
+    /// <summary>scatter add using a raw device token-id pointer</summary>
+    static void embeddingScatterAddInto(CudaMatrix& weightGradient, const int* tokenIdsDevice, size_t tokenCount, const CudaMatrix& outputGradient);
+
+    /// <summary>zero embedding gradient rows listed in tokenIds (duplicates ok)</summary>
+    static void embeddingZeroRows(CudaMatrix& weightGradient, const int* tokenIdsDevice, size_t tokenCount);
 
     /// <summary>mean -log p[target] over sequence columns</summary>
     static float crossEntropyLossFromIds(const CudaMatrix& probabilities, const CudaIntBuffer& targetTokenIds, size_t tokenCount);
@@ -151,6 +160,7 @@ private:
     __device__ static void runRotaryRotateInverseInPlace(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, int segmentLength, const float* cosTable, const float* sinTable);
     __device__ static void runEmbeddingGatherInto(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);
     __device__ static void runEmbeddingScatterAddInto(float* weightGradient, const int* tokenIds, const float* outputGradient, int embeddingDim, int tokenCount, int vocabularySize);
+    __device__ static void runEmbeddingZeroRows(float* weightGradient, const int* tokenIds, int embeddingDim, int tokenCount, int vocabularySize);
     __device__ static void runCrossEntropyLossFromIds(const float* probabilities, const int* targetTokenIds, float* columnLosses, int vocabularySize, int tokenCount);
     __device__ static void runCrossEntropyAddMeanLossFromIds(const float* probabilities, const int* targetTokenIds, float* lossSum, int vocabularySize, int tokenCount);
     __device__ static void runCrossEntropyLogitGradientFromIds(const float* probabilities, const int* targetTokenIds, float* logitGradient, int vocabularySize, int tokenCount);
@@ -180,6 +190,7 @@ private:
     friend __global__ void CudaOpsRotaryRotateInverseEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, int segmentLength, const float* cosTable, const float* sinTable);
     friend __global__ void CudaOpsEmbeddingGatherEntry(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);
     friend __global__ void CudaOpsEmbeddingScatterAddEntry(float* weightGradient, const int* tokenIds, const float* outputGradient, int embeddingDim, int tokenCount, int vocabularySize);
+    friend __global__ void CudaOpsEmbeddingZeroRowsEntry(float* weightGradient, const int* tokenIds, int embeddingDim, int tokenCount, int vocabularySize);
     friend __global__ void CudaOpsCrossEntropyLossFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* columnLosses, int vocabularySize, int tokenCount);
     friend __global__ void CudaOpsCrossEntropyAddMeanLossFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* lossSum, int vocabularySize, int tokenCount);
     friend __global__ void CudaOpsCrossEntropyLogitGradientFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* logitGradient, int vocabularySize, int tokenCount);
@@ -212,6 +223,7 @@ __global__ void CudaOpsRotaryRotateEntry(float* tensor, int headCount, int headD
 __global__ void CudaOpsRotaryRotateInverseEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, int segmentLength, const float* cosTable, const float* sinTable);
 __global__ void CudaOpsEmbeddingGatherEntry(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);
 __global__ void CudaOpsEmbeddingScatterAddEntry(float* weightGradient, const int* tokenIds, const float* outputGradient, int embeddingDim, int tokenCount, int vocabularySize);
+__global__ void CudaOpsEmbeddingZeroRowsEntry(float* weightGradient, const int* tokenIds, int embeddingDim, int tokenCount, int vocabularySize);
 __global__ void CudaOpsCrossEntropyLossFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* columnLosses, int vocabularySize, int tokenCount);
 __global__ void CudaOpsCrossEntropyAddMeanLossFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* lossSum, int vocabularySize, int tokenCount);
 __global__ void CudaOpsCrossEntropyLogitGradientFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* logitGradient, int vocabularySize, int tokenCount);

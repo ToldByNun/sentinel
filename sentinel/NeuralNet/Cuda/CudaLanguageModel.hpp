@@ -96,6 +96,9 @@ public:
 
     void zeroInPlace();
 
+    /// <summary>zero all grads except tokenEmbedding (sparse-zeroed separately)</summary>
+    void zeroInPlaceExceptEmbedding();
+
 
 
     /// <summary>total += other</summary>
@@ -228,7 +231,17 @@ public:
 
     std::vector<int> packedMeanDivisors;
 
+    /// <summary>fused [inputs|targets|meanDivisors] host staging for one H2D</summary>
+    std::vector<int> packH2dHost;
+
+    CudaIntBuffer packH2dDevice;
+
     CudaIntBuffer meanDivisorBuffer;
+
+    /// <summary>token ids seen since last Adam step (for sparse embedding grad zero)</summary>
+    std::vector<int> adamWindowTokenIds;
+
+    CudaIntBuffer adamWindowTokenIdsBuffer;
 
     static constexpr int padTargetId = -1;
     static constexpr int padInputId = 0;
@@ -316,6 +329,12 @@ public:
     /// <summary>forward trunk embed blocks finalNorm without vocab projection</summary>
 
     void forwardTrunkInto(const std::vector<int>& tokenIds, int segmentLength = 0);
+
+    /// <summary>forward trunk using tokenIds already resident in tokenIdsBuffer</summary>
+    void forwardTrunkFromDevice(size_t tokenCount, int segmentLength = 0);
+
+    /// <summary>zero train grads after Adam; sparse-zeros embedding rows from adamWindowTokenIds</summary>
+    void zeroTrainGradientsAfterAdam();
 
 
 
