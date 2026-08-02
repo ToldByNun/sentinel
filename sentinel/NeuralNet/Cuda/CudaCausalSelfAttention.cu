@@ -1,5 +1,6 @@
 #include "CudaCausalSelfAttention.hpp"
 
+#include "CudaAmp.hpp"
 #include "CudaFlashAttention.hpp"
 #include "CudaOps.hpp"
 #include "../Utils/SmokeLog.hpp"
@@ -73,6 +74,10 @@ void CudaCausalSelfAttention::uploadFrom(const CausalSelfAttention& host) {
     }
     this->cosTable.upload(hostCos);
     this->sinTable.upload(hostSin);
+    CudaAmp::registerMasterWeight(this->queryWeight.buffer.deviceData, this->queryWeight.elementCount());
+    CudaAmp::registerMasterWeight(this->keyWeight.buffer.deviceData, this->keyWeight.elementCount());
+    CudaAmp::registerMasterWeight(this->valueWeight.buffer.deviceData, this->valueWeight.elementCount());
+    CudaAmp::registerMasterWeight(this->outputWeight.buffer.deviceData, this->outputWeight.elementCount());
 }
 
 CudaCausalSelfAttention CudaCausalSelfAttention::createFrom(const CausalSelfAttention& host) {
@@ -83,9 +88,34 @@ CudaCausalSelfAttention CudaCausalSelfAttention::createFrom(const CausalSelfAtte
 
 void CudaCausalSelfAttention::projectAndRotate(const CudaMatrix& input, int positionOffset, int segmentLength) {
     CudaOps::copyInto(input, this->inputCache);
-    CudaMatrix::multiplyInto(this->queryWeight, input, this->query);
-    CudaMatrix::multiplyInto(this->keyWeight, input, this->key);
-    CudaMatrix::multiplyInto(this->valueWeight, input, this->value);
+    this->query.ensureSize(this->queryWeight.rows, input.cols);
+    this->key.ensureSize(this->keyWeight.rows, input.cols);
+    this->value.ensureSize(this->valueWeight.rows, input.cols);
+
+    bool usedSharedActivationHalf = false;
+    if (CudaAmp::preferMixedPrecision) {
+        const void* activationHalf = CudaAmp::castActivationToHalfScratch(input.buffer.deviceData, input.elementCount());
+        if (activationHalf != nullptr) {
+            const int tokens = static_cast<int>(input.cols);
+            const int embed = static_cast<int>(input.rows);
+            const bool queryOk = CudaAmp::launchCublasLtMatmulFp16PreCastRight(
+                this->queryWeight.buffer.deviceData, activationHalf, this->query.buffer.deviceData,
+                static_cast<int>(this->queryWeight.rows), tokens, embed, false, false, nullptr);
+            const bool keyOk = CudaAmp::launchCublasLtMatmulFp16PreCastRight(
+                this->keyWeight.buffer.deviceData, activationHalf, this->key.buffer.deviceData,
+                static_cast<int>(this->keyWeight.rows), tokens, embed, false, false, nullptr);
+            const bool valueOk = CudaAmp::launchCublasLtMatmulFp16PreCastRight(
+                this->valueWeight.buffer.deviceData, activationHalf, this->value.buffer.deviceData,
+                static_cast<int>(this->valueWeight.rows), tokens, embed, false, false, nullptr);
+            usedSharedActivationHalf = queryOk && keyOk && valueOk;
+        }
+    }
+    if (!usedSharedActivationHalf) {
+        CudaMatrix::multiplyInto(this->queryWeight, input, this->query);
+        CudaMatrix::multiplyInto(this->keyWeight, input, this->key);
+        CudaMatrix::multiplyInto(this->valueWeight, input, this->value);
+    }
+
     CudaOps::rotaryRotateInPlace(this->query, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, positionOffset, segmentLength);
     CudaOps::rotaryRotateInPlace(this->key, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, positionOffset, segmentLength);
 }

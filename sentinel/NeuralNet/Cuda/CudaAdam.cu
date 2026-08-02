@@ -613,7 +613,6 @@ void CudaAdam::updateMany(const CudaAdamUpdateItem* items, int itemCount, float 
                 gradientScale);
             CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaAdamUpdateInt8TensorEntry launch");
         }
-        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaAdamUpdateInt8TensorEntry synchronize");
         return;
     }
 

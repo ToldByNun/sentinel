@@ -443,6 +443,38 @@ __global__ void CudaOpsSiluEntry(const float* input, float* out, int elementCoun
     CudaOps::runSiluInto(input, out, elementCount);
 }
 
+__global__ void CudaOpsSiluMultiplyEntry(const float* gatePreActivation, const float* up, float* out, int elementCount) {
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+    const float gate = gatePreActivation[index];
+    const float silu = gate / (1.0f + expf(-gate));
+    out[index] = silu * up[index];
+}
+
+__global__ void CudaOpsSwigluFromStackedEntry(
+    const float* stackedPreBias,
+    const float* gateBias,
+    const float* upBias,
+    float* gatePreActivation,
+    float* up,
+    float* gateActivated,
+    float* hidden,
+    int hiddenRows,
+    int columnCount
+) {
+    const int elementCount = hiddenRows * columnCount;
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+    const int row = index / columnCount;
+    const float gate = stackedPreBias[index] + gateBias[row];
+    const float upValue = stackedPreBias[index + elementCount] + upBias[row];
+    const float silu = gate / (1.0f + expf(-gate));
+    gatePreActivation[index] = gate;
+    up[index] = upValue;
+    gateActivated[index] = silu;
+    hidden[index] = silu * upValue;
+}
+
 __global__ void CudaOpsSiluDerivativeEntry(const float* input, float* out, int elementCount) {
     CudaOps::runSiluDerivativeInto(input, out, elementCount);
 }
@@ -559,6 +591,58 @@ void CudaOps::siluInto(const CudaMatrix& input, CudaMatrix& out) {
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
     CudaOpsSiluEntry<<<blockCount, CudaOps::threadCount>>>(input.buffer.deviceData, out.buffer.deviceData, elementCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSiluEntry launch");
+}
+
+void CudaOps::siluMultiplyInto(const CudaMatrix& gatePreActivation, const CudaMatrix& up, CudaMatrix& out) {
+    if (gatePreActivation.empty() || up.empty()) throw std::invalid_argument("CudaOps::siluMultiplyInto empty input");
+    if (gatePreActivation.rows != up.rows || gatePreActivation.cols != up.cols)
+        throw std::invalid_argument("CudaOps::siluMultiplyInto shape mismatch");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::siluMultiplyInto no CUDA device");
+
+    out.ensureSize(gatePreActivation.rows, gatePreActivation.cols);
+    const int elementCount = static_cast<int>(gatePreActivation.elementCount());
+    const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsSiluMultiplyEntry<<<blockCount, CudaOps::threadCount>>>(
+        gatePreActivation.buffer.deviceData, up.buffer.deviceData, out.buffer.deviceData, elementCount);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSiluMultiplyEntry launch");
+}
+
+void CudaOps::swigluFromStackedPreBias(
+    const CudaMatrix& stackedPreBias,
+    const CudaMatrix& gateBias,
+    const CudaMatrix& upBias,
+    CudaMatrix& gatePreActivation,
+    CudaMatrix& up,
+    CudaMatrix& gateActivated,
+    CudaMatrix& hidden
+) {
+    if (stackedPreBias.empty()) throw std::invalid_argument("CudaOps::swigluFromStackedPreBias empty stacked");
+    if (gateBias.empty() || upBias.empty()) throw std::invalid_argument("CudaOps::swigluFromStackedPreBias empty bias");
+    if (stackedPreBias.rows != gateBias.rows + upBias.rows)
+        throw std::invalid_argument("CudaOps::swigluFromStackedPreBias stacked rows mismatch");
+    if (gateBias.rows != upBias.rows) throw std::invalid_argument("CudaOps::swigluFromStackedPreBias bias rows mismatch");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::swigluFromStackedPreBias no CUDA device");
+
+    const int hiddenRows = static_cast<int>(gateBias.rows);
+    const int columnCount = static_cast<int>(stackedPreBias.cols);
+    gatePreActivation.ensureSize(static_cast<size_t>(hiddenRows), static_cast<size_t>(columnCount));
+    up.ensureSize(static_cast<size_t>(hiddenRows), static_cast<size_t>(columnCount));
+    gateActivated.ensureSize(static_cast<size_t>(hiddenRows), static_cast<size_t>(columnCount));
+    hidden.ensureSize(static_cast<size_t>(hiddenRows), static_cast<size_t>(columnCount));
+
+    const int elementCount = hiddenRows * columnCount;
+    const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsSwigluFromStackedEntry<<<blockCount, CudaOps::threadCount>>>(
+        stackedPreBias.buffer.deviceData,
+        gateBias.buffer.deviceData,
+        upBias.buffer.deviceData,
+        gatePreActivation.buffer.deviceData,
+        up.buffer.deviceData,
+        gateActivated.buffer.deviceData,
+        hidden.buffer.deviceData,
+        hiddenRows,
+        columnCount);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSwigluFromStackedEntry launch");
 }
 
 void CudaOps::siluDerivativeInto(const CudaMatrix& input, CudaMatrix& out) {
@@ -1150,17 +1234,28 @@ void CudaOps::onlineSoftmaxUpdateFromChunk(const CudaMatrix& logitChunk, int chu
     if (logitChunk.empty()) throw std::invalid_argument("CudaOps::onlineSoftmaxUpdateFromChunk empty logitChunk");
     if (chunkRows <= 0 || static_cast<int>(logitChunk.rows) < chunkRows) throw std::invalid_argument("CudaOps::onlineSoftmaxUpdateFromChunk invalid chunkRows");
     if (logitChunk.cols != tokenCount) throw std::invalid_argument("CudaOps::onlineSoftmaxUpdateFromChunk tokenCount mismatch");
+    CudaOps::onlineSoftmaxUpdateFromChunk(logitChunk.buffer.deviceData, chunkRows, tokenCount, maximumLogits, sumExp);
+}
+
+void CudaOps::onlineSoftmaxUpdateFromChunk(const float* logitChunk, int chunkRows, size_t tokenCount, CudaMatrix& maximumLogits, CudaMatrix& sumExp) {
+    if (logitChunk == nullptr) throw std::invalid_argument("CudaOps::onlineSoftmaxUpdateFromChunk null logitChunk");
+    if (chunkRows <= 0) throw std::invalid_argument("CudaOps::onlineSoftmaxUpdateFromChunk invalid chunkRows");
     if (maximumLogits.cols != tokenCount || sumExp.cols != tokenCount) throw std::invalid_argument("CudaOps::onlineSoftmaxUpdateFromChunk stats shape");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::onlineSoftmaxUpdateFromChunk no CUDA device");
 
     const int tokenCountInt = static_cast<int>(tokenCount);
     const int blockCount = (tokenCountInt + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsOnlineSoftmaxUpdateEntry<<<blockCount, CudaOps::threadCount>>>(logitChunk.buffer.deviceData, chunkRows, tokenCountInt, maximumLogits.buffer.deviceData, sumExp.buffer.deviceData);
+    CudaOpsOnlineSoftmaxUpdateEntry<<<blockCount, CudaOps::threadCount>>>(logitChunk, chunkRows, tokenCountInt, maximumLogits.buffer.deviceData, sumExp.buffer.deviceData);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsOnlineSoftmaxUpdateEntry launch");
 }
 
 void CudaOps::captureTargetLogitFromChunk(const CudaMatrix& logitChunk, const CudaIntBuffer& targetTokenIds, int rowStart, int chunkRows, size_t tokenCount, CudaMatrix& targetLogits) {
     if (logitChunk.empty()) throw std::invalid_argument("CudaOps::captureTargetLogitFromChunk empty logitChunk");
+    CudaOps::captureTargetLogitFromChunk(logitChunk.buffer.deviceData, targetTokenIds, rowStart, chunkRows, tokenCount, targetLogits);
+}
+
+void CudaOps::captureTargetLogitFromChunk(const float* logitChunk, const CudaIntBuffer& targetTokenIds, int rowStart, int chunkRows, size_t tokenCount, CudaMatrix& targetLogits) {
+    if (logitChunk == nullptr) throw std::invalid_argument("CudaOps::captureTargetLogitFromChunk null logitChunk");
     if (targetTokenIds.deviceData == nullptr) throw std::invalid_argument("CudaOps::captureTargetLogitFromChunk empty targets");
     if (tokenCount > targetTokenIds.capacityCount) throw std::invalid_argument("CudaOps::captureTargetLogitFromChunk capacity");
     targetLogits.ensureSize(1, tokenCount);
@@ -1168,7 +1263,7 @@ void CudaOps::captureTargetLogitFromChunk(const CudaMatrix& logitChunk, const Cu
 
     const int tokenCountInt = static_cast<int>(tokenCount);
     const int blockCount = (tokenCountInt + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsCaptureTargetLogitEntry<<<blockCount, CudaOps::threadCount>>>(logitChunk.buffer.deviceData, targetTokenIds.deviceData, rowStart, chunkRows, tokenCountInt, targetLogits.buffer.deviceData);
+    CudaOpsCaptureTargetLogitEntry<<<blockCount, CudaOps::threadCount>>>(logitChunk, targetTokenIds.deviceData, rowStart, chunkRows, tokenCountInt, targetLogits.buffer.deviceData);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsCaptureTargetLogitEntry launch");
 }
 
@@ -1201,6 +1296,13 @@ void CudaOps::onlineSoftmaxAddMeanCrossEntropy(const CudaMatrix& targetLogits, c
 
 void CudaOps::onlineSoftmaxLogitGradientChunkInto(const CudaMatrix& logitChunk, const CudaIntBuffer& targetTokenIds, int rowStart, int chunkRows, size_t tokenCount, const CudaMatrix& maximumLogits, const CudaMatrix& sumExp, CudaMatrix& logitGradientChunk, float gradScale, int meanDivisor, int ignoreIndex, const CudaIntBuffer* perColumnMeanDivisor) {
     if (logitChunk.empty()) throw std::invalid_argument("CudaOps::onlineSoftmaxLogitGradientChunkInto empty logitChunk");
+    CudaOps::onlineSoftmaxLogitGradientChunkInto(
+        logitChunk.buffer.deviceData, targetTokenIds, rowStart, chunkRows, tokenCount,
+        maximumLogits, sumExp, logitGradientChunk, gradScale, meanDivisor, ignoreIndex, perColumnMeanDivisor);
+}
+
+void CudaOps::onlineSoftmaxLogitGradientChunkInto(const float* logitChunk, const CudaIntBuffer& targetTokenIds, int rowStart, int chunkRows, size_t tokenCount, const CudaMatrix& maximumLogits, const CudaMatrix& sumExp, CudaMatrix& logitGradientChunk, float gradScale, int meanDivisor, int ignoreIndex, const CudaIntBuffer* perColumnMeanDivisor) {
+    if (logitChunk == nullptr) throw std::invalid_argument("CudaOps::onlineSoftmaxLogitGradientChunkInto null logitChunk");
     if (chunkRows <= 0) throw std::invalid_argument("CudaOps::onlineSoftmaxLogitGradientChunkInto invalid chunkRows");
     if (meanDivisor <= 0) meanDivisor = static_cast<int>(tokenCount);
     if (tokenCount > targetTokenIds.capacityCount) throw std::invalid_argument("CudaOps::onlineSoftmaxLogitGradientChunkInto target capacity");
@@ -1213,7 +1315,7 @@ void CudaOps::onlineSoftmaxLogitGradientChunkInto(const CudaMatrix& logitChunk, 
     const int elementCount = chunkRows * tokenCountInt;
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
     CudaOpsOnlineSoftmaxLogitGradChunkEntry<<<blockCount, CudaOps::threadCount>>>(
-        logitChunk.buffer.deviceData,
+        logitChunk,
         targetTokenIds.deviceData,
         rowStart,
         chunkRows,

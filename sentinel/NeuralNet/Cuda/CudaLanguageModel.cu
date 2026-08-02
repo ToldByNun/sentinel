@@ -221,6 +221,9 @@ size_t CudaLanguageModel::bytesPerPackedColumn() const {
     bytes += 3 * intBytes;                  // packH2d fused staging
     bytes += intBytes;                      // adamWindowTokenIdsBuffer capacity unit
 
+    // Full LM-head logits cache (vocab x cols) for the single-pass CE path.
+    bytes += vocabularySize * floatBytes;
+
     if (this->activationCheckpointing) {
         if (this->useHalfActivationCheckpoints())
             bytes += this->blocks.size() * embeddingDim * 2u
@@ -229,8 +232,8 @@ size_t CudaLanguageModel::bytesPerPackedColumn() const {
             bytes += this->blocks.size() * embeddingDim * floatBytes;
     }
 
-    // Transient block/flash peak not preallocated in ensureTrainWorkspaces.
-    bytes += 32 * embeddingDim * floatBytes;
+    // Transient block/flash peak: QKV / attn / FFN scratch scales with depth.
+    bytes += (48ull + 24ull * this->blocks.size()) * embeddingDim * floatBytes;
     return bytes;
 }
 
@@ -738,7 +741,6 @@ void CudaLanguageModel::accumulateChunkedProjection(size_t tokenCount, int segme
 
     const int vocabularySize = static_cast<int>(headWeight.rows);
     const int embeddingDim = static_cast<int>(headWeight.cols);
-    const int chunkCap = (std::min)(this->logitChunkRows, vocabularySize);
     const float gradScale = CudaAmp::lossScalingActive() ? CudaAmp::lossScaler.scale : 1.0f;
 
     this->targetLogits.ensureSize(1, tokenCount);
@@ -748,8 +750,12 @@ void CudaLanguageModel::accumulateChunkedProjection(size_t tokenCount, int segme
     CudaOps::zeroInPlace(this->targetLogits);
     CudaOps::zeroInPlace(this->hiddenGradient);
 
-    auto projectChunk = [&](int rowStart, int chunkRows) {
-        this->logitChunk.ensureSize(static_cast<size_t>(chunkRows), tokenCount);
+    // Cache full logits when they fit: one LM-head GEMM instead of project-twice-per-chunk.
+    constexpr size_t maxCachedLogitsBytes = 512ull * 1024ull * 1024ull;
+    const size_t logitsBytes = static_cast<size_t>(vocabularySize) * tokenCount * sizeof(float);
+    const bool cacheFullLogits = logitsBytes <= maxCachedLogitsBytes;
+
+    auto projectChunk = [&](int rowStart, int chunkRows, float* destination) {
         const float* weightRows = headWeight.buffer.deviceData + static_cast<size_t>(rowStart) * static_cast<size_t>(embeddingDim);
         // LM-head stays FP32 even when amp is on — CE is numerically fragile in FP16
         const bool previousAmp = CudaAmp::preferMixedPrecision;
@@ -757,20 +763,71 @@ void CudaLanguageModel::accumulateChunkedProjection(size_t tokenCount, int segme
         CudaMatrix::multiplyPointersInto(
             weightRows, static_cast<size_t>(chunkRows), static_cast<size_t>(embeddingDim),
             this->normalized.buffer.deviceData, static_cast<size_t>(embeddingDim), tokenCount,
-            this->logitChunk.buffer.deviceData,
+            destination,
             false, false);
         CudaAmp::preferMixedPrecision = previousAmp;
-        CudaOps::broadcastBiasRowsAddInPlace(this->logitChunk, this->projectionBias, rowStart, chunkRows);
     };
 
+    if (cacheFullLogits) {
+        this->logits.ensureSize(static_cast<size_t>(vocabularySize), tokenCount);
+        const bool previousAmp = CudaAmp::preferMixedPrecision;
+        CudaAmp::preferMixedPrecision = false;
+        CudaMatrix::multiplyInto(headWeight, this->normalized, this->logits);
+        CudaAmp::preferMixedPrecision = previousAmp;
+        CudaOps::broadcastBiasAddInPlace(this->logits, this->projectionBias);
+
+        const int chunkCap = (std::min)(this->logitChunkRows, vocabularySize);
+        for (int rowStart = 0; rowStart < vocabularySize; rowStart += chunkCap) {
+            const int chunkRows = (std::min)(chunkCap, vocabularySize - rowStart);
+            const float* chunkPtr = this->logits.buffer.deviceData + static_cast<size_t>(rowStart) * tokenCount;
+            CudaOps::onlineSoftmaxUpdateFromChunk(chunkPtr, chunkRows, tokenCount, this->onlineSoftmaxMax, this->onlineSoftmaxSumExp);
+            CudaOps::captureTargetLogitFromChunk(chunkPtr, this->targetTokenIdsBuffer, rowStart, chunkRows, tokenCount, this->targetLogits);
+        }
+
+        CudaOps::onlineSoftmaxAddMeanCrossEntropy(
+            this->targetLogits, this->onlineSoftmaxMax, this->onlineSoftmaxSumExp, tokenCount,
+            this->epochLossSum, 1.0f, segmentLength,
+            &this->targetTokenIdsBuffer, CudaLanguageModel::padTargetId, &this->meanDivisorBuffer);
+
+        for (int rowStart = 0; rowStart < vocabularySize; rowStart += chunkCap) {
+            const int chunkRows = (std::min)(chunkCap, vocabularySize - rowStart);
+            const float* chunkPtr = this->logits.buffer.deviceData + static_cast<size_t>(rowStart) * tokenCount;
+            CudaOps::onlineSoftmaxLogitGradientChunkInto(
+                chunkPtr, this->targetTokenIdsBuffer, rowStart, chunkRows, tokenCount,
+                this->onlineSoftmaxMax, this->onlineSoftmaxSumExp, this->logitGradientChunk, gradScale, segmentLength,
+                CudaLanguageModel::padTargetId, &this->meanDivisorBuffer);
+
+            this->projectionWeightGradientChunk.ensureSize(static_cast<size_t>(chunkRows), static_cast<size_t>(embeddingDim));
+            const bool previousAmpGrad = CudaAmp::preferMixedPrecision;
+            CudaAmp::preferMixedPrecision = false;
+            CudaMatrix::multiplyInto(this->logitGradientChunk, this->normalized, this->projectionWeightGradientChunk, false, true);
+            CudaOps::addRowsInPlace(headWeightGradient, rowStart, this->projectionWeightGradientChunk);
+            CudaOps::sumColumnsAddIntoRows(this->logitGradientChunk, gradients.projectionBias, rowStart);
+
+            const float* weightRows = headWeight.buffer.deviceData + static_cast<size_t>(rowStart) * static_cast<size_t>(embeddingDim);
+            CudaMatrix::multiplyPointersInto(
+                weightRows, static_cast<size_t>(chunkRows), static_cast<size_t>(embeddingDim),
+                this->logitGradientChunk.buffer.deviceData, static_cast<size_t>(chunkRows), tokenCount,
+                this->hiddenGradientChunk.buffer.deviceData,
+                true, false);
+            CudaAmp::preferMixedPrecision = previousAmpGrad;
+            this->hiddenGradientChunk.rows = static_cast<size_t>(embeddingDim);
+            this->hiddenGradientChunk.cols = tokenCount;
+            CudaOps::addInPlace(this->hiddenGradient, this->hiddenGradientChunk);
+        }
+        return;
+    }
+
+    const int chunkCap = (std::min)(this->logitChunkRows, vocabularySize);
     for (int rowStart = 0; rowStart < vocabularySize; rowStart += chunkCap) {
         const int chunkRows = (std::min)(chunkCap, vocabularySize - rowStart);
-        projectChunk(rowStart, chunkRows);
+        this->logitChunk.ensureSize(static_cast<size_t>(chunkRows), tokenCount);
+        projectChunk(rowStart, chunkRows, this->logitChunk.buffer.deviceData);
+        CudaOps::broadcastBiasRowsAddInPlace(this->logitChunk, this->projectionBias, rowStart, chunkRows);
         CudaOps::onlineSoftmaxUpdateFromChunk(this->logitChunk, chunkRows, tokenCount, this->onlineSoftmaxMax, this->onlineSoftmaxSumExp);
         CudaOps::captureTargetLogitFromChunk(this->logitChunk, this->targetTokenIdsBuffer, rowStart, chunkRows, tokenCount, this->targetLogits);
     }
 
-    // mean over each example's true length; pad targets (padTargetId) are ignored
     CudaOps::onlineSoftmaxAddMeanCrossEntropy(
         this->targetLogits, this->onlineSoftmaxMax, this->onlineSoftmaxSumExp, tokenCount,
         this->epochLossSum, 1.0f, segmentLength,
@@ -778,7 +835,9 @@ void CudaLanguageModel::accumulateChunkedProjection(size_t tokenCount, int segme
 
     for (int rowStart = 0; rowStart < vocabularySize; rowStart += chunkCap) {
         const int chunkRows = (std::min)(chunkCap, vocabularySize - rowStart);
-        projectChunk(rowStart, chunkRows);
+        this->logitChunk.ensureSize(static_cast<size_t>(chunkRows), tokenCount);
+        projectChunk(rowStart, chunkRows, this->logitChunk.buffer.deviceData);
+        CudaOps::broadcastBiasRowsAddInPlace(this->logitChunk, this->projectionBias, rowStart, chunkRows);
         CudaOps::onlineSoftmaxLogitGradientChunkInto(
             this->logitChunk, this->targetTokenIdsBuffer, rowStart, chunkRows, tokenCount,
             this->onlineSoftmaxMax, this->onlineSoftmaxSumExp, this->logitGradientChunk, gradScale, segmentLength,
@@ -866,6 +925,9 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
 
         pushOffload(this->tokenEmbeddingWeight, this->hostTokenEmbeddingState, gradients.tokenEmbedding);
         this->adam.updateCpuOffloadedMany(offloadItems.data(), static_cast<int>(offloadItems.size()), effectiveGradientScale);
+        for (CudaTransformerBlock& block : this->blocks)
+            block.feedForward.syncFusedGateUpWeight();
+        CudaAmp::invalidateMasterWeightHalves();
 
         if (CudaAmp::lossScalingActive())
             CudaAmp::lossScaler.updateOnSuccess();
@@ -939,6 +1001,9 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
 
     pushItem(this->tokenEmbeddingWeight, this->tokenEmbeddingState, gradients.tokenEmbedding);
     this->adam.updateMany(items.data(), static_cast<int>(items.size()), effectiveGradientScale);
+    for (CudaTransformerBlock& block : this->blocks)
+        block.feedForward.syncFusedGateUpWeight();
+    CudaAmp::invalidateMasterWeightHalves();
 
     if (CudaAmp::lossScalingActive())
         CudaAmp::lossScaler.updateOnSuccess();
@@ -1819,6 +1884,9 @@ void CudaLanguageModel::uploadFrom(const LanguageModel& host) {
     this->kvCaches.clear();
     this->kvCaches.resize(this->blocks.size());
     this->trainStateReady = false;
+    CudaAmp::registerMasterWeight(this->tokenEmbeddingWeight.buffer.deviceData, this->tokenEmbeddingWeight.elementCount());
+    if (!this->tieEmbeddingProjection)
+        CudaAmp::registerMasterWeight(this->projectionWeight.buffer.deviceData, this->projectionWeight.elementCount());
 }
 
 CudaLanguageModel CudaLanguageModel::createFrom(const LanguageModel& host) {

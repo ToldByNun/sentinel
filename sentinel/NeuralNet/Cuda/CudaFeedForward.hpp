@@ -17,6 +17,10 @@ public:
     CudaMatrix downWeight;
     CudaMatrix downBias;
 
+    /// <summary>stacked [gateWeight; upWeight] for one forward GEMM</summary>
+    CudaMatrix gateUpWeight;
+    CudaMatrix gateUpPreActivation;
+
     CudaMatrix gatePreActivation;
     CudaMatrix gateActivated;
     CudaMatrix up;
@@ -34,6 +38,9 @@ public:
 
     /// <summary>upload all host FeedForward weights once</summary>
     void uploadFrom(const FeedForward& host);
+
+    /// <summary>rebuild stacked gate|up weight after Adam updates the split masters</summary>
+    void syncFusedGateUpWeight();
 
     /// <summary>create device FFN from host FFN</summary>
     static CudaFeedForward createFrom(const FeedForward& host);

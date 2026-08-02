@@ -88,10 +88,38 @@ public:
     /// <summary>cuBLASLt FP16xFP16 GEMM with FP32 accumulate into float out</summary>
     static bool launchCublasLtMatmulFp16(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds);
 
+    /// <summary>FP16 GEMM using a pre-cast right operand (avoids re-casting shared activations)</summary>
+    static bool launchCublasLtMatmulFp16PreCastRight(const float* deviceLeft, const void* rightHalf, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds);
+
+    /// <summary>cast activations to half into reusable scratch; returns device half pointer</summary>
+    static const void* castActivationToHalfScratch(const float* source, size_t elementCount);
+
+    /// <summary>register FP32 master weight for sticky FP16 GEMM casts (same pointer until free)</summary>
+    static void registerMasterWeight(const float* deviceData, size_t elementCount);
+
+    /// <summary>mark all registered master-weight FP16 mirrors stale (call after Adam)</summary>
+    static void invalidateMasterWeightHalves();
+
+    /// <summary>drop all master-weight registrations</summary>
+    static void clearMasterWeights();
+
 private:
     static CudaDeviceBuffer halfScratchLeft;
     static CudaDeviceBuffer halfScratchRight;
     static CudaDeviceBuffer nonFiniteFlag;
+
+    struct MasterWeightHalf {
+        const float* deviceData;
+        size_t elementCount;
+        CudaDeviceBuffer half;
+        bool valid;
+    };
+
+    static constexpr int maxMasterWeights = 128;
+    static MasterWeightHalf masterWeights[maxMasterWeights];
+    static int masterWeightCount;
+
+    static const void* masterWeightHalfOrNull(const float* deviceData, size_t elementCount);
 };
 
 #endif // CUDAAMP_HPP

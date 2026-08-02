@@ -141,6 +141,7 @@ C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\texture_types.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\vector_functions.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\vector_functions.hpp
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\vector_types.h
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaAmp.hpp
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaCausalSelfAttention.hpp
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaFlashAttention.hpp
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaKvCache.hpp
