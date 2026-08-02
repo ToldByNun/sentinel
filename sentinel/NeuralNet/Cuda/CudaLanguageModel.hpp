@@ -151,6 +151,9 @@ public:
 
     int maximumPositionCount;
 
+    /// <summary>share tokenEmbeddingWeight with LM head (mirrors LanguageModel::tieEmbeddingProjection)</summary>
+    bool tieEmbeddingProjection;
+
     /// <summary>cap packed columns so attention stays manageable default high with segmented attention</summary>
 
     int maxPackedColumns;
@@ -338,6 +341,10 @@ public:
 
     /// <summary>true when block inputs are stored as saturated FP16 (AMP on)</summary>
     bool useHalfActivationCheckpoints() const;
+
+    /// <summary>LM-head weight (token embedding when tied)</summary>
+    CudaMatrix& lmHeadWeight();
+    const CudaMatrix& lmHeadWeight() const;
 
 
 

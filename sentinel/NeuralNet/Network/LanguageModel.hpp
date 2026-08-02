@@ -70,6 +70,9 @@ public:
 
     int maximumPositionCount;
 
+    /// <summary>share token embedding with LM-head weight (default on; saves params + Adam VRAM)</summary>
+    bool tieEmbeddingProjection;
+
     LanguageModel(int vocabularySize, int embeddingDim, int maximumPositionCount, Adam optimizer, int blockCount = 2, int headCount = 4);
     ~LanguageModel();
 
@@ -114,9 +117,15 @@ public:
     /// <summary>reupload host weights to device mirror if active</summary>
     void syncDevice();
 
-    /// <summary>logits vocabSize x sequenceLength</summary>
-    Matrix forward(const std::vector<int>& tokenIds);
+    /// <summary>LM-head weight matrix (embedding when tied)</summary>
+    Matrix& lmHeadWeight();
+    const Matrix& lmHeadWeight() const;
 
+    /// <summary>enable/disable embed↔head tying; frees untied projection weight when enabling</summary>
+    void setTieEmbeddingProjection(bool enabled);
+
+    /// <summary>causal LM forward to vocab logits (device mirror if enabled)</summary>
+    Matrix forward(const std::vector<int>& tokenIds);
 
     /// <summary>mean CrossEntropy over positions for one example</summary>
     float exampleLoss(const LanguageModelExample& example);

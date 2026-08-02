@@ -32,7 +32,10 @@ LanguageModelGradients LanguageModelGradients::zerosFrom(const LanguageModel& mo
     for (const TransformerBlock& block : model.blocks)
         gradients.blocks.push_back(TransformerBlockGradients::zerosFrom(block));
     gradients.finalNormGamma = Matrix::zerosLike(model.finalNorm.gamma);
-    gradients.projectionWeight = Matrix::zerosLike(model.outputProjection.weight);
+    if (model.tieEmbeddingProjection)
+        gradients.projectionWeight = Matrix();
+    else
+        gradients.projectionWeight = Matrix::zerosLike(model.outputProjection.weight);
     gradients.projectionBias = Matrix::zerosLike(model.outputProjection.bias);
     return gradients;
 }
@@ -42,7 +45,8 @@ void LanguageModelGradients::zeroInPlace() {
     for (TransformerBlockGradients& block : this->blocks)
         block.zeroInPlace();
     Matrix::zeroInPlace(this->finalNormGamma);
-    Matrix::zeroInPlace(this->projectionWeight);
+    if (!this->projectionWeight.empty())
+        Matrix::zeroInPlace(this->projectionWeight);
     Matrix::zeroInPlace(this->projectionBias);
 }
 
@@ -51,7 +55,8 @@ void LanguageModelGradients::addInPlace(const LanguageModelGradients& other) {
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex)
         this->blocks[blockIndex].addInPlace(other.blocks[blockIndex]);
     Matrix::addInPlace(this->finalNormGamma, other.finalNormGamma);
-    Matrix::addInPlace(this->projectionWeight, other.projectionWeight);
+    if (!this->projectionWeight.empty() && !other.projectionWeight.empty())
+        Matrix::addInPlace(this->projectionWeight, other.projectionWeight);
     Matrix::addInPlace(this->projectionBias, other.projectionBias);
 }
 
@@ -60,12 +65,13 @@ void LanguageModelGradients::scaleInPlace(float scalar) {
     for (TransformerBlockGradients& block : this->blocks)
         block.scaleInPlace(scalar);
     Matrix::scaleInPlace(this->finalNormGamma, scalar);
-    Matrix::scaleInPlace(this->projectionWeight, scalar);
+    if (!this->projectionWeight.empty())
+        Matrix::scaleInPlace(this->projectionWeight, scalar);
     Matrix::scaleInPlace(this->projectionBias, scalar);
 }
 
 LanguageModel::LanguageModel(int vocabularySize, int embeddingDim, int maximumPositionCount, Adam optimizer, int blockCount, int headCount)
-    : tokenEmbedding(vocabularySize, embeddingDim), finalNorm(embeddingDim), outputProjection(UniformInit::matrix(vocabularySize, embeddingDim, 0.1f, 31u), UniformInit::matrix(vocabularySize, 1, 0.01f, 32u)), optimizer(optimizer), maximumPositionCount(maximumPositionCount), deviceStale(false), deviceTrainEnabled(false) {
+    : tokenEmbedding(vocabularySize, embeddingDim), finalNorm(embeddingDim), outputProjection(UniformInit::matrix(vocabularySize, embeddingDim, 0.1f, 31u), UniformInit::matrix(vocabularySize, 1, 0.01f, 32u)), optimizer(optimizer), maximumPositionCount(maximumPositionCount), tieEmbeddingProjection(true), deviceStale(false), deviceTrainEnabled(false) {
     if (maximumPositionCount <= 0) throw std::invalid_argument("LanguageModel maximumPositionCount must be > 0");
     if (blockCount <= 0) throw std::invalid_argument("LanguageModel blockCount must be > 0");
     if (headCount <= 0) throw std::invalid_argument("LanguageModel headCount must be > 0");
@@ -74,10 +80,37 @@ LanguageModel::LanguageModel(int vocabularySize, int embeddingDim, int maximumPo
     for (int blockIndex = 0; blockIndex < blockCount; ++blockIndex)
         this->blocks.push_back(TransformerBlock(embeddingDim, headCount, maximumPositionCount, 21u + static_cast<unsigned>(blockIndex) * 100u));
 
+    // weight tying: LM head shares tokenEmbedding; drop untied projection weight + Adam
+    this->outputProjection.weight = Matrix();
     this->tokenEmbeddingState = AdamState::zerosLike(this->tokenEmbedding.weight);
     this->finalNormGammaState = AdamState::zerosLike(this->finalNorm.gamma);
-    this->projectionWeightState = AdamState::zerosLike(this->outputProjection.weight);
+    this->projectionWeightState = AdamState{};
     this->projectionBiasState = AdamState::zerosLike(this->outputProjection.bias);
+}
+
+Matrix& LanguageModel::lmHeadWeight() {
+    return this->tieEmbeddingProjection ? this->tokenEmbedding.weight : this->outputProjection.weight;
+}
+
+const Matrix& LanguageModel::lmHeadWeight() const {
+    return this->tieEmbeddingProjection ? this->tokenEmbedding.weight : this->outputProjection.weight;
+}
+
+void LanguageModel::setTieEmbeddingProjection(bool enabled) {
+    if (this->tieEmbeddingProjection == enabled) return;
+
+    if (enabled) {
+        this->outputProjection.weight = Matrix();
+        this->projectionWeightState = AdamState{};
+        this->tieEmbeddingProjection = true;
+    } else {
+        this->outputProjection.weight = this->tokenEmbedding.weight;
+        this->projectionWeightState = AdamState::zerosLike(this->outputProjection.weight);
+        this->tieEmbeddingProjection = false;
+    }
+
+    if (this->device != nullptr)
+        this->deviceStale = true;
 }
 
 LanguageModel::~LanguageModel() = default;
@@ -123,6 +156,7 @@ void LanguageModel::enableCudaTrain() {
               << ", lossScale=" << (CudaAmp::useLossScaling ? "on" : "off")
               << ", int8 adam " << (CudaAdam::preferInt8Moments ? "on" : "off")
               << ", halfCkpt=" << (this->device->useHalfActivationCheckpoints() ? "on" : "off")
+              << ", tieEmbed=" << (this->tieEmbeddingProjection ? "on" : "off")
               << ", maxPackCols=" << this->device->maxPackedColumns << ")\n";
 }
 
@@ -251,7 +285,7 @@ Matrix LanguageModel::forwardLocal(const std::vector<int>& tokenIds, LanguageMod
         hidden = this->blocks[blockIndex].forward(hidden, cache.blockCaches[blockIndex]);
 
     cache.blockOutput = this->finalNorm.forward(hidden, cache.finalNormCache);
-    Matrix product = Matrix::multiply(this->outputProjection.weight, cache.blockOutput);
+    Matrix product = Matrix::multiply(this->lmHeadWeight(), cache.blockOutput);
     return LanguageModel::broadcastBiasAdd(product, this->outputProjection.bias);
 }
 
@@ -306,7 +340,7 @@ float LanguageModel::accumulateExample(const LanguageModelExample& example, Lang
     Matrix logitGradient = CrossEntropy::gradient(cache.probabilities, target);
     Matrix projectionWeightGradient = Matrix::multiply(logitGradient, cache.blockOutput, false, true);
     Matrix projectionBiasGradient = LanguageModel::sumColumns(logitGradient);
-    Matrix hiddenGradient = Matrix::multiply(this->outputProjection.weight, logitGradient, true, false);
+    Matrix hiddenGradient = Matrix::multiply(this->lmHeadWeight(), logitGradient, true, false);
 
     Matrix finalNormGammaGradient;
     hiddenGradient = this->finalNorm.backward(hiddenGradient, cache.finalNormCache, finalNormGammaGradient);
@@ -316,7 +350,10 @@ float LanguageModel::accumulateExample(const LanguageModelExample& example, Lang
 
     Matrix tokenEmbeddingGradient = this->tokenEmbedding.backward(hiddenGradient, example.inputTokenIds);
 
-    Matrix::addInPlace(gradients.projectionWeight, projectionWeightGradient);
+    if (this->tieEmbeddingProjection)
+        Matrix::addInPlace(gradients.tokenEmbedding, projectionWeightGradient);
+    else
+        Matrix::addInPlace(gradients.projectionWeight, projectionWeightGradient);
     Matrix::addInPlace(gradients.projectionBias, projectionBiasGradient);
     Matrix::addInPlace(gradients.finalNormGamma, finalNormGammaGradient);
     Matrix::addInPlace(gradients.tokenEmbedding, tokenEmbeddingGradient);
@@ -326,7 +363,8 @@ float LanguageModel::accumulateExample(const LanguageModelExample& example, Lang
 
 void LanguageModel::applyGradients(const LanguageModelGradients& gradients) {
     this->optimizer.step();
-    this->optimizer.update(this->outputProjection.weight, this->projectionWeightState, gradients.projectionWeight);
+    if (!this->tieEmbeddingProjection)
+        this->optimizer.update(this->outputProjection.weight, this->projectionWeightState, gradients.projectionWeight);
     this->optimizer.update(this->outputProjection.bias, this->projectionBiasState, gradients.projectionBias);
     this->optimizer.update(this->finalNorm.gamma, this->finalNormGammaState, gradients.finalNormGamma);
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex)
@@ -597,7 +635,7 @@ std::vector<int> LanguageModel::generate(const std::vector<int>& promptTokenIds,
 
 namespace {
 constexpr char kCheckpointMagic[4] = { 'S', 'N', 'L', 'M' };
-constexpr std::int32_t kCheckpointVersion = 1;
+constexpr std::int32_t kCheckpointVersion = 2;
 
 void writePod(std::ostream& out, const void* data, size_t byteCount) {
     out.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(byteCount));
@@ -686,6 +724,7 @@ void LanguageModel::saveCheckpoint(const std::string& path, bool includeOptimize
     writeF32(out, this->optimizer.epsilon);
     writeI32(out, this->optimizer.timeStep);
     writeI32(out, includeOptimizer ? 1 : 0);
+    writeI32(out, this->tieEmbeddingProjection ? 1 : 0);
 
     writeMatrix(out, this->tokenEmbedding.weight);
     for (const TransformerBlock& block : this->blocks) {
@@ -703,7 +742,8 @@ void LanguageModel::saveCheckpoint(const std::string& path, bool includeOptimize
         writeMatrix(out, block.feedForward.downBias);
     }
     writeMatrix(out, this->finalNorm.gamma);
-    writeMatrix(out, this->outputProjection.weight);
+    if (!this->tieEmbeddingProjection)
+        writeMatrix(out, this->outputProjection.weight);
     writeMatrix(out, this->outputProjection.bias);
 
     if (includeOptimizer) {
@@ -723,7 +763,8 @@ void LanguageModel::saveCheckpoint(const std::string& path, bool includeOptimize
             writeAdamState(out, block.feedForwardDownBiasState);
         }
         writeAdamState(out, this->finalNormGammaState);
-        writeAdamState(out, this->projectionWeightState);
+        if (!this->tieEmbeddingProjection)
+            writeAdamState(out, this->projectionWeightState);
         writeAdamState(out, this->projectionBiasState);
     }
 }
@@ -742,7 +783,7 @@ void LanguageModel::loadCheckpoint(const std::string& path) {
         throw std::runtime_error("LanguageModel::loadCheckpoint bad magic");
 
     const std::int32_t version = readI32(in);
-    if (version != kCheckpointVersion)
+    if (version != 1 && version != 2)
         throw std::runtime_error("LanguageModel::loadCheckpoint unsupported version");
 
     const std::int32_t vocabularySize = readI32(in);
@@ -763,6 +804,7 @@ void LanguageModel::loadCheckpoint(const std::string& path) {
     this->optimizer.epsilon = readF32(in);
     this->optimizer.timeStep = readI32(in);
     const bool includeOptimizer = readI32(in) != 0;
+    const bool tieWeights = version >= 2 ? (readI32(in) != 0) : false;
 
     this->tokenEmbedding.weight = readMatrix(in);
     expectMatrixShape(this->tokenEmbedding.weight, static_cast<size_t>(vocabularySize), static_cast<size_t>(embeddingDim), "tokenEmbedding");
@@ -781,8 +823,16 @@ void LanguageModel::loadCheckpoint(const std::string& path) {
         block.feedForward.downBias = readMatrix(in);
     }
     this->finalNorm.gamma = readMatrix(in);
-    this->outputProjection.weight = readMatrix(in);
+    this->tieEmbeddingProjection = tieWeights;
+    if (tieWeights) {
+        this->outputProjection.weight = Matrix();
+        this->projectionWeightState = AdamState{};
+    } else {
+        this->outputProjection.weight = readMatrix(in);
+        expectMatrixShape(this->outputProjection.weight, static_cast<size_t>(vocabularySize), static_cast<size_t>(embeddingDim), "projectionWeight");
+    }
     this->outputProjection.bias = readMatrix(in);
+    expectMatrixShape(this->outputProjection.bias, static_cast<size_t>(vocabularySize), 1, "projectionBias");
 
     if (includeOptimizer) {
         this->tokenEmbeddingState = readAdamState(in);
@@ -801,7 +851,8 @@ void LanguageModel::loadCheckpoint(const std::string& path) {
             block.feedForwardDownBiasState = readAdamState(in);
         }
         this->finalNormGammaState = readAdamState(in);
-        this->projectionWeightState = readAdamState(in);
+        if (!tieWeights)
+            this->projectionWeightState = readAdamState(in);
         this->projectionBiasState = readAdamState(in);
     }
 

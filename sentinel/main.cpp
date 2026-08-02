@@ -31,68 +31,82 @@
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
 
-    const std::string samplePath = "../SERA-Data/sera_sample.jsonl";
-    const size_t maximumTextCharacters = 400;
-    const size_t maximumTokenCount = 256;
-    const float trainRatio = 0.8f;
-    const int embeddingDim = 64;
-    const int maximumPositionCount = static_cast<int>(maximumTokenCount);
+    // set false to jump straight into the heavy SERA train (GPU load test)
+    const bool runSmokes = false;
 
-    SmokeLog::section("runtime");
+    const std::string samplePath = "../SERA-Data/sera_sample.jsonl";
+    const size_t maximumTextCharacters = 1200;
+    const size_t maximumTokenCount = 512;
+    const float trainRatio = 0.8f;
+    const int embeddingDim = 256;
+    const int blockCount = 4;
+    const int headCount = 8;
+    const int maximumPositionCount = static_cast<int>(maximumTokenCount);
+    const int trainEpochs = 10;
+    const int trainBatchSize = 256;
+    const int trainGradAccum = 2;
+    const int chunkExampleCount = 2048;
+    const int tokenizerVocabSize = 2000;
+    const int tokenizerSampleRows = 2000;
+    const int testReservoirCap = 512;
+
+    if (runSmokes) {
+        SmokeLog::section("runtime");
 #if defined(_OPENMP)
-    SmokeLog::result("OpenMP", "threads=%d", omp_get_max_threads());
+        SmokeLog::result("OpenMP", "threads=%d", omp_get_max_threads());
 #else
-    SmokeLog::note("OpenMP disabled");
+        SmokeLog::note("OpenMP disabled");
 #endif
 
-    SmokeLog::section("gemm");
-    CudaMatmul::runSmokeDemo(512);
+        SmokeLog::section("gemm");
+        CudaMatmul::runSmokeDemo(512);
 
-    SmokeLog::section("layers");
-    CudaFeedForward::runSmokeDemo(128, 64);
-    CudaFeedForward::runBackwardSmokeDemo(64, 32);
-    CudaRMSNorm::runSmokeDemo(128, 64);
-    CudaRMSNorm::runBackwardSmokeDemo(64, 32);
-    CudaAdam::runSmokeDemo(128, 64);
+        SmokeLog::section("layers");
+        CudaFeedForward::runSmokeDemo(128, 64);
+        CudaFeedForward::runBackwardSmokeDemo(64, 32);
+        CudaRMSNorm::runSmokeDemo(128, 64);
+        CudaRMSNorm::runBackwardSmokeDemo(64, 32);
+        CudaAdam::runSmokeDemo(128, 64);
 
-    SmokeLog::section("attention");
-    CausalSelfAttention::runSparseMaskSmokeDemo(32, 2, 16, 32, 4, 2);
-    CausalSelfAttention::runSparseBackwardSmokeDemo(32, 2, 12, 32, 4, 2);
-    CausalSelfAttention::runSparseComputeSmokeDemo(32, 2, 16, 32, 4, 2);
-    CudaCausalSelfAttention::runSmokeDemo(64, 4, 32, 64);
-    CudaCausalSelfAttention::runBackwardSmokeDemo(32, 2, 16, 32);
-    CudaCausalSelfAttention::runFlashParitySmokeDemo(64, 4, 48, 64);
-    CudaCausalSelfAttention::runKvCacheSmokeDemo(64, 4, 32, 64);
-    CudaCausalSelfAttention::runSparseSmokeDemo(32, 2, 16, 32, 4, 2);
+        SmokeLog::section("attention");
+        CausalSelfAttention::runSparseMaskSmokeDemo(32, 2, 16, 32, 4, 2);
+        CausalSelfAttention::runSparseBackwardSmokeDemo(32, 2, 12, 32, 4, 2);
+        CausalSelfAttention::runSparseComputeSmokeDemo(32, 2, 16, 32, 4, 2);
+        CudaCausalSelfAttention::runSmokeDemo(64, 4, 32, 64);
+        CudaCausalSelfAttention::runBackwardSmokeDemo(32, 2, 16, 32);
+        CudaCausalSelfAttention::runFlashParitySmokeDemo(64, 4, 48, 64);
+        CudaCausalSelfAttention::runKvCacheSmokeDemo(64, 4, 32, 64);
+        CudaCausalSelfAttention::runSparseSmokeDemo(32, 2, 16, 32, 4, 2);
 
-    SmokeLog::section("model");
-    CudaTransformerBlock::runSmokeDemo(64, 4, 32, 64);
-    CudaLanguageModel::runSmokeDemo(128, 64, 32, 2, 4);
-    CudaLanguageModel::runKvCacheSmokeDemo(128, 64, 32, 2, 4);
-    LanguageModel::runCheckpointSmokeDemo();
-    LanguageModel::runStreamingSmokeDemo();
-    CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);
-    CudaLanguageModel::runTrainSmokeDemo(1000, 64, 48, 2, 4);
-    CudaLanguageModel::runTrainInt8AdamSmokeDemo(1000, 64, 48, 2, 4);
-    CudaLanguageModel::runTrainProfileDemo(1000, 64, 48, 2, 4, true, 256);
-    CudaLanguageModel::runTrainProfileDemo(1000, 64, 48, 2, 4, false, 256);
-    CudaLanguageModel::runTrainProfileDemo(1000, 64, 256, 2, 4, true, 2048);
-    CudaLanguageModel::runTrainProfileDemo(1000, 64, 256, 2, 4, false, 2048);
-    CudaLanguageModel::runTrainProfileDemo(1000, 64, 512, 2, 4, true, 2048);
-    CudaLanguageModel::runTrainProfileDemo(1000, 64, 512, 2, 4, false, 2048);
-    CudaLanguageModel::runConsumerVramDemo();
+        SmokeLog::section("model");
+        CudaTransformerBlock::runSmokeDemo(64, 4, 32, 64);
+        CudaLanguageModel::runSmokeDemo(128, 64, 32, 2, 4);
+        CudaLanguageModel::runKvCacheSmokeDemo(128, 64, 32, 2, 4);
+        LanguageModel::runCheckpointSmokeDemo();
+        LanguageModel::runStreamingSmokeDemo();
+        CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);
+        CudaLanguageModel::runTrainSmokeDemo(1000, 64, 48, 2, 4);
+        CudaLanguageModel::runTrainInt8AdamSmokeDemo(1000, 64, 48, 2, 4);
+        CudaLanguageModel::runTrainProfileDemo(1000, 64, 48, 2, 4, true, 256);
+        CudaLanguageModel::runTrainProfileDemo(1000, 64, 48, 2, 4, false, 256);
+        CudaLanguageModel::runTrainProfileDemo(1000, 64, 256, 2, 4, true, 2048);
+        CudaLanguageModel::runTrainProfileDemo(1000, 64, 256, 2, 4, false, 2048);
+        CudaLanguageModel::runTrainProfileDemo(1000, 64, 512, 2, 4, true, 2048);
+        CudaLanguageModel::runTrainProfileDemo(1000, 64, 512, 2, 4, false, 2048);
+        CudaLanguageModel::runConsumerVramDemo();
+    }
 
     SmokeLog::section("sera train");
 
-    LanguageModelChunkSource source(samplePath, maximumTextCharacters, maximumTokenCount, 256, trainRatio, 42u, 256);
-    std::vector<std::string> tokenizerSample = source.prepareTokenizerSample(2000);
+    LanguageModelChunkSource source(samplePath, maximumTextCharacters, maximumTokenCount, chunkExampleCount, trainRatio, 42u, testReservoirCap);
+    std::vector<std::string> tokenizerSample = source.prepareTokenizerSample(tokenizerSampleRows);
     if (tokenizerSample.empty()) {
         SmokeLog::note(("no usable rows from " + samplePath).c_str());
         return 1;
     }
 
     BPETokenizer tokenizer;
-    tokenizer.train(tokenizerSample, 1000);
+    tokenizer.train(tokenizerSample, tokenizerVocabSize);
     source.setTokenizer(&tokenizer);
     source.materialize();
 
@@ -119,7 +133,7 @@ int main() {
         source.chunkExampleCount(),
         moreAfterPrompt ? "yes" : "no");
 
-    LanguageModel model(tokenizer.vocabSize(), embeddingDim, maximumPositionCount, Adam(0.001f), 2, 4);
+    LanguageModel model(tokenizer.vocabSize(), embeddingDim, maximumPositionCount, Adam(0.001f), blockCount, headCount);
 
     const std::vector<int> parityTokenIds = promptChunk.examples[0].inputTokenIds;
     Matrix cpuLogits = model.forward(parityTokenIds);
@@ -127,13 +141,15 @@ int main() {
     model.enableCuda();
     model.enableCudaTrain();
     model.setCudaPreferFlashAttention(true);
-    SmokeLog::result("model", "blocks=%zu  heads=%d  cuda=%s  train=%s  maxTok=%zu maxPackCols=%d flash=on stream=on",
+    SmokeLog::result("model", "blocks=%zu  heads=%d  cuda=%s  train=%s  maxTok=%zu maxPackCols=%d flash=on stream=on batch=%d accum=%d",
         model.blocks.size(),
         model.blocks[0].attention.headCount,
         model.cudaEnabled() ? "on" : "off",
         model.cudaTrainEnabled() ? "cuda" : "cpu-openmp",
         maximumTokenCount,
-        model.cudaMaxPackedColumns());
+        model.cudaMaxPackedColumns(),
+        trainBatchSize,
+        trainGradAccum);
 
     if (model.cudaEnabled()) {
         Matrix deviceLogits = model.forward(parityTokenIds);
@@ -143,7 +159,7 @@ int main() {
         SmokeLog::result("framework parity", "diff=%.2e", maximumDifference);
     }
 
-    model.train(source, 2, 1, 32, 2);
+    model.train(source, trainEpochs, 1, trainBatchSize, trainGradAccum);
     model.saveCheckpoint("sera_demo.snlm", true);
 
     SmokeLog::result("final", "trainLoss=n/a (streamed)");

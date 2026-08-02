@@ -205,7 +205,8 @@ bool CudaAmp::gradientsHaveNonFinite(const CudaLanguageModelGradients& gradients
 
     launchHasNonFiniteIntoFlag(gradients.tokenEmbedding, flag);
     launchHasNonFiniteIntoFlag(gradients.finalNormGamma, flag);
-    launchHasNonFiniteIntoFlag(gradients.projectionWeight, flag);
+    if (!gradients.projectionWeight.empty())
+        launchHasNonFiniteIntoFlag(gradients.projectionWeight, flag);
     launchHasNonFiniteIntoFlag(gradients.projectionBias, flag);
 
     for (const CudaTransformerBlockGradients& block : gradients.blocks) {

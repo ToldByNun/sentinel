@@ -16,7 +16,7 @@
 #include "../Optimizers/Adam.hpp"
 
 CudaLanguageModel::CudaLanguageModel()
-    : maximumPositionCount(0), maxPackedColumns(8192), maxPackedColumnsManual(false), logitChunkRows(2048), gradientAccumulationSteps(4), activationCheckpointing(true), adam(0.001f), trainStateReady(false) {}
+    : maximumPositionCount(0), tieEmbeddingProjection(true), maxPackedColumns(8192), maxPackedColumnsManual(false), logitChunkRows(2048), gradientAccumulationSteps(4), activationCheckpointing(true), adam(0.001f), trainStateReady(false) {}
 
 void CudaTransformerBlockAdamStates::ensureFrom(const CudaTransformerBlock& block) {
     // moments stay empty until first Adam update (lazy allocation for low VRAM before train)
@@ -29,7 +29,10 @@ void CudaLanguageModelGradients::ensureFrom(const CudaLanguageModel& model) {
     for (size_t blockIndex = 0; blockIndex < model.blocks.size(); ++blockIndex)
         this->blocks[blockIndex].ensureFrom(model.blocks[blockIndex]);
     this->finalNormGamma.ensureSize(model.finalNorm.gamma.rows, model.finalNorm.gamma.cols);
-    this->projectionWeight.ensureSize(model.projectionWeight.rows, model.projectionWeight.cols);
+    if (model.tieEmbeddingProjection)
+        this->projectionWeight.free();
+    else
+        this->projectionWeight.ensureSize(model.projectionWeight.rows, model.projectionWeight.cols);
     this->projectionBias.ensureSize(model.projectionBias.rows, model.projectionBias.cols);
 }
 
@@ -38,7 +41,8 @@ void CudaLanguageModelGradients::zeroInPlace() {
     for (CudaTransformerBlockGradients& block : this->blocks)
         block.zeroInPlace();
     CudaOps::zeroInPlace(this->finalNormGamma);
-    CudaOps::zeroInPlace(this->projectionWeight);
+    if (!this->projectionWeight.empty())
+        CudaOps::zeroInPlace(this->projectionWeight);
     CudaOps::zeroInPlace(this->projectionBias);
 }
 
@@ -46,7 +50,8 @@ void CudaLanguageModelGradients::zeroInPlaceExceptEmbedding() {
     for (CudaTransformerBlockGradients& block : this->blocks)
         block.zeroInPlace();
     CudaOps::zeroInPlace(this->finalNormGamma);
-    CudaOps::zeroInPlace(this->projectionWeight);
+    if (!this->projectionWeight.empty())
+        CudaOps::zeroInPlace(this->projectionWeight);
     CudaOps::zeroInPlace(this->projectionBias);
 }
 
@@ -55,7 +60,8 @@ void CudaLanguageModelGradients::addInPlace(const CudaLanguageModelGradients& ot
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex)
         this->blocks[blockIndex].addInPlace(other.blocks[blockIndex]);
     CudaOps::addInPlace(this->finalNormGamma, other.finalNormGamma);
-    CudaOps::addInPlace(this->projectionWeight, other.projectionWeight);
+    if (!this->projectionWeight.empty() && !other.projectionWeight.empty())
+        CudaOps::addInPlace(this->projectionWeight, other.projectionWeight);
     CudaOps::addInPlace(this->projectionBias, other.projectionBias);
 }
 
@@ -64,8 +70,21 @@ void CudaLanguageModelGradients::scaleInPlace(float scalar) {
     for (CudaTransformerBlockGradients& block : this->blocks)
         block.scaleInPlace(scalar);
     CudaOps::scaleInPlace(this->finalNormGamma, scalar);
-    CudaOps::scaleInPlace(this->projectionWeight, scalar);
+    if (!this->projectionWeight.empty())
+        CudaOps::scaleInPlace(this->projectionWeight, scalar);
     CudaOps::scaleInPlace(this->projectionBias, scalar);
+}
+
+bool CudaLanguageModel::useHalfActivationCheckpoints() const {
+    return this->activationCheckpointing && CudaAmp::preferMixedPrecision;
+}
+
+CudaMatrix& CudaLanguageModel::lmHeadWeight() {
+    return this->tieEmbeddingProjection ? this->tokenEmbeddingWeight : this->projectionWeight;
+}
+
+const CudaMatrix& CudaLanguageModel::lmHeadWeight() const {
+    return this->tieEmbeddingProjection ? this->tokenEmbeddingWeight : this->projectionWeight;
 }
 
 void CudaLanguageModel::ensureTrainState() {
@@ -146,10 +165,6 @@ void CudaLanguageModel::ensureTrainWorkspaces() {
         for (CudaMatrix& checkpoint : this->blockInputCheckpoints)
             checkpoint.ensureSize(embeddingDim, maxColumns);
     }
-}
-
-bool CudaLanguageModel::useHalfActivationCheckpoints() const {
-    return this->activationCheckpointing && CudaAmp::preferMixedPrecision;
 }
 
 size_t CudaLanguageModel::bytesPerPackedColumn() const {
@@ -255,7 +270,13 @@ void CudaLanguageModel::downloadTo(LanguageModel& host) {
         block.feedForward.downBias.downloadInto(hostBlock.feedForward.downBias);
     }
     this->finalNorm.gamma.downloadInto(host.finalNorm.gamma);
-    this->projectionWeight.downloadInto(host.outputProjection.weight);
+    host.tieEmbeddingProjection = this->tieEmbeddingProjection;
+    if (this->tieEmbeddingProjection) {
+        host.outputProjection.weight = Matrix();
+        host.projectionWeightState = AdamState{};
+    } else {
+        this->projectionWeight.downloadInto(host.outputProjection.weight);
+    }
     this->projectionBias.downloadInto(host.outputProjection.bias);
 }
 
@@ -280,7 +301,10 @@ void CudaLanguageModel::downloadOptimizerTo(LanguageModel& host) {
 
     downloadOrZero(this->tokenEmbeddingState, host.tokenEmbeddingState, this->tokenEmbeddingWeight.rows, this->tokenEmbeddingWeight.cols);
     downloadOrZero(this->finalNormGammaState, host.finalNormGammaState, this->finalNorm.gamma.rows, this->finalNorm.gamma.cols);
-    downloadOrZero(this->projectionWeightState, host.projectionWeightState, this->projectionWeight.rows, this->projectionWeight.cols);
+    if (this->tieEmbeddingProjection)
+        host.projectionWeightState = AdamState{};
+    else
+        downloadOrZero(this->projectionWeightState, host.projectionWeightState, this->projectionWeight.rows, this->projectionWeight.cols);
     downloadOrZero(this->projectionBiasState, host.projectionBiasState, this->projectionBias.rows, this->projectionBias.cols);
 
     if (this->blockAdamStates.size() != this->blocks.size())
@@ -320,7 +344,8 @@ void CudaLanguageModel::uploadOptimizerFrom(const LanguageModel& host) {
 
     this->tokenEmbeddingState.uploadFrom(host.tokenEmbeddingState);
     this->finalNormGammaState.uploadFrom(host.finalNormGammaState);
-    this->projectionWeightState.uploadFrom(host.projectionWeightState);
+    if (!this->tieEmbeddingProjection)
+        this->projectionWeightState.uploadFrom(host.projectionWeightState);
     this->projectionBiasState.uploadFrom(host.projectionBiasState);
 
     if (this->blockAdamStates.size() != this->blocks.size())
@@ -606,10 +631,19 @@ void CudaLanguageModel::accumulateChunkedProjection(size_t tokenCount, int segme
     if (exampleCountInPack <= 0) throw std::invalid_argument("CudaLanguageModel::accumulateChunkedProjection exampleCountInPack must be > 0");
     if (static_cast<size_t>(segmentLength) * static_cast<size_t>(exampleCountInPack) != tokenCount)
         throw std::invalid_argument("CudaLanguageModel::accumulateChunkedProjection tokenCount mismatch");
-    if (this->projectionWeight.empty()) throw std::logic_error("CudaLanguageModel::accumulateChunkedProjection missing projection");
 
-    const int vocabularySize = static_cast<int>(this->projectionWeight.rows);
-    const int embeddingDim = static_cast<int>(this->projectionWeight.cols);
+    const CudaMatrix& headWeight = this->lmHeadWeight();
+    if (headWeight.empty()) throw std::logic_error("CudaLanguageModel::accumulateChunkedProjection missing LM head weight");
+    if (this->projectionBias.empty()) throw std::logic_error("CudaLanguageModel::accumulateChunkedProjection missing projection bias");
+
+    CudaMatrix& headWeightGradient = this->tieEmbeddingProjection
+        ? gradients.tokenEmbedding
+        : gradients.projectionWeight;
+    if (headWeightGradient.empty())
+        throw std::logic_error("CudaLanguageModel::accumulateChunkedProjection missing LM head gradient");
+
+    const int vocabularySize = static_cast<int>(headWeight.rows);
+    const int embeddingDim = static_cast<int>(headWeight.cols);
     const int chunkCap = (std::min)(this->logitChunkRows, vocabularySize);
     const float gradScale = CudaAmp::lossScalingActive() ? CudaAmp::lossScaler.scale : 1.0f;
 
@@ -622,7 +656,7 @@ void CudaLanguageModel::accumulateChunkedProjection(size_t tokenCount, int segme
 
     auto projectChunk = [&](int rowStart, int chunkRows) {
         this->logitChunk.ensureSize(static_cast<size_t>(chunkRows), tokenCount);
-        const float* weightRows = this->projectionWeight.buffer.deviceData + static_cast<size_t>(rowStart) * static_cast<size_t>(embeddingDim);
+        const float* weightRows = headWeight.buffer.deviceData + static_cast<size_t>(rowStart) * static_cast<size_t>(embeddingDim);
         // LM-head stays FP32 even when amp is on — CE is numerically fragile in FP16
         const bool previousAmp = CudaAmp::preferMixedPrecision;
         CudaAmp::preferMixedPrecision = false;
@@ -660,10 +694,10 @@ void CudaLanguageModel::accumulateChunkedProjection(size_t tokenCount, int segme
         const bool previousAmp = CudaAmp::preferMixedPrecision;
         CudaAmp::preferMixedPrecision = false;
         CudaMatrix::multiplyInto(this->logitGradientChunk, this->normalized, this->projectionWeightGradientChunk, false, true);
-        CudaOps::addRowsInPlace(gradients.projectionWeight, rowStart, this->projectionWeightGradientChunk);
+        CudaOps::addRowsInPlace(headWeightGradient, rowStart, this->projectionWeightGradientChunk);
         CudaOps::sumColumnsAddIntoRows(this->logitGradientChunk, gradients.projectionBias, rowStart);
 
-        const float* weightRows = this->projectionWeight.buffer.deviceData + static_cast<size_t>(rowStart) * static_cast<size_t>(embeddingDim);
+        const float* weightRows = headWeight.buffer.deviceData + static_cast<size_t>(rowStart) * static_cast<size_t>(embeddingDim);
         CudaMatrix::multiplyPointersInto(
             weightRows, static_cast<size_t>(chunkRows), static_cast<size_t>(embeddingDim),
             this->logitGradientChunk.buffer.deviceData, static_cast<size_t>(chunkRows), tokenCount,
@@ -735,7 +769,8 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
         items.push_back(item);
     };
 
-    pushItem(this->projectionWeight, this->projectionWeightState, gradients.projectionWeight);
+    if (!this->tieEmbeddingProjection)
+        pushItem(this->projectionWeight, this->projectionWeightState, gradients.projectionWeight);
     pushItem(this->projectionBias, this->projectionBiasState, gradients.projectionBias);
     pushItem(this->finalNorm.gamma, this->finalNormGammaState, gradients.finalNormGamma);
 
@@ -1092,10 +1127,15 @@ void CudaLanguageModel::runTrainSmokeDemo(int vocabularySize, int embeddingDim, 
     device.accumulateExample(examples[0], deviceGradients);
     CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaLanguageModel train smoke synchronize");
     const float deviceLoss = device.epochLossSum.download().at(0, 0);
-    Matrix deviceProjectionWeightGrad = deviceGradients.projectionWeight.download();
+    Matrix deviceHeadWeightGrad = device.tieEmbeddingProjection
+        ? deviceGradients.tokenEmbedding.download()
+        : deviceGradients.projectionWeight.download();
+    const Matrix& hostHeadWeightGrad = host.tieEmbeddingProjection
+        ? hostGradients.tokenEmbedding
+        : hostGradients.projectionWeight;
     float maximumDifference = 0.0f;
-    for (size_t index = 0; index < hostGradients.projectionWeight.data.size(); ++index)
-        maximumDifference = (std::max)(maximumDifference, std::fabs(hostGradients.projectionWeight.data[index] - deviceProjectionWeightGrad.data[index]));
+    for (size_t index = 0; index < hostHeadWeightGrad.data.size(); ++index)
+        maximumDifference = (std::max)(maximumDifference, std::fabs(hostHeadWeightGrad.data[index] - deviceHeadWeightGrad.data[index]));
 
     CudaLanguageModelGradients packedGradients;
     packedGradients.ensureFrom(device);
@@ -1115,11 +1155,15 @@ void CudaLanguageModel::runTrainSmokeDemo(int vocabularySize, int embeddingDim, 
     for (int exampleIndex = 0; exampleIndex < packBatchSize; ++exampleIndex)
         device.accumulateExample(examples[static_cast<size_t>(exampleIndex)], sequentialGradients);
     const float sequentialLoss = device.epochLossSum.download().at(0, 0);
-    Matrix packedProjectionWeightGrad = packedGradients.projectionWeight.download();
-    Matrix sequentialProjectionWeightGrad = sequentialGradients.projectionWeight.download();
+    Matrix packedHeadWeightGrad = device.tieEmbeddingProjection
+        ? packedGradients.tokenEmbedding.download()
+        : packedGradients.projectionWeight.download();
+    Matrix sequentialHeadWeightGrad = device.tieEmbeddingProjection
+        ? sequentialGradients.tokenEmbedding.download()
+        : sequentialGradients.projectionWeight.download();
     float packedDifference = 0.0f;
-    for (size_t index = 0; index < packedProjectionWeightGrad.data.size(); ++index)
-        packedDifference = (std::max)(packedDifference, std::fabs(packedProjectionWeightGrad.data[index] - sequentialProjectionWeightGrad.data[index]));
+    for (size_t index = 0; index < packedHeadWeightGrad.data.size(); ++index)
+        packedDifference = (std::max)(packedDifference, std::fabs(packedHeadWeightGrad.data[index] - sequentialHeadWeightGrad.data[index]));
 
     const int warmupStepCount = 3;
     const int timedStepCount = 40;
@@ -1214,8 +1258,8 @@ void CudaLanguageModel::runTrainInt8AdamSmokeDemo(int vocabularySize, int embedd
     int8Device.accumulatePackedExamples(packPointers.data(), packBatchSize, int8Device.trainGradients);
     const float int8Loss = int8Device.epochLossSum.download().at(0, 0) / static_cast<float>(packBatchSize);
 
-    Matrix fp32Weight = fp32Device.projectionWeight.download();
-    Matrix int8Weight = int8Device.projectionWeight.download();
+    Matrix fp32Weight = fp32Device.lmHeadWeight().download();
+    Matrix int8Weight = int8Device.lmHeadWeight().download();
     float weightDifference = 0.0f;
     bool anyNonFinite = false;
     for (size_t index = 0; index < fp32Weight.data.size(); ++index) {
@@ -1357,7 +1401,7 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
 
         headFwdMs += gpuMs([&]() {
             device.finalNorm.forward(device.hidden, device.normalized);
-            CudaMatrix::multiplyInto(device.projectionWeight, device.normalized, device.logits);
+            CudaMatrix::multiplyInto(device.lmHeadWeight(), device.normalized, device.logits);
             CudaOps::broadcastBiasAddInPlace(device.logits, device.projectionBias);
         });
 
@@ -1372,10 +1416,13 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
 
         headBwdMs += gpuMs([&]() {
             CudaMatrix::multiplyInto(device.logitGradient, device.normalized, device.projectionWeightGradient, false, true);
-            CudaOps::addInPlace(device.trainGradients.projectionWeight, device.projectionWeightGradient);
+            if (device.tieEmbeddingProjection)
+                CudaOps::addInPlace(device.trainGradients.tokenEmbedding, device.projectionWeightGradient);
+            else
+                CudaOps::addInPlace(device.trainGradients.projectionWeight, device.projectionWeightGradient);
             CudaOps::sumColumnsInto(device.logitGradient, device.projectionBiasGradient);
             CudaOps::addInPlace(device.trainGradients.projectionBias, device.projectionBiasGradient);
-            CudaMatrix::multiplyInto(device.projectionWeight, device.logitGradient, device.hiddenGradient, true, false);
+            CudaMatrix::multiplyInto(device.lmHeadWeight(), device.logitGradient, device.hiddenGradient, true, false);
             device.finalNorm.backward(device.hiddenGradient, device.normInputGradientScratch, device.finalNormGammaGradient);
             CudaOps::addInPlace(device.trainGradients.finalNormGamma, device.finalNormGammaGradient);
             std::swap(device.hiddenGradient, device.normInputGradientScratch);
@@ -1479,6 +1526,7 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
 void CudaLanguageModel::uploadFrom(const LanguageModel& host) {
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaLanguageModel::uploadFrom no CUDA device");
 
+    this->tieEmbeddingProjection = host.tieEmbeddingProjection;
     this->tokenEmbeddingWeight.upload(host.tokenEmbedding.weight);
     this->blocks.clear();
     this->blocks.reserve(host.blocks.size());
@@ -1486,7 +1534,10 @@ void CudaLanguageModel::uploadFrom(const LanguageModel& host) {
         this->blocks.push_back(CudaTransformerBlock::createFrom(block));
 
     this->finalNorm.uploadFrom(host.finalNorm);
-    this->projectionWeight.upload(host.outputProjection.weight);
+    if (this->tieEmbeddingProjection)
+        this->projectionWeight.free();
+    else
+        this->projectionWeight.upload(host.outputProjection.weight);
     this->projectionBias.upload(host.outputProjection.bias);
     this->maximumPositionCount = host.maximumPositionCount;
     this->kvCaches.clear();
@@ -1547,7 +1598,7 @@ void CudaLanguageModel::forwardInto(const std::vector<int>& tokenIds, CudaMatrix
     }
 
     this->finalNorm.forward(this->hidden, this->normalized);
-    CudaMatrix::multiplyInto(this->projectionWeight, this->normalized, outLogits);
+    CudaMatrix::multiplyInto(this->lmHeadWeight(), this->normalized, outLogits);
     CudaOps::broadcastBiasAddInPlace(outLogits, this->projectionBias);
 }
 
@@ -1586,7 +1637,7 @@ void CudaLanguageModel::prefillInto(const std::vector<int>& tokenIds, CudaMatrix
     }
 
     this->finalNorm.forward(this->hidden, this->normalized);
-    CudaMatrix::multiplyInto(this->projectionWeight, this->normalized, outLogits);
+    CudaMatrix::multiplyInto(this->lmHeadWeight(), this->normalized, outLogits);
     CudaOps::broadcastBiasAddInPlace(outLogits, this->projectionBias);
 }
 
@@ -1610,7 +1661,7 @@ void CudaLanguageModel::decodeInto(int tokenId, CudaMatrix& outLogits) {
     }
 
     this->finalNorm.forward(this->hidden, this->normalized);
-    CudaMatrix::multiplyInto(this->projectionWeight, this->normalized, outLogits);
+    CudaMatrix::multiplyInto(this->lmHeadWeight(), this->normalized, outLogits);
     CudaOps::broadcastBiasAddInPlace(outLogits, this->projectionBias);
 }
 
