@@ -1,7 +1,11 @@
 #include "LanguageModel.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <utility>
@@ -14,6 +18,7 @@
 #include "../Cuda/CudaMatmul.hpp"
 #include "../Initializers/UniformInit.hpp"
 #include "../Losses/CrossEntropy.hpp"
+#include "../Utils/SmokeLog.hpp"
 
 #if defined(_OPENMP)
 #include <omp.h>
@@ -491,4 +496,267 @@ std::vector<int> LanguageModel::generate(const std::vector<int>& promptTokenIds,
     }
 
     return tokenIds;
+}
+
+namespace {
+constexpr char kCheckpointMagic[4] = { 'S', 'N', 'L', 'M' };
+constexpr std::int32_t kCheckpointVersion = 1;
+
+void writePod(std::ostream& out, const void* data, size_t byteCount) {
+    out.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(byteCount));
+    if (!out) throw std::runtime_error("LanguageModel checkpoint write failed");
+}
+
+void readPod(std::istream& in, void* data, size_t byteCount) {
+    in.read(reinterpret_cast<char*>(data), static_cast<std::streamsize>(byteCount));
+    if (!in) throw std::runtime_error("LanguageModel checkpoint read failed");
+}
+
+void writeI32(std::ostream& out, std::int32_t value) { writePod(out, &value, sizeof(value)); }
+void writeF32(std::ostream& out, float value) { writePod(out, &value, sizeof(value)); }
+std::int32_t readI32(std::istream& in) {
+    std::int32_t value = 0;
+    readPod(in, &value, sizeof(value));
+    return value;
+}
+float readF32(std::istream& in) {
+    float value = 0.0f;
+    readPod(in, &value, sizeof(value));
+    return value;
+}
+
+void writeMatrix(std::ostream& out, const Matrix& matrix) {
+    writeI32(out, static_cast<std::int32_t>(matrix.rows));
+    writeI32(out, static_cast<std::int32_t>(matrix.cols));
+    if (matrix.data.empty()) return;
+    writePod(out, matrix.data.data(), matrix.data.size() * sizeof(float));
+}
+
+Matrix readMatrix(std::istream& in) {
+    const std::int32_t rows = readI32(in);
+    const std::int32_t cols = readI32(in);
+    if (rows < 0 || cols < 0) throw std::runtime_error("LanguageModel checkpoint invalid matrix shape");
+    Matrix matrix(static_cast<size_t>(rows), static_cast<size_t>(cols), 0.0f);
+    if (matrix.data.empty()) return matrix;
+    readPod(in, matrix.data.data(), matrix.data.size() * sizeof(float));
+    return matrix;
+}
+
+void expectMatrixShape(const Matrix& matrix, size_t rows, size_t cols, const char* name) {
+    if (matrix.rows != rows || matrix.cols != cols)
+        throw std::runtime_error(std::string("LanguageModel checkpoint shape mismatch: ") + name);
+}
+
+void writeAdamState(std::ostream& out, const AdamState& state) {
+    writeMatrix(out, state.firstMoment);
+    writeMatrix(out, state.secondMoment);
+}
+
+AdamState readAdamState(std::istream& in) {
+    AdamState state;
+    state.firstMoment = readMatrix(in);
+    state.secondMoment = readMatrix(in);
+    return state;
+}
+}
+
+void LanguageModel::saveCheckpoint(const std::string& path, bool includeOptimizer) {
+    if (path.empty()) throw std::invalid_argument("LanguageModel::saveCheckpoint empty path");
+    if (this->blocks.empty()) throw std::logic_error("LanguageModel::saveCheckpoint no blocks");
+
+    if (this->cudaTrainEnabled() && this->device != nullptr) {
+        this->device->downloadTo(*this);
+        if (includeOptimizer)
+            this->device->downloadOptimizerTo(*this);
+        this->deviceStale = false;
+    } else if (this->cudaEnabled() && this->device != nullptr && !this->deviceStale) {
+        this->device->downloadTo(*this);
+    }
+
+    std::ofstream out(path, std::ios::binary);
+    if (!out) throw std::runtime_error("LanguageModel::saveCheckpoint cannot open file");
+
+    writePod(out, kCheckpointMagic, 4);
+    writeI32(out, kCheckpointVersion);
+    writeI32(out, this->tokenEmbedding.vocabSize());
+    writeI32(out, this->tokenEmbedding.embeddingDim());
+    writeI32(out, this->maximumPositionCount);
+    writeI32(out, static_cast<std::int32_t>(this->blocks.size()));
+    writeI32(out, this->blocks[0].attention.headCount);
+    writeF32(out, this->optimizer.learningRate);
+    writeF32(out, this->optimizer.beta1);
+    writeF32(out, this->optimizer.beta2);
+    writeF32(out, this->optimizer.epsilon);
+    writeI32(out, this->optimizer.timeStep);
+    writeI32(out, includeOptimizer ? 1 : 0);
+
+    writeMatrix(out, this->tokenEmbedding.weight);
+    for (const TransformerBlock& block : this->blocks) {
+        writeMatrix(out, block.attention.queryWeight);
+        writeMatrix(out, block.attention.keyWeight);
+        writeMatrix(out, block.attention.valueWeight);
+        writeMatrix(out, block.attention.outputWeight);
+        writeMatrix(out, block.attentionNorm.gamma);
+        writeMatrix(out, block.feedForwardNorm.gamma);
+        writeMatrix(out, block.feedForward.gateWeight);
+        writeMatrix(out, block.feedForward.gateBias);
+        writeMatrix(out, block.feedForward.upWeight);
+        writeMatrix(out, block.feedForward.upBias);
+        writeMatrix(out, block.feedForward.downWeight);
+        writeMatrix(out, block.feedForward.downBias);
+    }
+    writeMatrix(out, this->finalNorm.gamma);
+    writeMatrix(out, this->outputProjection.weight);
+    writeMatrix(out, this->outputProjection.bias);
+
+    if (includeOptimizer) {
+        writeAdamState(out, this->tokenEmbeddingState);
+        for (const TransformerBlock& block : this->blocks) {
+            writeAdamState(out, block.queryWeightState);
+            writeAdamState(out, block.keyWeightState);
+            writeAdamState(out, block.valueWeightState);
+            writeAdamState(out, block.attentionOutputWeightState);
+            writeAdamState(out, block.attentionNormGammaState);
+            writeAdamState(out, block.feedForwardNormGammaState);
+            writeAdamState(out, block.feedForwardGateWeightState);
+            writeAdamState(out, block.feedForwardGateBiasState);
+            writeAdamState(out, block.feedForwardUpWeightState);
+            writeAdamState(out, block.feedForwardUpBiasState);
+            writeAdamState(out, block.feedForwardDownWeightState);
+            writeAdamState(out, block.feedForwardDownBiasState);
+        }
+        writeAdamState(out, this->finalNormGammaState);
+        writeAdamState(out, this->projectionWeightState);
+        writeAdamState(out, this->projectionBiasState);
+    }
+}
+
+void LanguageModel::loadCheckpoint(const std::string& path) {
+    if (path.empty()) throw std::invalid_argument("LanguageModel::loadCheckpoint empty path");
+    if (this->blocks.empty()) throw std::logic_error("LanguageModel::loadCheckpoint no blocks");
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error("LanguageModel::loadCheckpoint cannot open file");
+
+    char magic[4] = {};
+    readPod(in, magic, 4);
+    if (magic[0] != kCheckpointMagic[0] || magic[1] != kCheckpointMagic[1]
+        || magic[2] != kCheckpointMagic[2] || magic[3] != kCheckpointMagic[3])
+        throw std::runtime_error("LanguageModel::loadCheckpoint bad magic");
+
+    const std::int32_t version = readI32(in);
+    if (version != kCheckpointVersion)
+        throw std::runtime_error("LanguageModel::loadCheckpoint unsupported version");
+
+    const std::int32_t vocabularySize = readI32(in);
+    const std::int32_t embeddingDim = readI32(in);
+    const std::int32_t maximumPositionCount = readI32(in);
+    const std::int32_t blockCount = readI32(in);
+    const std::int32_t headCount = readI32(in);
+    if (vocabularySize != this->tokenEmbedding.vocabSize()
+        || embeddingDim != this->tokenEmbedding.embeddingDim()
+        || maximumPositionCount != this->maximumPositionCount
+        || blockCount != static_cast<std::int32_t>(this->blocks.size())
+        || headCount != this->blocks[0].attention.headCount)
+        throw std::runtime_error("LanguageModel::loadCheckpoint architecture mismatch");
+
+    this->optimizer.learningRate = readF32(in);
+    this->optimizer.beta1 = readF32(in);
+    this->optimizer.beta2 = readF32(in);
+    this->optimizer.epsilon = readF32(in);
+    this->optimizer.timeStep = readI32(in);
+    const bool includeOptimizer = readI32(in) != 0;
+
+    this->tokenEmbedding.weight = readMatrix(in);
+    expectMatrixShape(this->tokenEmbedding.weight, static_cast<size_t>(vocabularySize), static_cast<size_t>(embeddingDim), "tokenEmbedding");
+    for (TransformerBlock& block : this->blocks) {
+        block.attention.queryWeight = readMatrix(in);
+        block.attention.keyWeight = readMatrix(in);
+        block.attention.valueWeight = readMatrix(in);
+        block.attention.outputWeight = readMatrix(in);
+        block.attentionNorm.gamma = readMatrix(in);
+        block.feedForwardNorm.gamma = readMatrix(in);
+        block.feedForward.gateWeight = readMatrix(in);
+        block.feedForward.gateBias = readMatrix(in);
+        block.feedForward.upWeight = readMatrix(in);
+        block.feedForward.upBias = readMatrix(in);
+        block.feedForward.downWeight = readMatrix(in);
+        block.feedForward.downBias = readMatrix(in);
+    }
+    this->finalNorm.gamma = readMatrix(in);
+    this->outputProjection.weight = readMatrix(in);
+    this->outputProjection.bias = readMatrix(in);
+
+    if (includeOptimizer) {
+        this->tokenEmbeddingState = readAdamState(in);
+        for (TransformerBlock& block : this->blocks) {
+            block.queryWeightState = readAdamState(in);
+            block.keyWeightState = readAdamState(in);
+            block.valueWeightState = readAdamState(in);
+            block.attentionOutputWeightState = readAdamState(in);
+            block.attentionNormGammaState = readAdamState(in);
+            block.feedForwardNormGammaState = readAdamState(in);
+            block.feedForwardGateWeightState = readAdamState(in);
+            block.feedForwardGateBiasState = readAdamState(in);
+            block.feedForwardUpWeightState = readAdamState(in);
+            block.feedForwardUpBiasState = readAdamState(in);
+            block.feedForwardDownWeightState = readAdamState(in);
+            block.feedForwardDownBiasState = readAdamState(in);
+        }
+        this->finalNormGammaState = readAdamState(in);
+        this->projectionWeightState = readAdamState(in);
+        this->projectionBiasState = readAdamState(in);
+    }
+
+    if (this->device != nullptr) {
+        this->device->uploadFrom(*this);
+        if (this->deviceTrainEnabled && includeOptimizer)
+            this->device->uploadOptimizerFrom(*this);
+        this->deviceStale = false;
+    }
+}
+
+void LanguageModel::runCheckpointSmokeDemo() {
+    LanguageModel model(64, 32, 16, Adam(0.001f), 1, 2);
+    model.enableCuda();
+    if (model.cudaEnabled())
+        model.enableCudaTrain();
+
+    const std::vector<int> tokenIds = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    Matrix before = model.forward(tokenIds);
+
+    // touch optimizer state so moments are non-zero when cuda train is on
+    if (model.cudaTrainEnabled()) {
+        LanguageModelDataset dataset;
+        dataset.vocabularySize = 64;
+        LanguageModelExample example;
+        example.inputTokenIds = tokenIds;
+        example.targetTokenIds = { 2, 3, 4, 5, 6, 7, 8, 9 };
+        dataset.examples.push_back(example);
+        model.train(dataset, LanguageModelDataset(), 1, 1, 1, 1);
+        before = model.forward(tokenIds);
+    }
+
+    const std::string path = "checkpoint_smoke.snlm";
+    model.saveCheckpoint(path, true);
+
+    LanguageModel restored(64, 32, 16, Adam(0.002f), 1, 2);
+    if (model.cudaEnabled()) {
+        restored.enableCuda();
+        if (model.cudaTrainEnabled())
+            restored.enableCudaTrain();
+    }
+    restored.loadCheckpoint(path);
+
+    Matrix after = restored.forward(tokenIds);
+    float maximumDifference = 0.0f;
+    for (size_t index = 0; index < before.data.size(); ++index)
+        maximumDifference = (std::max)(maximumDifference, std::fabs(before.data[index] - after.data[index]));
+
+    const bool optimizerMatch = restored.optimizer.timeStep == model.optimizer.timeStep
+        && restored.optimizer.learningRate == model.optimizer.learningRate;
+    SmokeLog::result("LanguageModel checkpoint", "path=%s  logitsDiff=%.2e  timeStep=%d  optOk=%s",
+        path.c_str(), maximumDifference, restored.optimizer.timeStep, optimizerMatch ? "yes" : "no");
+
+    std::remove(path.c_str());
 }

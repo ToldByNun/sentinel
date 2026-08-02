@@ -79,6 +79,12 @@ public:
     /// <summary>set every byte to zero</summary>
     void zeroInPlace();
 
+    /// <summary>device to host copy of count bytes</summary>
+    void copyToHost(signed char* hostData, size_t count) const;
+
+    /// <summary>host to device copy of count bytes</summary>
+    void copyFromHost(const signed char* hostData, size_t count);
+
     /// <summary>release device memory</summary>
     void free();
 };

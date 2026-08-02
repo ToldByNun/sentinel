@@ -10,6 +10,7 @@
 #include "../Optimizers/Adam.hpp"
 
 #include <memory>
+#include <string>
 #include <vector>
 
 class CudaLanguageModel;
@@ -127,6 +128,15 @@ public:
 
     /// <summary>next-token generation temperature&lt;=0 is greedy otherwise sample with optional topK</summary>
     std::vector<int> generate(const std::vector<int>& promptTokenIds, int newTokenCount, float temperature = 1.0f, int topK = 40, unsigned seed = 42u);
+
+    /// <summary>write weights (+ optional Adam moments) to a binary checkpoint file</summary>
+    void saveCheckpoint(const std::string& path, bool includeOptimizer = true);
+
+    /// <summary>load weights (+ Adam moments if present) from a binary checkpoint file</summary>
+    void loadCheckpoint(const std::string& path);
+
+    /// <summary>save/load roundtrip smoke on a tiny model</summary>
+    static void runCheckpointSmokeDemo();
 
 private:
     friend class CudaLanguageModel;

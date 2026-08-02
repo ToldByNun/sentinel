@@ -71,6 +71,7 @@ int main() {
     CudaTransformerBlock::runSmokeDemo(64, 4, 32, 64);
     CudaLanguageModel::runSmokeDemo(128, 64, 32, 2, 4);
     CudaLanguageModel::runKvCacheSmokeDemo(128, 64, 32, 2, 4);
+    LanguageModel::runCheckpointSmokeDemo();
     CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);
     CudaLanguageModel::runTrainSmokeDemo(1000, 64, 48, 2, 4);
     CudaLanguageModel::runTrainInt8AdamSmokeDemo(1000, 64, 48, 2, 4);
@@ -139,10 +140,12 @@ int main() {
 
     // longer sequences + flash; 2 epochs for timing, accum=2
     model.train(trainDataset, testDataset, 2, 1, 32, 2);
+    model.saveCheckpoint("sera_demo.snlm", true);
 
     SmokeLog::result("final", "trainLoss=%.6f", model.averageLoss(trainDataset));
     if (!testDataset.examples.empty())
         SmokeLog::result("final", "testLoss=%.6f", model.averageLoss(testDataset));
+    SmokeLog::result("checkpoint", "saved sera_demo.snlm (weights+adam)");
 
     const std::vector<int> prompt = trainDataset.examples[0].inputTokenIds;
     const std::vector<int> greedy = model.generate(prompt, 32, 0.0f, 0, 7u);

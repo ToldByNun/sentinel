@@ -42,6 +42,15 @@ cd sentinel
 | `sentinel/NeuralNet/Data/` | JSONL, dataset split, LM examples |
 | `sentinel/main.cpp` | Smoke + SERA demo |
 
+## Checkpoints
+
+```cpp
+model.saveCheckpoint("run.snlm", true);   // weights + Adam moments (FP32 on disk)
+model.loadCheckpoint("run.snlm");         // restores weights, Adam, timeStep
+```
+
+Binary format `SNLM` v1. Architecture must match. Int8 Adam moments are dequantized to FP32 for the file.
+
 ## Training (quick)
 
 ```cpp

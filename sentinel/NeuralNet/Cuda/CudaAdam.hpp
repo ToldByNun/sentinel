@@ -3,6 +3,8 @@
 
 #include "CudaMatmul.hpp"
 
+class AdamState;
+
 /// <summary>device resident first and second moment buffers FP32 or int8</summary>
 class CudaAdamState {
 public:
@@ -25,6 +27,12 @@ public:
 
     /// <summary>allocate zero int8 moments with per-block absmax scales</summary>
     void ensureInt8(const CudaMatrix& parameter, int blockSize);
+
+    /// <summary>download moments to host FP32 (dequantizes int8 if needed)</summary>
+    void downloadInto(AdamState& host, size_t rows, size_t cols) const;
+
+    /// <summary>upload host FP32 moments (respects preferInt8Moments)</summary>
+    void uploadFrom(const AdamState& host);
 
     /// <summary>allocate zero moments matching parameter shape FP32</summary>
     static CudaAdamState zerosLike(const CudaMatrix& parameter);

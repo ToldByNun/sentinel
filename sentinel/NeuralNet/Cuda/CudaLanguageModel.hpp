@@ -315,13 +315,15 @@ public:
 
 
     /// <summary>download all weights to host language model</summary>
-
     void downloadTo(LanguageModel& host);
 
+    /// <summary>download device Adam moments into host Adam states (FP32)</summary>
+    void downloadOptimizerTo(LanguageModel& host);
 
+    /// <summary>upload host Adam states to device moments</summary>
+    void uploadOptimizerFrom(const LanguageModel& host);
 
     /// <summary>forward backward one example accumulating into gradients returns mean loss</summary>
-
     float accumulateExample(const LanguageModelExample& example, CudaLanguageModelGradients& gradients);
 
 

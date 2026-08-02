@@ -199,6 +199,22 @@ void CudaByteBuffer::zeroInPlace() {
     CudaMatmul::throwIfCudaFailed(cudaMemset(this->deviceData, 0, this->capacityCount * sizeof(signed char)), "CudaByteBuffer::zeroInPlace");
 }
 
+void CudaByteBuffer::copyToHost(signed char* hostData, size_t count) const {
+    if (hostData == nullptr) throw std::invalid_argument("CudaByteBuffer::copyToHost null hostData");
+    if (count == 0) return;
+    if (this->deviceData == nullptr) throw std::logic_error("CudaByteBuffer::copyToHost empty buffer");
+    if (count > this->capacityCount) throw std::invalid_argument("CudaByteBuffer::copyToHost exceeds capacity");
+    CudaMatmul::throwIfCudaFailed(cudaMemcpy(hostData, this->deviceData, count * sizeof(signed char), cudaMemcpyDeviceToHost), "CudaByteBuffer::copyToHost");
+}
+
+void CudaByteBuffer::copyFromHost(const signed char* hostData, size_t count) {
+    if (hostData == nullptr) throw std::invalid_argument("CudaByteBuffer::copyFromHost null hostData");
+    if (count == 0) return;
+    if (this->deviceData == nullptr) throw std::logic_error("CudaByteBuffer::copyFromHost empty buffer");
+    if (count > this->capacityCount) throw std::invalid_argument("CudaByteBuffer::copyFromHost exceeds capacity");
+    CudaMatmul::throwIfCudaFailed(cudaMemcpy(this->deviceData, hostData, count * sizeof(signed char), cudaMemcpyHostToDevice), "CudaByteBuffer::copyFromHost");
+}
+
 void CudaByteBuffer::free() {
     if (this->deviceData == nullptr) return;
 

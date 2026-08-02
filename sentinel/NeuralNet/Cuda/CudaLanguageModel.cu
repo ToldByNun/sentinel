@@ -160,6 +160,91 @@ void CudaLanguageModel::downloadTo(LanguageModel& host) {
     this->projectionBias.downloadInto(host.outputProjection.bias);
 }
 
+void CudaLanguageModel::downloadOptimizerTo(LanguageModel& host) {
+    if (this->tokenEmbeddingWeight.empty()) throw std::logic_error("CudaLanguageModel::downloadOptimizerTo weights not uploaded");
+    if (host.blocks.size() != this->blocks.size())
+        throw std::invalid_argument("CudaLanguageModel::downloadOptimizerTo block count mismatch");
+
+    host.optimizer.learningRate = this->adam.learningRate;
+    host.optimizer.beta1 = this->adam.beta1;
+    host.optimizer.beta2 = this->adam.beta2;
+    host.optimizer.epsilon = this->adam.epsilon;
+    host.optimizer.timeStep = this->adam.timeStep;
+
+    auto downloadOrZero = [](const CudaAdamState& state, AdamState& hostState, size_t rows, size_t cols) {
+        if (state.empty()) {
+            hostState = AdamState::zerosLike(Matrix(rows, cols, 0.0f));
+            return;
+        }
+        state.downloadInto(hostState, rows, cols);
+    };
+
+    downloadOrZero(this->tokenEmbeddingState, host.tokenEmbeddingState, this->tokenEmbeddingWeight.rows, this->tokenEmbeddingWeight.cols);
+    downloadOrZero(this->finalNormGammaState, host.finalNormGammaState, this->finalNorm.gamma.rows, this->finalNorm.gamma.cols);
+    downloadOrZero(this->projectionWeightState, host.projectionWeightState, this->projectionWeight.rows, this->projectionWeight.cols);
+    downloadOrZero(this->projectionBiasState, host.projectionBiasState, this->projectionBias.rows, this->projectionBias.cols);
+
+    if (this->blockAdamStates.size() != this->blocks.size())
+        this->blockAdamStates.resize(this->blocks.size());
+
+    for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+        const CudaTransformerBlock& block = this->blocks[blockIndex];
+        TransformerBlock& hostBlock = host.blocks[blockIndex];
+        const CudaTransformerBlockAdamStates& states = this->blockAdamStates[blockIndex];
+
+        downloadOrZero(states.queryWeight, hostBlock.queryWeightState, block.attention.queryWeight.rows, block.attention.queryWeight.cols);
+        downloadOrZero(states.keyWeight, hostBlock.keyWeightState, block.attention.keyWeight.rows, block.attention.keyWeight.cols);
+        downloadOrZero(states.valueWeight, hostBlock.valueWeightState, block.attention.valueWeight.rows, block.attention.valueWeight.cols);
+        downloadOrZero(states.attentionOutputWeight, hostBlock.attentionOutputWeightState, block.attention.outputWeight.rows, block.attention.outputWeight.cols);
+        downloadOrZero(states.attentionNormGamma, hostBlock.attentionNormGammaState, block.attentionNorm.gamma.rows, block.attentionNorm.gamma.cols);
+        downloadOrZero(states.feedForwardNormGamma, hostBlock.feedForwardNormGammaState, block.feedForwardNorm.gamma.rows, block.feedForwardNorm.gamma.cols);
+        downloadOrZero(states.feedForwardGateWeight, hostBlock.feedForwardGateWeightState, block.feedForward.gateWeight.rows, block.feedForward.gateWeight.cols);
+        downloadOrZero(states.feedForwardGateBias, hostBlock.feedForwardGateBiasState, block.feedForward.gateBias.rows, block.feedForward.gateBias.cols);
+        downloadOrZero(states.feedForwardUpWeight, hostBlock.feedForwardUpWeightState, block.feedForward.upWeight.rows, block.feedForward.upWeight.cols);
+        downloadOrZero(states.feedForwardUpBias, hostBlock.feedForwardUpBiasState, block.feedForward.upBias.rows, block.feedForward.upBias.cols);
+        downloadOrZero(states.feedForwardDownWeight, hostBlock.feedForwardDownWeightState, block.feedForward.downWeight.rows, block.feedForward.downWeight.cols);
+        downloadOrZero(states.feedForwardDownBias, hostBlock.feedForwardDownBiasState, block.feedForward.downBias.rows, block.feedForward.downBias.cols);
+    }
+}
+
+void CudaLanguageModel::uploadOptimizerFrom(const LanguageModel& host) {
+    if (this->tokenEmbeddingWeight.empty()) throw std::logic_error("CudaLanguageModel::uploadOptimizerFrom weights not uploaded");
+    if (host.blocks.size() != this->blocks.size())
+        throw std::invalid_argument("CudaLanguageModel::uploadOptimizerFrom block count mismatch");
+
+    this->ensureTrainState();
+    this->adam.learningRate = host.optimizer.learningRate;
+    this->adam.beta1 = host.optimizer.beta1;
+    this->adam.beta2 = host.optimizer.beta2;
+    this->adam.epsilon = host.optimizer.epsilon;
+    this->adam.timeStep = host.optimizer.timeStep;
+
+    this->tokenEmbeddingState.uploadFrom(host.tokenEmbeddingState);
+    this->finalNormGammaState.uploadFrom(host.finalNormGammaState);
+    this->projectionWeightState.uploadFrom(host.projectionWeightState);
+    this->projectionBiasState.uploadFrom(host.projectionBiasState);
+
+    if (this->blockAdamStates.size() != this->blocks.size())
+        this->blockAdamStates.resize(this->blocks.size());
+
+    for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+        const TransformerBlock& hostBlock = host.blocks[blockIndex];
+        CudaTransformerBlockAdamStates& states = this->blockAdamStates[blockIndex];
+        states.queryWeight.uploadFrom(hostBlock.queryWeightState);
+        states.keyWeight.uploadFrom(hostBlock.keyWeightState);
+        states.valueWeight.uploadFrom(hostBlock.valueWeightState);
+        states.attentionOutputWeight.uploadFrom(hostBlock.attentionOutputWeightState);
+        states.attentionNormGamma.uploadFrom(hostBlock.attentionNormGammaState);
+        states.feedForwardNormGamma.uploadFrom(hostBlock.feedForwardNormGammaState);
+        states.feedForwardGateWeight.uploadFrom(hostBlock.feedForwardGateWeightState);
+        states.feedForwardGateBias.uploadFrom(hostBlock.feedForwardGateBiasState);
+        states.feedForwardUpWeight.uploadFrom(hostBlock.feedForwardUpWeightState);
+        states.feedForwardUpBias.uploadFrom(hostBlock.feedForwardUpBiasState);
+        states.feedForwardDownWeight.uploadFrom(hostBlock.feedForwardDownWeightState);
+        states.feedForwardDownBias.uploadFrom(hostBlock.feedForwardDownBiasState);
+    }
+}
+
 float CudaLanguageModel::accumulateExample(const LanguageModelExample& example, CudaLanguageModelGradients& gradients) {
     const LanguageModelExample* pointer = &example;
     return this->accumulatePackedExamples(&pointer, 1, gradients);

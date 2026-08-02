@@ -62,6 +62,116 @@ CudaAdamState CudaAdamState::zerosLike(const CudaMatrix& parameter) {
     return state;
 }
 
+void CudaAdamState::downloadInto(AdamState& host, size_t rows, size_t cols) const {
+    if (rows == 0 || cols == 0) throw std::invalid_argument("CudaAdamState::downloadInto empty shape");
+    host.firstMoment.ensureSize(rows, cols);
+    host.secondMoment.ensureSize(rows, cols);
+
+    if (!this->firstMoment.empty()) {
+        if (this->firstMoment.rows != rows || this->firstMoment.cols != cols)
+            throw std::invalid_argument("CudaAdamState::downloadInto FP32 shape mismatch");
+        this->firstMoment.downloadInto(host.firstMoment);
+        this->secondMoment.downloadInto(host.secondMoment);
+        return;
+    }
+
+    if (this->firstMomentQ.deviceData == nullptr)
+        throw std::logic_error("CudaAdamState::downloadInto empty moments");
+    if (this->elementCount != static_cast<int>(rows * cols))
+        throw std::invalid_argument("CudaAdamState::downloadInto int8 elementCount mismatch");
+    if (this->scaleCount <= 0) throw std::logic_error("CudaAdamState::downloadInto empty scales");
+
+    const int blockSize = CudaAdam::int8BlockSize;
+    std::vector<signed char> firstQ(static_cast<size_t>(this->elementCount));
+    std::vector<signed char> secondQ(static_cast<size_t>(this->elementCount));
+    std::vector<float> firstScales(static_cast<size_t>(this->scaleCount));
+    std::vector<float> secondScales(static_cast<size_t>(this->scaleCount));
+    this->firstMomentQ.copyToHost(firstQ.data(), static_cast<size_t>(this->elementCount));
+    this->secondMomentQ.copyToHost(secondQ.data(), static_cast<size_t>(this->elementCount));
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpy(firstScales.data(), this->firstMomentScales.deviceData, static_cast<size_t>(this->scaleCount) * sizeof(float), cudaMemcpyDeviceToHost),
+        "CudaAdamState::downloadInto first scales");
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpy(secondScales.data(), this->secondMomentScales.deviceData, static_cast<size_t>(this->scaleCount) * sizeof(float), cudaMemcpyDeviceToHost),
+        "CudaAdamState::downloadInto second scales");
+
+    for (int index = 0; index < this->elementCount; ++index) {
+        const int blockIndex = index / blockSize;
+        host.firstMoment.data[static_cast<size_t>(index)] = static_cast<float>(firstQ[static_cast<size_t>(index)]) * firstScales[static_cast<size_t>(blockIndex)];
+        host.secondMoment.data[static_cast<size_t>(index)] = static_cast<float>(secondQ[static_cast<size_t>(index)]) * secondScales[static_cast<size_t>(blockIndex)];
+    }
+}
+
+void CudaAdamState::uploadFrom(const AdamState& host) {
+    if (host.firstMoment.empty() || host.secondMoment.empty())
+        throw std::invalid_argument("CudaAdamState::uploadFrom empty host moments");
+    if (host.firstMoment.rows != host.secondMoment.rows || host.firstMoment.cols != host.secondMoment.cols)
+        throw std::invalid_argument("CudaAdamState::uploadFrom host moment shape mismatch");
+
+    CudaMatrix shape;
+    shape.rows = host.firstMoment.rows;
+    shape.cols = host.firstMoment.cols;
+
+    if (CudaAdam::preferInt8Moments) {
+        this->firstMoment.free();
+        this->secondMoment.free();
+        this->firstMomentQ.free();
+        this->secondMomentQ.free();
+        this->firstMomentScales.free();
+        this->secondMomentScales.free();
+        this->ensureInt8(shape, CudaAdam::int8BlockSize);
+
+        const int blockSize = CudaAdam::int8BlockSize;
+        std::vector<signed char> firstQ(static_cast<size_t>(this->elementCount));
+        std::vector<signed char> secondQ(static_cast<size_t>(this->elementCount));
+        std::vector<float> firstScales(static_cast<size_t>(this->scaleCount), 0.0f);
+        std::vector<float> secondScales(static_cast<size_t>(this->scaleCount), 0.0f);
+
+        for (int blockIndex = 0; blockIndex < this->scaleCount; ++blockIndex) {
+            const int start = blockIndex * blockSize;
+            const int count = (std::min)(blockSize, this->elementCount - start);
+            float maxFirst = 0.0f;
+            float maxSecond = 0.0f;
+            for (int local = 0; local < count; ++local) {
+                maxFirst = (std::max)(maxFirst, std::fabs(host.firstMoment.data[static_cast<size_t>(start + local)]));
+                maxSecond = (std::max)(maxSecond, std::fabs(host.secondMoment.data[static_cast<size_t>(start + local)]));
+            }
+            maxFirst = (std::max)(maxFirst, 1e-8f);
+            maxSecond = (std::max)(maxSecond, 1e-8f);
+            firstScales[static_cast<size_t>(blockIndex)] = maxFirst / 127.0f;
+            secondScales[static_cast<size_t>(blockIndex)] = maxSecond / 127.0f;
+            for (int local = 0; local < count; ++local) {
+                float qFirst = std::round(host.firstMoment.data[static_cast<size_t>(start + local)] / firstScales[static_cast<size_t>(blockIndex)]);
+                qFirst = (std::min)(127.0f, (std::max)(-127.0f, qFirst));
+                firstQ[static_cast<size_t>(start + local)] = static_cast<signed char>(qFirst);
+
+                float qSecond = std::round(host.secondMoment.data[static_cast<size_t>(start + local)] / secondScales[static_cast<size_t>(blockIndex)]);
+                qSecond = (std::min)(127.0f, (std::max)(0.0f, qSecond));
+                secondQ[static_cast<size_t>(start + local)] = static_cast<signed char>(qSecond);
+            }
+        }
+
+        this->firstMomentQ.copyFromHost(firstQ.data(), static_cast<size_t>(this->elementCount));
+        this->secondMomentQ.copyFromHost(secondQ.data(), static_cast<size_t>(this->elementCount));
+        CudaMatmul::throwIfCudaFailed(
+            cudaMemcpy(this->firstMomentScales.deviceData, firstScales.data(), static_cast<size_t>(this->scaleCount) * sizeof(float), cudaMemcpyHostToDevice),
+            "CudaAdamState::uploadFrom first scales");
+        CudaMatmul::throwIfCudaFailed(
+            cudaMemcpy(this->secondMomentScales.deviceData, secondScales.data(), static_cast<size_t>(this->scaleCount) * sizeof(float), cudaMemcpyHostToDevice),
+            "CudaAdamState::uploadFrom second scales");
+        return;
+    }
+
+    this->firstMomentQ.free();
+    this->secondMomentQ.free();
+    this->firstMomentScales.free();
+    this->secondMomentScales.free();
+    this->scaleCount = 0;
+    this->elementCount = static_cast<int>(host.firstMoment.data.size());
+    this->firstMoment.upload(host.firstMoment);
+    this->secondMoment.upload(host.secondMoment);
+}
+
 CudaAdam::CudaAdam(float learningRate, float beta1, float beta2, float epsilon)
     : learningRate(learningRate), beta1(beta1), beta2(beta2), epsilon(epsilon), timeStep(0) {
     if (learningRate <= 0.0f) throw std::invalid_argument("CudaAdam learningRate must be > 0");

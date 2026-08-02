@@ -4,6 +4,7 @@
 /sentinel/x64
 /sentinel/x64/Release
 /SERA-Data
+*.snlm
 /x64/Debug
 sentinel/_smoke_clean.txt
 sentinel/_smoke_err.txt
@@ -22,3 +23,4 @@ sentinel/_train_out7.txt
 sentinel/_train_int8.txt
 sentinel/_train_int8b.txt
 sentinel/msbuild_release_x64_int8b.log
+sentinel/_ckpt_out.txt
