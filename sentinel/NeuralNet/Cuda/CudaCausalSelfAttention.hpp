@@ -18,6 +18,8 @@ public:
     /// <summary>stacked [query; key; value] for one forward projection GEMM</summary>
     CudaMatrix qkvWeight;
     CudaMatrix qkvProjected;
+    /// <summary>stacked [dW_q; dW_k; dW_v] scratch for fused backward weight GEMM</summary>
+    CudaMatrix qkvWeightGradient;
 
     CudaMatrix cosTable;
     CudaMatrix sinTable;

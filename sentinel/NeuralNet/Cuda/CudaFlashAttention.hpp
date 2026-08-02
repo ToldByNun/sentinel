@@ -31,7 +31,7 @@ public:
 
     /// <summary>
     /// gradients dQ dK dV from dO using recomputed P = exp(S - LSE) and D = rowsum(dO odot O)
-    /// key-tile outer keeps dK/dV atomic free; dQ uses sparse global atomics
+    /// fixed path: query-tile outer (exclusive dQ, atomic dK/dV); dynamic fallback key-tile + atomic dQ
     /// </summary>
     static void backward(const CudaMatrix& query, const CudaMatrix& key, const CudaMatrix& value, const CudaMatrix& out, const CudaMatrix& logSumExp, const CudaMatrix& outGradient, CudaMatrix& queryGradient, CudaMatrix& keyGradient, CudaMatrix& valueGradient, float scale, bool causal = true);
 

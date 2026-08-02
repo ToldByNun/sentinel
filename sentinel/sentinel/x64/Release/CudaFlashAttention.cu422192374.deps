@@ -30,6 +30,7 @@ C:\Program Files (x86)\Windows Kits\10\Include\10.0.28000.0\ucrt\sys\stat.h
 C:\Program Files (x86)\Windows Kits\10\Include\10.0.28000.0\ucrt\sys\types.h
 C:\Program Files (x86)\Windows Kits\10\Include\10.0.28000.0\ucrt\time.h
 C:\Program Files (x86)\Windows Kits\10\Include\10.0.28000.0\ucrt\wchar.h
+C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\algorithm
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\ammintrin.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\cctype
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\cfloat
@@ -88,7 +89,10 @@ C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\zmmintrin.h
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\__msvc_bit_utils.hpp
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\__msvc_doom_core.hpp
+C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\__msvc_heap_algorithms.hpp
+C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\__msvc_int128.hpp
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\__msvc_iter_core.hpp
+C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\__msvc_minmax.hpp
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\__msvc_sanitizer_annotate_container.hpp
 C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\__msvc_string_view.hpp
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\builtin_types.h
@@ -108,6 +112,8 @@ C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\crt\sm_70_rt.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\crt\sm_80_rt.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\crt\sm_90_rt.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\cuda_device_runtime_api.h
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\cuda_fp16.h
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\cuda_fp16.hpp
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\cuda_runtime.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\cuda_runtime_api.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\device_atomic_functions.h
@@ -116,6 +122,9 @@ C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\device_types.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\driver_functions.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\driver_types.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\library_types.h
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\nv\detail\__preprocessor
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\nv\detail\__target_macros
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\nv\target
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\sm_20_atomic_functions.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\sm_20_intrinsics.h
 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\include\sm_30_intrinsics.h

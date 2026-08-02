@@ -285,9 +285,15 @@ void CudaCausalSelfAttention::backward(const CudaMatrix& outputGradient, CudaMat
     this->queryGradient.ensureSize(this->query.rows, this->query.cols);
     this->keyGradient.ensureSize(this->key.rows, this->key.cols);
     this->valueGradient.ensureSize(this->value.rows, this->value.cols);
-    CudaOps::zeroInPlace(this->queryGradient);
-    CudaOps::zeroInPlace(this->keyGradient);
-    CudaOps::zeroInPlace(this->valueGradient);
+    // Flash query-outer overwrites dQ; dK/dV need a zero base for atomics (dense path zeros all three).
+    if (this->usedFlashAttention) {
+        CudaOps::zeroInPlace(this->keyGradient);
+        CudaOps::zeroInPlace(this->valueGradient);
+    } else {
+        CudaOps::zeroInPlace(this->queryGradient);
+        CudaOps::zeroInPlace(this->keyGradient);
+        CudaOps::zeroInPlace(this->valueGradient);
+    }
 
     const float scale = 1.0f / std::sqrt(static_cast<float>(this->headDimension));
 
@@ -375,15 +381,27 @@ void CudaCausalSelfAttention::backward(const CudaMatrix& outputGradient, CudaMat
     CudaOps::rotaryRotateInverseInPlace(this->queryGradient, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, 0, this->activeSegmentLength);
     CudaOps::rotaryRotateInverseInPlace(this->keyGradient, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, 0, this->activeSegmentLength);
 
-    CudaMatrix::multiplyInto(this->queryGradient, this->inputCache, queryWeightGradient, false, true);
-    CudaMatrix::multiplyInto(this->keyGradient, this->inputCache, keyWeightGradient, false, true);
-    CudaMatrix::multiplyInto(this->valueGradient, this->inputCache, valueWeightGradient, false, true);
+    if (this->qkvWeight.empty())
+        this->syncFusedQkvWeight();
 
-    CudaMatrix::multiplyInto(this->queryWeight, this->queryGradient, inputGradient, true, false);
-    CudaMatrix::multiplyInto(this->keyWeight, this->keyGradient, this->temp, true, false);
-    CudaOps::addInPlace(inputGradient, this->temp);
-    CudaMatrix::multiplyInto(this->valueWeight, this->valueGradient, this->temp, true, false);
-    CudaOps::addInPlace(inputGradient, this->temp);
+    // Reuse qkvProjected as stacked [dQ; dK; dV] for one dW GEMM and one dX GEMM.
+    this->qkvProjected.ensureSize(this->query.rows * 3ull, this->query.cols);
+    const size_t sliceElements = this->query.elementCount();
+    const size_t sliceBytes = sliceElements * sizeof(float);
+    CudaMatmul::memcpyDevice(this->qkvProjected.buffer.deviceData, this->queryGradient.buffer.deviceData, sliceBytes);
+    CudaMatmul::memcpyDevice(this->qkvProjected.buffer.deviceData + sliceElements, this->keyGradient.buffer.deviceData, sliceBytes);
+    CudaMatmul::memcpyDevice(this->qkvProjected.buffer.deviceData + 2ull * sliceElements, this->valueGradient.buffer.deviceData, sliceBytes);
+
+    CudaMatrix::multiplyInto(this->qkvProjected, this->inputCache, this->qkvWeightGradient, false, true);
+    queryWeightGradient.ensureSize(this->queryWeight.rows, this->queryWeight.cols);
+    keyWeightGradient.ensureSize(this->keyWeight.rows, this->keyWeight.cols);
+    valueWeightGradient.ensureSize(this->valueWeight.rows, this->valueWeight.cols);
+    const size_t weightSliceBytes = this->queryWeight.byteCount();
+    CudaMatmul::memcpyDevice(queryWeightGradient.buffer.deviceData, this->qkvWeightGradient.buffer.deviceData, weightSliceBytes);
+    CudaMatmul::memcpyDevice(keyWeightGradient.buffer.deviceData, this->qkvWeightGradient.buffer.deviceData + this->queryWeight.elementCount(), weightSliceBytes);
+    CudaMatmul::memcpyDevice(valueWeightGradient.buffer.deviceData, this->qkvWeightGradient.buffer.deviceData + 2ull * this->queryWeight.elementCount(), weightSliceBytes);
+
+    CudaMatrix::multiplyInto(this->qkvWeight, this->qkvProjected, inputGradient, true, false);
 }
 
 void CudaCausalSelfAttention::prefill(const CudaMatrix& input, CudaKvCache& cache, CudaMatrix& out) {
