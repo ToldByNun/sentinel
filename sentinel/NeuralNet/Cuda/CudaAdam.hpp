@@ -57,6 +57,14 @@ public:
     bool useInt8;
 };
 
+/// <summary>one tensor for CPU-offloaded Adam (device weights + host moments)</summary>
+class CudaAdamCpuOffloadItem {
+public:
+    CudaMatrix* parameter;
+    const CudaMatrix* gradient;
+    AdamState* hostState;
+};
+
 /// <summary>device resident Adam optimizer with bias corrected moments</summary>
 class CudaAdam {
 public:
@@ -90,10 +98,14 @@ public:
     void updateMany(const CudaAdamUpdateItem* items, int itemCount, float gradientScale = 1.0f) const;
 
     /// <summary>
-    /// CPU-offloaded Adam: D2H param+grad (pinned), host Adam::update into hostState, H2D param
-    /// device CudaAdamState is unused; call step() first like update()
+    /// CPU-offloaded Adam for one tensor (async copy stream); prefer updateCpuOffloadedMany for batches
     /// </summary>
     void updateCpuOffloaded(CudaMatrix& parameter, AdamState& hostState, const CudaMatrix& gradient, float gradientScale = 1.0f) const;
+
+    /// <summary>
+    /// async bulk D2H of all params+grads, OpenMP host Adam, async bulk H2D — one sync each side
+    /// </summary>
+    void updateCpuOffloadedMany(const CudaAdamCpuOffloadItem* items, int itemCount, float gradientScale = 1.0f) const;
 
     /// <summary>compare host Adam vs device Adam one update step</summary>
     static void runSmokeDemo(int parameterRows = 128, int parameterCols = 64);
