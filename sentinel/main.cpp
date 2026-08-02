@@ -93,23 +93,28 @@ int main() {
     BPETokenizer tokenizer;
     tokenizer.train(tokenizerSample, 1000);
     source.setTokenizer(&tokenizer);
-    source.prepareTestReservoir();
+    source.materialize();
 
-    // peek one chunk for parity/generate; do not encode the whole file just for logging
+    if (source.trainExampleCount() <= 0) {
+        SmokeLog::note("no language-model examples (need sequences with >= 2 tokens)");
+        return 1;
+    }
+
     LanguageModelDataset promptChunk;
     source.rewindTrain();
     const bool moreAfterPrompt = source.nextTrainChunk(promptChunk);
     source.rewindTrain();
     if (promptChunk.examples.empty()) {
-        SmokeLog::note("no language-model examples (need sequences with >= 2 tokens)");
+        SmokeLog::note("no prompt example from stream");
         return 1;
     }
 
-    SmokeLog::result("data", "stream=%s  peekTrain=%d  test=%d  vocab=%d  chunk=%d  more=%s",
+    SmokeLog::result("data", "stream=%s  train=%d  test=%d  vocab=%d  positions=%d  chunk=%d  more=%s",
         samplePath.c_str(),
-        promptChunk.size(),
+        source.trainExampleCount(),
         source.testDataset().size(),
         tokenizer.vocabSize(),
+        source.trainPredictionCount(),
         source.chunkExampleCount(),
         moreAfterPrompt ? "yes" : "no");
 

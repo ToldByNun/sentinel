@@ -881,7 +881,7 @@ void LanguageModel::runStreamingSmokeDemo() {
     BPETokenizer tokenizer;
     tokenizer.train(sample, 64);
     source.setTokenizer(&tokenizer);
-    source.prepareTestReservoir();
+    source.materialize();
 
     LanguageModel model(tokenizer.vocabSize(), 32, 32, Adam(0.001f), 1, 2);
     model.enableCuda();

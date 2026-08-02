@@ -58,11 +58,11 @@ LanguageModelChunkSource source(path, maxChars, maxTokens, /*chunk*/256, /*train
 auto sample = source.prepareTokenizerSample(2000);
 tokenizer.train(sample, 1000);
 source.setTokenizer(&tokenizer);
-source.prepareTestReservoir();
+source.materialize();  // one JSONL+BPE pass; later epochs reuse token ids
 model.train(source, epochs, logEvery, batchSize, gradAccum);  // testLoss from reservoir
 ```
 
-JSONL is read in chunks (peak RAM ≈ chunk + test reservoir + tokenizer sample). Train/test split is a deterministic row-index hash.
+JSONL is read once and tokenized into compact examples (peak text RAM only during that pass). Later epochs only slice cached token ids. Train/test split is a deterministic row-index hash.
 
 ## Training (quick)
 

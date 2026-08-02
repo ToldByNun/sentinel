@@ -32,6 +32,11 @@ LanguageModelChunkSource::LanguageModelChunkSource(
 void LanguageModelChunkSource::setTokenizer(const BPETokenizer* tokenizer) {
     if (tokenizer == nullptr) throw std::invalid_argument("LanguageModelChunkSource::setTokenizer null");
     this->tokenizer = tokenizer;
+    this->materialized = false;
+    this->trainExamples.clear();
+    this->trainPredictions = 0;
+    this->trainCursor = 0;
+    this->testReservoir.examples.clear();
 }
 
 bool LanguageModelChunkSource::isTrainRow(size_t rowIndex) const {
@@ -48,7 +53,7 @@ std::string LanguageModelChunkSource::truncateText(const std::string& text) cons
     return TextUtil::truncate(text, this->maximumTextCharacters);
 }
 
-bool LanguageModelChunkSource::tryAppendExample(LanguageModelDataset& dataset, const JsonlRow& row) const {
+bool LanguageModelChunkSource::tryMakeExample(const JsonlRow& row, LanguageModelExample& out) const {
     if (this->tokenizer == nullptr) throw std::logic_error("LanguageModelChunkSource tokenizer not set");
 
     std::vector<int> tokenIds = this->tokenizer->encode(this->truncateText(row.text));
@@ -56,10 +61,16 @@ bool LanguageModelChunkSource::tryAppendExample(LanguageModelDataset& dataset, c
         tokenIds.resize(this->maximumTokenCount);
     if (tokenIds.size() < 2) return false;
 
-    dataset.examples.push_back(
-        LanguageModelDataset::fromTokenIds(tokenIds, this->tokenizer->vocabSize(), false)
-    );
+    out = LanguageModelDataset::fromTokenIds(tokenIds, this->tokenizer->vocabSize(), false);
     return true;
+}
+
+void LanguageModelChunkSource::resetJsonlCursor() {
+    this->reader.rewind();
+    this->pendingRows.clear();
+    this->pendingBaseIndex = 0;
+    this->pendingCursor = 0;
+    this->streamExhausted = false;
 }
 
 bool LanguageModelChunkSource::refillPendingRows() {
@@ -86,7 +97,7 @@ bool LanguageModelChunkSource::refillPendingRows() {
 std::vector<std::string> LanguageModelChunkSource::prepareTokenizerSample(int maxRows) {
     if (maxRows <= 0) throw std::invalid_argument("LanguageModelChunkSource::prepareTokenizerSample maxRows must be > 0");
 
-    this->rewindTrain();
+    this->resetJsonlCursor();
 
     std::vector<std::string> texts;
     texts.reserve(static_cast<size_t>(maxRows));
@@ -100,64 +111,66 @@ std::vector<std::string> LanguageModelChunkSource::prepareTokenizerSample(int ma
         texts.push_back(this->truncateText(row.text));
     }
 
-    this->rewindTrain();
+    this->resetJsonlCursor();
     return texts;
 }
 
-void LanguageModelChunkSource::prepareTestReservoir() {
-    if (this->tokenizer == nullptr) throw std::logic_error("LanguageModelChunkSource::prepareTestReservoir tokenizer not set");
+void LanguageModelChunkSource::materialize() {
+    if (this->tokenizer == nullptr) throw std::logic_error("LanguageModelChunkSource::materialize tokenizer not set");
 
+    this->trainExamples.clear();
+    this->trainPredictions = 0;
+    this->trainCursor = 0;
     this->testReservoir.examples.clear();
     this->testReservoir.vocabularySize = this->tokenizer->vocabSize();
-    if (this->testCap == 0) {
-        this->rewindTrain();
-        return;
-    }
+    this->materialized = false;
 
-    this->rewindTrain();
+    this->resetJsonlCursor();
 
-    while (static_cast<int>(this->testReservoir.examples.size()) < this->testCap && this->refillPendingRows()) {
+    LanguageModelExample example;
+    while (this->refillPendingRows()) {
         const size_t rowIndex = this->pendingBaseIndex + this->pendingCursor;
         const JsonlRow& row = this->pendingRows[this->pendingCursor];
         ++this->pendingCursor;
 
-        if (this->isTrainRow(rowIndex)) continue;
-        this->tryAppendExample(this->testReservoir, row);
+        if (!this->tryMakeExample(row, example)) continue;
+
+        if (this->isTrainRow(rowIndex)) {
+            this->trainPredictions += static_cast<int>(example.targetTokenIds.size());
+            this->trainExamples.push_back(std::move(example));
+            continue;
+        }
+
+        if (this->testCap > 0 && static_cast<int>(this->testReservoir.examples.size()) < this->testCap)
+            this->testReservoir.examples.push_back(std::move(example));
     }
 
-    this->rewindTrain();
+    this->resetJsonlCursor();
+    this->materialized = true;
+}
+
+void LanguageModelChunkSource::prepareTestReservoir() {
+    this->materialize();
 }
 
 void LanguageModelChunkSource::rewindTrain() {
-    this->reader.rewind();
-    this->pendingRows.clear();
-    this->pendingBaseIndex = 0;
-    this->pendingCursor = 0;
-    this->streamExhausted = false;
+    this->trainCursor = 0;
 }
 
 bool LanguageModelChunkSource::nextTrainChunk(LanguageModelDataset& out) {
     if (this->tokenizer == nullptr) throw std::logic_error("LanguageModelChunkSource::nextTrainChunk tokenizer not set");
+    if (!this->materialized) throw std::logic_error("LanguageModelChunkSource::nextTrainChunk call materialize() first");
 
     out.examples.clear();
     out.vocabularySize = this->tokenizer->vocabSize();
     out.examples.reserve(static_cast<size_t>(this->chunkExamples));
 
-    while (static_cast<int>(out.examples.size()) < this->chunkExamples && this->refillPendingRows()) {
-        const size_t rowIndex = this->pendingBaseIndex + this->pendingCursor;
-        const JsonlRow& row = this->pendingRows[this->pendingCursor];
-        ++this->pendingCursor;
-
-        if (!this->isTrainRow(rowIndex)) continue;
-        this->tryAppendExample(out, row);
+    while (static_cast<int>(out.examples.size()) < this->chunkExamples && this->trainCursor < this->trainExamples.size()) {
+        out.examples.push_back(this->trainExamples[this->trainCursor]);
+        ++this->trainCursor;
     }
 
-    // true only when more train rows may still be produced after this call
-    const bool moreTrainData =
-        this->pendingCursor < this->pendingRows.size()
-        || !this->streamExhausted;
-
-    return moreTrainData;
+    return this->trainCursor < this->trainExamples.size();
 }
 
 const LanguageModelDataset& LanguageModelChunkSource::testDataset() const {
@@ -174,4 +187,16 @@ int LanguageModelChunkSource::chunkExampleCount() const {
 
 float LanguageModelChunkSource::trainRatio() const {
     return this->trainSplitRatio;
+}
+
+int LanguageModelChunkSource::trainExampleCount() const {
+    return static_cast<int>(this->trainExamples.size());
+}
+
+int LanguageModelChunkSource::trainPredictionCount() const {
+    return this->trainPredictions;
+}
+
+bool LanguageModelChunkSource::isMaterialized() const {
+    return this->materialized;
 }

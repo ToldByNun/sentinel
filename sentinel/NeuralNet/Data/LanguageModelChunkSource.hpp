@@ -9,7 +9,7 @@
 #include <vector>
 
 /// <summary>
-/// streams JSONL into LanguageModelDataset chunks
+/// streams JSONL once into compact token-id examples, then serves train chunks without re-encode
 /// train/test via deterministic row-index hash; test examples capped in a reservoir
 /// </summary>
 class LanguageModelChunkSource {
@@ -30,14 +30,20 @@ public:
     /// <summary>first maxRows train-hash texts (truncated); rewinds the file</summary>
     std::vector<std::string> prepareTokenizerSample(int maxRows);
 
-    /// <summary>one full pass; fills testDataset up to testReservoirCap (needs tokenizer)</summary>
+    /// <summary>
+    /// one JSONL pass: encode all train rows into memory, fill test reservoir up to cap
+    /// must be called before nextTrainChunk (avoids re-encoding every epoch)
+    /// </summary>
+    void materialize();
+
+    /// <summary>alias for materialize (fills testDataset)</summary>
     void prepareTestReservoir();
 
     /// <summary>seek to start for a new train epoch</summary>
     void rewindTrain();
 
     /// <summary>
-    /// fill out with up to chunkExampleCount train examples
+    /// fill out with up to chunkExampleCount train examples from the materialized cache
     /// returns false when the train stream is exhausted (out may still hold a final partial chunk)
     /// </summary>
     bool nextTrainChunk(LanguageModelDataset& out);
@@ -46,14 +52,18 @@ public:
     const std::string& filePath() const;
     int chunkExampleCount() const;
     float trainRatio() const;
+    int trainExampleCount() const;
+    int trainPredictionCount() const;
+    bool isMaterialized() const;
 
     /// <summary>true when rowIndex belongs to the train partition</summary>
     bool isTrainRow(size_t rowIndex) const;
 
 private:
     bool refillPendingRows();
-    bool tryAppendExample(LanguageModelDataset& dataset, const JsonlRow& row) const;
+    bool tryMakeExample(const JsonlRow& row, LanguageModelExample& out) const;
     std::string truncateText(const std::string& text) const;
+    void resetJsonlCursor();
 
     JsonlChunkReader reader;
     std::string path;
@@ -66,6 +76,10 @@ private:
 
     const BPETokenizer* tokenizer = nullptr;
     LanguageModelDataset testReservoir;
+    std::vector<LanguageModelExample> trainExamples;
+    int trainPredictions = 0;
+    size_t trainCursor = 0;
+    bool materialized = false;
 
     std::vector<JsonlRow> pendingRows;
     size_t pendingBaseIndex = 0;
