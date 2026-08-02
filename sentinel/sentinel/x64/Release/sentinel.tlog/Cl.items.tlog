@@ -5,6 +5,7 @@ C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Data\ClassificationDatas
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Data\DatasetSplit.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\DatasetSplit.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Data\JsonlLoader.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\JsonlLoader.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Data\TextRowReader.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\TextRowReader.obj
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Data\ArrowChunkReader.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\ArrowChunkReader.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Data\LanguageModelChunkSource.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\LanguageModelChunkSource.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Data\LanguageModelDataset.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\LanguageModelDataset.obj
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Initializers\UniformInit.cpp;C:\Users\mikaj\source\repos\sentinel\sentinel\sentinel\x64\Release\UniformInit.obj
