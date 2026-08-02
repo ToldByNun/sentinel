@@ -80,6 +80,7 @@ int main() {
     CudaLanguageModel::runTrainProfileDemo(1000, 64, 256, 2, 4, false, 2048);
     CudaLanguageModel::runTrainProfileDemo(1000, 64, 512, 2, 4, true, 2048);
     CudaLanguageModel::runTrainProfileDemo(1000, 64, 512, 2, 4, false, 2048);
+    CudaLanguageModel::runConsumerVramDemo();
 
     SmokeLog::section("sera train");
 

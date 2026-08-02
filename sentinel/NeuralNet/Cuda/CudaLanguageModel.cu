@@ -123,17 +123,33 @@ void CudaLanguageModel::ensureTrainWorkspaces() {
     this->onlineSoftmaxSumExp.ensureSize(1, maxColumns);
     this->targetLogits.ensureSize(1, maxColumns);
 
-    // FP32 checkpoints only — FP16 saves VRAM but overflows on small/consumer runs and skips Adam forever
-    this->checkpointRestoreScratch.free();
-    for (CudaHalfMatrix& checkpoint : this->blockInputCheckpointsHalf)
-        checkpoint.free();
-    this->blockInputCheckpointsHalf.clear();
-    if (this->activationCheckpointing) {
+    // FP16 activation checkpoints when AMP is on (saturated cast); else FP32.
+    // Restore scratch holds one block input in FP32 during backward recompute.
+    if (!this->activationCheckpointing) {
+        this->releaseActivationCheckpoints();
+    } else if (this->useHalfActivationCheckpoints()) {
+        for (CudaMatrix& checkpoint : this->blockInputCheckpoints)
+            checkpoint.free();
+        this->blockInputCheckpoints.clear();
+        if (this->blockInputCheckpointsHalf.size() != this->blocks.size())
+            this->blockInputCheckpointsHalf.resize(this->blocks.size());
+        for (CudaHalfMatrix& checkpoint : this->blockInputCheckpointsHalf)
+            checkpoint.ensureSize(embeddingDim, maxColumns);
+        this->checkpointRestoreScratch.ensureSize(embeddingDim, maxColumns);
+    } else {
+        this->checkpointRestoreScratch.free();
+        for (CudaHalfMatrix& checkpoint : this->blockInputCheckpointsHalf)
+            checkpoint.free();
+        this->blockInputCheckpointsHalf.clear();
         if (this->blockInputCheckpoints.size() != this->blocks.size())
             this->blockInputCheckpoints.resize(this->blocks.size());
         for (CudaMatrix& checkpoint : this->blockInputCheckpoints)
             checkpoint.ensureSize(embeddingDim, maxColumns);
     }
+}
+
+bool CudaLanguageModel::useHalfActivationCheckpoints() const {
+    return this->activationCheckpointing && CudaAmp::preferMixedPrecision;
 }
 
 size_t CudaLanguageModel::bytesPerPackedColumn() const {
@@ -158,8 +174,13 @@ size_t CudaLanguageModel::bytesPerPackedColumn() const {
     bytes += 3 * intBytes;                  // packH2d fused staging
     bytes += intBytes;                      // adamWindowTokenIdsBuffer capacity unit
 
-    if (this->activationCheckpointing)
-        bytes += this->blocks.size() * embeddingDim * floatBytes;
+    if (this->activationCheckpointing) {
+        if (this->useHalfActivationCheckpoints())
+            bytes += this->blocks.size() * embeddingDim * 2u
+                + embeddingDim * floatBytes; // restore scratch
+        else
+            bytes += this->blocks.size() * embeddingDim * floatBytes;
+    }
 
     // Transient block/flash peak not preallocated in ensureTrainWorkspaces.
     bytes += 32 * embeddingDim * floatBytes;
@@ -382,10 +403,21 @@ float CudaLanguageModel::flushPackedHostBuffers(int segmentLength, int exampleCo
 
     for (int blockIndex = static_cast<int>(this->blocks.size()) - 1; blockIndex >= 0; --blockIndex) {
         if (this->activationCheckpointing) {
-            this->blocks[static_cast<size_t>(blockIndex)].forward(
-                this->blockInputCheckpoints[static_cast<size_t>(blockIndex)],
-                this->normalized,
-                segmentLength);
+            if (this->useHalfActivationCheckpoints()) {
+                CudaAmp::castToFloat(
+                    this->blockInputCheckpointsHalf[static_cast<size_t>(blockIndex)],
+                    this->checkpointRestoreScratch);
+                this->checkpointRestoreScratch.cols = this->hiddenGradient.cols;
+                this->blocks[static_cast<size_t>(blockIndex)].forward(
+                    this->checkpointRestoreScratch,
+                    this->normalized,
+                    segmentLength);
+            } else {
+                this->blocks[static_cast<size_t>(blockIndex)].forward(
+                    this->blockInputCheckpoints[static_cast<size_t>(blockIndex)],
+                    this->normalized,
+                    segmentLength);
+            }
         }
         this->blocks[static_cast<size_t>(blockIndex)].backward(this->hiddenGradient, this->blockInputGradientScratch, gradients.blocks[static_cast<size_t>(blockIndex)]);
         std::swap(this->hiddenGradient, this->blockInputGradientScratch);
@@ -509,15 +541,27 @@ void CudaLanguageModel::forwardTrunkFromDevice(size_t tokenCount, int segmentLen
     CudaOps::embeddingGatherInto(this->tokenEmbeddingWeight, this->tokenIdsBuffer, tokenCount, this->hidden);
 
     if (this->activationCheckpointing) {
-        if (this->blockInputCheckpoints.size() != this->blocks.size())
-            this->blockInputCheckpoints.resize(this->blocks.size());
-        for (CudaMatrix& checkpoint : this->blockInputCheckpoints)
-            checkpoint.ensureSize(this->tokenEmbeddingWeight.cols, tokenCount);
+        if (this->useHalfActivationCheckpoints()) {
+            if (this->blockInputCheckpointsHalf.size() != this->blocks.size())
+                this->blockInputCheckpointsHalf.resize(this->blocks.size());
+            for (CudaHalfMatrix& checkpoint : this->blockInputCheckpointsHalf)
+                checkpoint.ensureSize(this->tokenEmbeddingWeight.cols, tokenCount);
+            this->checkpointRestoreScratch.ensureSize(this->tokenEmbeddingWeight.cols, tokenCount);
+        } else {
+            if (this->blockInputCheckpoints.size() != this->blocks.size())
+                this->blockInputCheckpoints.resize(this->blocks.size());
+            for (CudaMatrix& checkpoint : this->blockInputCheckpoints)
+                checkpoint.ensureSize(this->tokenEmbeddingWeight.cols, tokenCount);
+        }
     }
 
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
-        if (this->activationCheckpointing)
-            CudaOps::copyInto(this->hidden, this->blockInputCheckpoints[blockIndex]);
+        if (this->activationCheckpointing) {
+            if (this->useHalfActivationCheckpoints())
+                CudaAmp::castToHalfSaturated(this->hidden, this->blockInputCheckpointsHalf[blockIndex]);
+            else
+                CudaOps::copyInto(this->hidden, this->blockInputCheckpoints[blockIndex]);
+        }
         this->blocks[blockIndex].forward(this->hidden, this->normalized, segmentLength);
         CudaMatrix swapBuffer = std::move(this->hidden);
         this->hidden = std::move(this->normalized);
@@ -1476,15 +1520,26 @@ void CudaLanguageModel::forwardInto(const std::vector<int>& tokenIds, CudaMatrix
     CudaOps::embeddingGatherInto(this->tokenEmbeddingWeight, this->tokenIdsBuffer, tokenIds.size(), this->hidden);
 
     if (this->activationCheckpointing) {
-        if (this->blockInputCheckpoints.size() != this->blocks.size())
-            this->blockInputCheckpoints.resize(this->blocks.size());
-        for (CudaMatrix& checkpoint : this->blockInputCheckpoints)
-            checkpoint.ensureSize(this->tokenEmbeddingWeight.cols, tokenIds.size());
+        if (this->useHalfActivationCheckpoints()) {
+            if (this->blockInputCheckpointsHalf.size() != this->blocks.size())
+                this->blockInputCheckpointsHalf.resize(this->blocks.size());
+            for (CudaHalfMatrix& checkpoint : this->blockInputCheckpointsHalf)
+                checkpoint.ensureSize(this->tokenEmbeddingWeight.cols, tokenIds.size());
+        } else {
+            if (this->blockInputCheckpoints.size() != this->blocks.size())
+                this->blockInputCheckpoints.resize(this->blocks.size());
+            for (CudaMatrix& checkpoint : this->blockInputCheckpoints)
+                checkpoint.ensureSize(this->tokenEmbeddingWeight.cols, tokenIds.size());
+        }
     }
 
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
-        if (this->activationCheckpointing)
-            CudaOps::copyInto(this->hidden, this->blockInputCheckpoints[blockIndex]);
+        if (this->activationCheckpointing) {
+            if (this->useHalfActivationCheckpoints())
+                CudaAmp::castToHalfSaturated(this->hidden, this->blockInputCheckpointsHalf[blockIndex]);
+            else
+                CudaOps::copyInto(this->hidden, this->blockInputCheckpoints[blockIndex]);
+        }
         this->blocks[blockIndex].forward(this->hidden, this->normalized, segmentLength);
         CudaMatrix swapBuffer = std::move(this->hidden);
         this->hidden = std::move(this->normalized);
@@ -1557,6 +1612,105 @@ void CudaLanguageModel::decodeInto(int tokenId, CudaMatrix& outLogits) {
     this->finalNorm.forward(this->hidden, this->normalized);
     CudaMatrix::multiplyInto(this->projectionWeight, this->normalized, outLogits);
     CudaOps::broadcastBiasAddInPlace(outLogits, this->projectionBias);
+}
+
+void CudaLanguageModel::runConsumerVramDemo(
+    int vocabularySize,
+    int embeddingDim,
+    int maximumPositionCount,
+    int blockCount,
+    int headCount,
+    int exampleCount,
+    int epochs,
+    int batchSize,
+    int gradientAccumulationSteps
+) {
+    if (!CudaMatmul::isAvailable()) {
+        SmokeLog::skip("LanguageModel consumer VRAM");
+        return;
+    }
+    if (vocabularySize <= 0 || embeddingDim <= 0 || maximumPositionCount <= 0
+        || blockCount <= 0 || headCount <= 0 || exampleCount <= 0 || epochs <= 0)
+        throw std::invalid_argument("CudaLanguageModel::runConsumerVramDemo invalid dims");
+    if (embeddingDim % headCount != 0)
+        throw std::invalid_argument("CudaLanguageModel::runConsumerVramDemo embeddingDim must divide headCount");
+
+    SmokeLog::section("consumer VRAM");
+
+    size_t freeBefore = 0;
+    size_t totalBytes = 0;
+    CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeBefore, &totalBytes), "consumer VRAM memGetInfo before");
+
+    LanguageModel host(vocabularySize, embeddingDim, maximumPositionCount, Adam(0.001f), blockCount, headCount);
+    host.enableCuda();
+    host.enableCudaTrain();
+    host.setCudaPreferFlashAttention(true);
+
+    size_t freeAfterSetup = 0;
+    CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeAfterSetup, &totalBytes), "consumer VRAM memGetInfo after setup");
+
+    LanguageModelDataset trainDataset;
+    trainDataset.vocabularySize = vocabularySize;
+    trainDataset.examples.reserve(static_cast<size_t>(exampleCount));
+    unsigned state = 42u;
+    auto nextU32 = [&state]() -> unsigned {
+        state = state * 1664525u + 1013904223u;
+        return state;
+    };
+    for (int exampleIndex = 0; exampleIndex < exampleCount; ++exampleIndex) {
+        const float u1 = (static_cast<float>(nextU32() % 10000u) + 0.5f) / 10000.0f;
+        const float u2 = (static_cast<float>(nextU32() % 10000u) + 0.5f) / 10000.0f;
+        const float radius = std::sqrt(-2.0f * std::log(u1));
+        const float angle = 6.2831853f * u2;
+        int length = static_cast<int>(std::lround(128.0f + 70.0f * radius * std::cos(angle)));
+        if (length < 2) length = 2;
+        if (length > maximumPositionCount) length = maximumPositionCount;
+
+        std::vector<int> tokenIds(static_cast<size_t>(length + 1));
+        for (int index = 0; index <= length; ++index)
+            tokenIds[static_cast<size_t>(index)] = static_cast<int>(nextU32() % static_cast<unsigned>(vocabularySize));
+        trainDataset.examples.push_back(LanguageModelDataset::fromTokenIds(tokenIds, vocabularySize, false));
+    }
+
+    LanguageModelDataset emptyTest;
+    emptyTest.vocabularySize = vocabularySize;
+
+    const int predictions = trainDataset.totalPredictionCount();
+    SmokeLog::result(
+        "consumer VRAM config",
+        "vocab=%d embed=%d pos=%d blocks=%d heads=%d examples=%d preds=%d batch=%d accum=%d maxPackCols=%d lossScale=%s",
+        vocabularySize,
+        embeddingDim,
+        maximumPositionCount,
+        blockCount,
+        headCount,
+        exampleCount,
+        predictions,
+        batchSize,
+        gradientAccumulationSteps,
+        host.cudaMaxPackedColumns(),
+        (CudaAmp::useLossScaling ? "on" : "off")
+    );
+    SmokeLog::result(
+        "consumer VRAM mem",
+        "total=%.0f MiB  freeBefore=%.0f  freeAfterSetup=%.0f  setupUsed=%.0f  maxPackCols=%d",
+        static_cast<double>(totalBytes) / (1024.0 * 1024.0),
+        static_cast<double>(freeBefore) / (1024.0 * 1024.0),
+        static_cast<double>(freeAfterSetup) / (1024.0 * 1024.0),
+        static_cast<double>(freeBefore - freeAfterSetup) / (1024.0 * 1024.0),
+        host.cudaMaxPackedColumns()
+    );
+
+    host.train(trainDataset, emptyTest, epochs, 1, batchSize, gradientAccumulationSteps);
+
+    size_t freeAfterTrain = 0;
+    CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeAfterTrain, &totalBytes), "consumer VRAM memGetInfo after train");
+    SmokeLog::result(
+        "consumer VRAM after",
+        "free=%.0f MiB  setupUsed=%.0f MiB",
+        static_cast<double>(freeAfterTrain) / (1024.0 * 1024.0),
+        static_cast<double>(freeBefore - freeAfterSetup) / (1024.0 * 1024.0)
+    );
 }
 
 void CudaLanguageModel::runSmokeDemo(int vocabularySize, int embeddingDim, int sequenceLength, int blockCount, int headCount) {

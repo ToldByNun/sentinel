@@ -122,6 +122,7 @@ void LanguageModel::enableCudaTrain() {
               << (CudaAmp::preferMixedPrecision ? "on" : "off")
               << ", lossScale=" << (CudaAmp::useLossScaling ? "on" : "off")
               << ", int8 adam " << (CudaAdam::preferInt8Moments ? "on" : "off")
+              << ", halfCkpt=" << (this->device->useHalfActivationCheckpoints() ? "on" : "off")
               << ", maxPackCols=" << this->device->maxPackedColumns << ")\n";
 }
 

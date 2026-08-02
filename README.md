@@ -75,5 +75,20 @@ model.train(trainSet, testSet, epochs, logEvery, batchSize, gradAccum);
 ```
 
 - `enableCudaTrain` sets `maxPackedColumns` from free GPU memory (`applyVramPackBudget`). Override with `setCudaMaxPackedColumns(n)` (marks manual; auto will not overwrite).
+- AMP on stores **saturated FP16** block-input checkpoints (half VRAM vs FP32; restore scratch is one FP32 buffer). Non-finite activations are zeroed on cast.
 - AMP loss scaling only kicks in for larger embed dims (when FP16 GEMMs can run).
 - 8-bit Adam moments default on: `setCudaPreferInt8AdamMoments(false)` to disable.
+
+### Consumer VRAM proof (RTX 5070 Ti 16 GB)
+
+`CudaLanguageModel::runConsumerVramDemo()` — vocab 8k, embed 256, pos 512, 4 blocks / 8 heads, flash, int8 Adam, auto pack budget, loss scale on:
+
+| | |
+|---|---|
+| maxPackCols | 16384 (auto, free≈15 GiB × 0.55) |
+| setup VRAM | ~460 MiB (weights + workspaces, FP16 checkpoints) |
+| after 1 epoch | free still ~11 GiB (Adam moments grow lazily) |
+| throughput | ~66k tok/s (epoch, packed) |
+| pack | packs=47 avgTok≈12.5k size1=0% |
+
+Fits comfortably on 16 GB; setup footprint leaves headroom for larger packs/models.

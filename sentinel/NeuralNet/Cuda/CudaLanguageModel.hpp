@@ -336,6 +336,9 @@ public:
 
     void releaseActivationCheckpoints();
 
+    /// <summary>true when block inputs are stored as saturated FP16 (AMP on)</summary>
+    bool useHalfActivationCheckpoints() const;
+
 
 
     /// <summary>forward trunk embed blocks finalNorm without vocab projection</summary>
@@ -425,6 +428,22 @@ public:
 
     /// <summary>breakdown of one packed train step embed attn ffn ce adam</summary>
     static void runTrainProfileDemo(int vocabularySize = 1000, int embeddingDim = 64, int sequenceLength = 48, int blockCount = 2, int headCount = 4, bool preferFlash = true, int maxPackedColumns = 0);
+
+    /// <summary>
+    /// consumer VRAM proof: larger LM (d&gt;=256), auto pack budget, loss scale, timed packed epoch
+    /// logs free/used MiB, maxPackCols, tokens/s
+    /// </summary>
+    static void runConsumerVramDemo(
+        int vocabularySize = 8000,
+        int embeddingDim = 256,
+        int maximumPositionCount = 512,
+        int blockCount = 4,
+        int headCount = 8,
+        int exampleCount = 4096,
+        int epochs = 1,
+        int batchSize = 32,
+        int gradientAccumulationSteps = 2
+    );
 
 
 

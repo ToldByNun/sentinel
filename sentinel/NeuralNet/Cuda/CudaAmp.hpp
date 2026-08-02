@@ -70,6 +70,9 @@ public:
     /// <summary>cast float matrix to half matrix</summary>
     static void castToHalf(const CudaMatrix& source, CudaHalfMatrix& destination);
 
+    /// <summary>cast to half clamping to FP16 range; non-finite becomes 0 (safe for activation checkpoints)</summary>
+    static void castToHalfSaturated(const CudaMatrix& source, CudaHalfMatrix& destination);
+
     /// <summary>cast half matrix to float matrix</summary>
     static void castToFloat(const CudaHalfMatrix& source, CudaMatrix& destination);
 

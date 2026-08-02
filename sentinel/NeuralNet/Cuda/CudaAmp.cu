@@ -92,6 +92,16 @@ __global__ void CudaAmpCastFloatToHalfEntry(const float* source, __half* destina
     destination[index] = __float2half(source[index]);
 }
 
+__global__ void CudaAmpCastFloatToHalfSaturatedEntry(const float* source, __half* destination, int elementCount) {
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+    float value = source[index];
+    if (!isfinite(value)) value = 0.0f;
+    // FP16 finite max ~65504
+    value = fminf(fmaxf(value, -65504.0f), 65504.0f);
+    destination[index] = __float2half(value);
+}
+
 __global__ void CudaAmpCastHalfToFloatEntry(const __half* source, float* destination, int elementCount) {
     const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
     if (index >= elementCount) return;
@@ -119,6 +129,14 @@ static void launchCastFloatToHalf(const float* source, __half* destination, int 
     throwIfCudaFailedAmp(cudaGetLastError(), "CudaAmpCastFloatToHalfEntry launch");
 }
 
+static void launchCastFloatToHalfSaturated(const float* source, __half* destination, int elementCount) {
+    if (elementCount <= 0) return;
+    const int threads = 256;
+    const int blocks = (elementCount + threads - 1) / threads;
+    CudaAmpCastFloatToHalfSaturatedEntry<<<blocks, threads>>>(source, destination, elementCount);
+    throwIfCudaFailedAmp(cudaGetLastError(), "CudaAmpCastFloatToHalfSaturatedEntry launch");
+}
+
 static void launchCastHalfToFloat(const __half* source, float* destination, int elementCount) {
     if (elementCount <= 0) return;
     const int threads = 256;
@@ -131,6 +149,12 @@ void CudaAmp::castToHalf(const CudaMatrix& source, CudaHalfMatrix& destination) 
     if (source.empty()) throw std::invalid_argument("CudaAmp::castToHalf empty source");
     destination.ensureSize(source.rows, source.cols);
     launchCastFloatToHalf(source.buffer.deviceData, reinterpret_cast<__half*>(destination.buffer.deviceData), static_cast<int>(source.elementCount()));
+}
+
+void CudaAmp::castToHalfSaturated(const CudaMatrix& source, CudaHalfMatrix& destination) {
+    if (source.empty()) throw std::invalid_argument("CudaAmp::castToHalfSaturated empty source");
+    destination.ensureSize(source.rows, source.cols);
+    launchCastFloatToHalfSaturated(source.buffer.deviceData, reinterpret_cast<__half*>(destination.buffer.deviceData), static_cast<int>(source.elementCount()));
 }
 
 void CudaAmp::castToFloat(const CudaHalfMatrix& source, CudaMatrix& destination) {
