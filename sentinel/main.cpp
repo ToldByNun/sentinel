@@ -38,6 +38,7 @@ int main() {
 
     const bool runSmokes = false;
     const bool runSpeedBench = false;
+    const bool runGraphCheck = false;
     const bool runEpilogueCheck = false;
     const bool runFfnBwdCheck = false;
     const bool runQkvCheck = false;
@@ -61,6 +62,95 @@ int main() {
     const int testReservoirCap = 512;
     const bool preferCpuAdamOffload = false;
     const bool useCheckpointing = false;
+
+    if (runGraphCheck) {
+        SmokeLog::section("cuda graph microstep check");
+        if (!CudaMatmul::isAvailable()) {
+            SmokeLog::skip("cuda graph microstep check (no CUDA)");
+            return 1;
+        }
+        try {
+            const bool previousAmp = CudaAmp::preferMixedPrecision;
+            const bool previousInt8 = CudaAdam::preferInt8Moments;
+            const bool previousCpu = CudaAdam::preferCpuOffload;
+            CudaAmp::preferMixedPrecision = true;
+            CudaAmp::useLossScaling = true;
+            CudaAmp::resetLossScaler();
+            CudaAdam::preferCpuOffload = false;
+            CudaAdam::preferInt8Moments = true;
+
+            const int vocab = 4000;
+            const int seq = 256;
+            LanguageModel host(vocab, embeddingDim, maximumPositionCount, Adam(0.001f), blockCount, headCount);
+            CudaLanguageModel device = CudaLanguageModel::createFrom(host);
+            device.adam = CudaAdam(0.001f);
+            device.activationCheckpointing = false;
+            device.preferTrainGraph = true;
+            device.maxPackedColumnsManual = false;
+            device.applyVramPackBudget();
+            for (CudaTransformerBlock& block : device.blocks)
+                block.attention.preferFlashAttention = true;
+            device.ensureTrainState();
+
+            const int packBatch = (std::min)(32, device.maxPackExamplesForSegment(seq));
+            std::vector<LanguageModelExample> examples(static_cast<size_t>(packBatch));
+            unsigned rng = 91u;
+            for (int exampleIndex = 0; exampleIndex < packBatch; ++exampleIndex) {
+                examples[static_cast<size_t>(exampleIndex)].inputTokenIds.resize(static_cast<size_t>(seq));
+                examples[static_cast<size_t>(exampleIndex)].targetTokenIds.resize(static_cast<size_t>(seq));
+                for (size_t index = 0; index < static_cast<size_t>(seq); ++index) {
+                    rng = rng * 1664525u + 1013904223u;
+                    examples[static_cast<size_t>(exampleIndex)].inputTokenIds[index] = static_cast<int>(rng % static_cast<unsigned>(vocab));
+                    rng = rng * 1664525u + 1013904223u;
+                    examples[static_cast<size_t>(exampleIndex)].targetTokenIds[index] = static_cast<int>(rng % static_cast<unsigned>(vocab));
+                }
+            }
+            std::vector<const LanguageModelExample*> packPointers(static_cast<size_t>(packBatch));
+            for (int exampleIndex = 0; exampleIndex < packBatch; ++exampleIndex)
+                packPointers[static_cast<size_t>(exampleIndex)] = &examples[static_cast<size_t>(exampleIndex)];
+
+            for (int step = 0; step < 4; ++step) {
+                device.trainGradients.zeroInPlace();
+                device.accumulatePackedExamples(packPointers.data(), packBatch, device.trainGradients);
+                device.applyGradients(device.trainGradients, 1.0f / static_cast<float>(packBatch));
+            }
+            if (cudaDeviceSynchronize() != cudaSuccess)
+                throw std::runtime_error("graph check warmup sync failed");
+
+            const bool graphReady = device.trainGraphExec != nullptr && device.preferTrainGraph;
+            SmokeLog::result("cuda graph capture", "ready=%s pack=%d seg=%d",
+                graphReady ? "yes" : "no", packBatch, seq);
+
+            const auto start = std::chrono::steady_clock::now();
+            const int timedSteps = 6;
+            for (int step = 0; step < timedSteps; ++step) {
+                device.trainGradients.zeroInPlace();
+                device.accumulatePackedExamples(packPointers.data(), packBatch, device.trainGradients);
+                device.applyGradients(device.trainGradients, 1.0f / static_cast<float>(packBatch));
+            }
+            if (cudaDeviceSynchronize() != cudaSuccess)
+                throw std::runtime_error("graph check timed sync failed");
+            const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            const double tokensPerSecond = seconds > 0.0
+                ? static_cast<double>(seq * packBatch) * static_cast<double>(timedSteps) / seconds
+                : 0.0;
+
+            size_t freeAfter = 0;
+            size_t totalBytes = 0;
+            cudaMemGetInfo(&freeAfter, &totalBytes);
+            SmokeLog::result("graph throughput", "pack=%d tokens/s=%.0f freeMiB=%.0f graph=%s",
+                packBatch, tokensPerSecond, static_cast<double>(freeAfter) / (1024.0 * 1024.0),
+                device.trainGraphExec != nullptr ? "on" : "off");
+
+            CudaAmp::preferMixedPrecision = previousAmp;
+            CudaAdam::preferInt8Moments = previousInt8;
+            CudaAdam::preferCpuOffload = previousCpu;
+        } catch (const std::exception& ex) {
+            SmokeLog::result("cuda graph microstep check", "FAILED: %s", ex.what());
+            return 1;
+        }
+        return 0;
+    }
 
     if (runEpilogueCheck) {
         SmokeLog::section("bias epilogue check");

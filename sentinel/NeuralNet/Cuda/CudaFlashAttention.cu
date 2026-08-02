@@ -703,16 +703,16 @@ void CudaFlashAttention::forwardMultiHead(const CudaMatrix& query, const CudaMat
     const int causalFlag = causal ? 1 : 0;
 
     if (headDimension == 16 && tileBr == 64 && tileBc == 64) {
-        CudaFlashAttentionForwardFixedEntry<16, 64, 64><<<grid, threadCount, sharedBytes>>>(
+        CudaFlashAttentionForwardFixedEntry<16, 64, 64><<<grid, threadCount, sharedBytes, CudaMatmul::activeStream()>>>(
             query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, out.buffer.deviceData, logSumExp.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
     } else if (headDimension == 16 && tileBr == 32 && tileBc == 32) {
-        CudaFlashAttentionForwardFixedEntry<16, 32, 32><<<grid, threadCount, sharedBytes>>>(
+        CudaFlashAttentionForwardFixedEntry<16, 32, 32><<<grid, threadCount, sharedBytes, CudaMatmul::activeStream()>>>(
             query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, out.buffer.deviceData, logSumExp.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
     } else if (headDimension == 64 && tileBr == 16 && tileBc == 16) {
-        CudaFlashAttentionForwardFixedEntry<64, 16, 16><<<grid, threadCount, sharedBytes>>>(
+        CudaFlashAttentionForwardFixedEntry<64, 16, 16><<<grid, threadCount, sharedBytes, CudaMatmul::activeStream()>>>(
             query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, out.buffer.deviceData, logSumExp.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
     } else {
-        CudaFlashAttentionForwardEntry<<<grid, threadCount, sharedBytes>>>(
+        CudaFlashAttentionForwardEntry<<<grid, threadCount, sharedBytes, CudaMatmul::activeStream()>>>(
             query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, out.buffer.deviceData, logSumExp.buffer.deviceData, headDimension, strideColumns, columnStart, columnCount, scale, causalFlag, tileBr, tileBc);
     }
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaFlashAttentionForwardEntry launch");
@@ -750,7 +750,7 @@ void CudaFlashAttention::backwardMultiHead(const CudaMatrix& query, const CudaMa
     const int deltaThreads = 128;
     const int deltaBlocksX = (columnCount + deltaThreads - 1) / deltaThreads;
     const dim3 deltaGrid(static_cast<unsigned>(deltaBlocksX), static_cast<unsigned>(headCount), static_cast<unsigned>(packCount));
-    CudaFlashAttentionDeltaEntry<<<deltaGrid, deltaThreads>>>(
+    CudaFlashAttentionDeltaEntry<<<deltaGrid, deltaThreads, 0, CudaMatmul::activeStream()>>>(
         out.buffer.deviceData,
         outGradient.buffer.deviceData,
         deltaWorkspace.buffer.deviceData,
@@ -771,16 +771,16 @@ void CudaFlashAttention::backwardMultiHead(const CudaMatrix& query, const CudaMa
     const int causalFlag = causal ? 1 : 0;
 
     if (headDimension == 16 && tileBr == 64 && tileBc == 64) {
-        CudaFlashAttentionBackwardKeyFixedEntry<16, 64, 64><<<grid, threadCount, keySharedBytes>>>(
+        CudaFlashAttentionBackwardKeyFixedEntry<16, 64, 64><<<grid, threadCount, keySharedBytes, CudaMatmul::activeStream()>>>(
             query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, outGradient.buffer.deviceData, logSumExp.buffer.deviceData, deltaWorkspace.buffer.deviceData, queryGradient.buffer.deviceData, keyGradient.buffer.deviceData, valueGradient.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
     } else if (headDimension == 16 && tileBr == 32 && tileBc == 32) {
-        CudaFlashAttentionBackwardKeyFixedEntry<16, 32, 32><<<grid, threadCount, keySharedBytes>>>(
+        CudaFlashAttentionBackwardKeyFixedEntry<16, 32, 32><<<grid, threadCount, keySharedBytes, CudaMatmul::activeStream()>>>(
             query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, outGradient.buffer.deviceData, logSumExp.buffer.deviceData, deltaWorkspace.buffer.deviceData, queryGradient.buffer.deviceData, keyGradient.buffer.deviceData, valueGradient.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
     } else if (headDimension == 64 && tileBr == 16 && tileBc == 16) {
-        CudaFlashAttentionBackwardKeyFixedEntry<64, 16, 16><<<grid, threadCount, keySharedBytes>>>(
+        CudaFlashAttentionBackwardKeyFixedEntry<64, 16, 16><<<grid, threadCount, keySharedBytes, CudaMatmul::activeStream()>>>(
             query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, outGradient.buffer.deviceData, logSumExp.buffer.deviceData, deltaWorkspace.buffer.deviceData, queryGradient.buffer.deviceData, keyGradient.buffer.deviceData, valueGradient.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
     } else {
-        CudaFlashAttentionBackwardKeyEntry<<<grid, threadCount, keySharedBytes>>>(
+        CudaFlashAttentionBackwardKeyEntry<<<grid, threadCount, keySharedBytes, CudaMatmul::activeStream()>>>(
             query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, outGradient.buffer.deviceData, logSumExp.buffer.deviceData, deltaWorkspace.buffer.deviceData, queryGradient.buffer.deviceData, keyGradient.buffer.deviceData, valueGradient.buffer.deviceData, headDimension, strideColumns, columnStart, columnCount, scale, causalFlag, tileBr, tileBc);
     }
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaFlashAttentionBackwardEntry launch");

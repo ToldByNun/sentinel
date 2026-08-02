@@ -645,7 +645,7 @@ void CudaOps::broadcastBiasAddInPlace(CudaMatrix& product, const CudaMatrix& bia
     const int columnCount = static_cast<int>(product.cols);
     const int elementCount = rowCount * columnCount;
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsBroadcastBiasAddEntry<<<blockCount, CudaOps::threadCount>>>(product.buffer.deviceData, bias.buffer.deviceData, rowCount, columnCount);
+    CudaOpsBroadcastBiasAddEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(product.buffer.deviceData, bias.buffer.deviceData, rowCount, columnCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsBroadcastBiasAddEntry launch");
 }
 
@@ -656,7 +656,7 @@ void CudaOps::siluInto(const CudaMatrix& input, CudaMatrix& out) {
     out.ensureSize(input.rows, input.cols);
     const int elementCount = static_cast<int>(input.elementCount());
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsSiluEntry<<<blockCount, CudaOps::threadCount>>>(input.buffer.deviceData, out.buffer.deviceData, elementCount);
+    CudaOpsSiluEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(input.buffer.deviceData, out.buffer.deviceData, elementCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSiluEntry launch");
 }
 
@@ -669,7 +669,7 @@ void CudaOps::siluMultiplyInto(const CudaMatrix& gatePreActivation, const CudaMa
     out.ensureSize(gatePreActivation.rows, gatePreActivation.cols);
     const int elementCount = static_cast<int>(gatePreActivation.elementCount());
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsSiluMultiplyEntry<<<blockCount, CudaOps::threadCount>>>(
+    CudaOpsSiluMultiplyEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(
         gatePreActivation.buffer.deviceData, up.buffer.deviceData, out.buffer.deviceData, elementCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSiluMultiplyEntry launch");
 }
@@ -699,7 +699,7 @@ void CudaOps::swigluFromStackedPreBias(
 
     const int elementCount = hiddenRows * columnCount;
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsSwigluFromStackedEntry<<<blockCount, CudaOps::threadCount>>>(
+    CudaOpsSwigluFromStackedEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(
         stackedPreBias.buffer.deviceData,
         gateBias.buffer.deviceData,
         upBias.buffer.deviceData,
@@ -733,7 +733,7 @@ void CudaOps::swigluFromStacked(
 
     const int elementCount = hiddenRows * columnCount;
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsSwigluFromStackedBiasedEntry<<<blockCount, CudaOps::threadCount>>>(
+    CudaOpsSwigluFromStackedBiasedEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(
         stackedPreActivation.buffer.deviceData,
         gatePreActivation.buffer.deviceData,
         up.buffer.deviceData,
@@ -768,7 +768,7 @@ void CudaOps::swigluBackwardIntoStacked(
 
     const int elementCount = static_cast<int>(hiddenGradient.elementCount());
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsSwigluBackwardStackedEntry<<<blockCount, CudaOps::threadCount>>>(
+    CudaOpsSwigluBackwardStackedEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(
         hiddenGradient.buffer.deviceData,
         gatePreActivation.buffer.deviceData,
         up.buffer.deviceData,
@@ -792,7 +792,7 @@ void CudaOps::sumColumnsStackedHalvesInto(const CudaMatrix& stacked, CudaMatrix&
     secondBiasGradient.ensureSize(static_cast<size_t>(halfRows), 1);
 
     const int blockCount = (halfRows + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsSumColumnsStackedHalvesEntry<<<blockCount, CudaOps::threadCount>>>(
+    CudaOpsSumColumnsStackedHalvesEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(
         stacked.buffer.deviceData,
         firstBiasGradient.buffer.deviceData,
         secondBiasGradient.buffer.deviceData,
@@ -808,7 +808,7 @@ void CudaOps::siluDerivativeInto(const CudaMatrix& input, CudaMatrix& out) {
     out.ensureSize(input.rows, input.cols);
     const int elementCount = static_cast<int>(input.elementCount());
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsSiluDerivativeEntry<<<blockCount, CudaOps::threadCount>>>(input.buffer.deviceData, out.buffer.deviceData, elementCount);
+    CudaOpsSiluDerivativeEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(input.buffer.deviceData, out.buffer.deviceData, elementCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSiluDerivativeEntry launch");
 }
 
@@ -820,7 +820,7 @@ void CudaOps::multiplyElementwiseInto(const CudaMatrix& left, const CudaMatrix& 
     out.ensureSize(left.rows, left.cols);
     const int elementCount = static_cast<int>(left.elementCount());
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsMultiplyElementwiseEntry<<<blockCount, CudaOps::threadCount>>>(left.buffer.deviceData, right.buffer.deviceData, out.buffer.deviceData, elementCount);
+    CudaOpsMultiplyElementwiseEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(left.buffer.deviceData, right.buffer.deviceData, out.buffer.deviceData, elementCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsMultiplyElementwiseEntry launch");
 }
 
@@ -831,7 +831,7 @@ void CudaOps::multiplyElementwiseInPlace(CudaMatrix& total, const CudaMatrix& ot
 
     const int elementCount = static_cast<int>(total.elementCount());
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsMultiplyElementwiseInPlaceEntry<<<blockCount, CudaOps::threadCount>>>(total.buffer.deviceData, other.buffer.deviceData, elementCount);
+    CudaOpsMultiplyElementwiseInPlaceEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(total.buffer.deviceData, other.buffer.deviceData, elementCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsMultiplyElementwiseInPlaceEntry launch");
 }
 
@@ -843,7 +843,7 @@ void CudaOps::addInto(const CudaMatrix& left, const CudaMatrix& right, CudaMatri
     out.ensureSize(left.rows, left.cols);
     const int elementCount = static_cast<int>(left.elementCount());
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsAddEntry<<<blockCount, CudaOps::threadCount>>>(left.buffer.deviceData, right.buffer.deviceData, out.buffer.deviceData, elementCount);
+    CudaOpsAddEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(left.buffer.deviceData, right.buffer.deviceData, out.buffer.deviceData, elementCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsAddEntry launch");
 }
 
@@ -854,7 +854,7 @@ void CudaOps::addInPlace(CudaMatrix& total, const CudaMatrix& delta) {
 
     const int elementCount = static_cast<int>(total.elementCount());
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsAddInPlaceEntry<<<blockCount, CudaOps::threadCount>>>(total.buffer.deviceData, delta.buffer.deviceData, elementCount);
+    CudaOpsAddInPlaceEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(total.buffer.deviceData, delta.buffer.deviceData, elementCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsAddInPlaceEntry launch");
 }
 
@@ -866,7 +866,7 @@ void CudaOps::sumColumnsInto(const CudaMatrix& gradient, CudaMatrix& biasGradien
     const int rowCount = static_cast<int>(gradient.rows);
     const int columnCount = static_cast<int>(gradient.cols);
     const int blockCount = (rowCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsSumColumnsEntry<<<blockCount, CudaOps::threadCount>>>(gradient.buffer.deviceData, biasGradient.buffer.deviceData, rowCount, columnCount);
+    CudaOpsSumColumnsEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(gradient.buffer.deviceData, biasGradient.buffer.deviceData, rowCount, columnCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSumColumnsEntry launch");
 }
 
@@ -875,7 +875,7 @@ void CudaOps::copyInto(const CudaMatrix& source, CudaMatrix& destination) {
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::copyInto no CUDA device");
 
     destination.ensureSize(source.rows, source.cols);
-    CudaMatmul::throwIfCudaFailed(cudaMemcpy(destination.buffer.deviceData, source.buffer.deviceData, source.byteCount(), cudaMemcpyDeviceToDevice), "CudaOps::copyInto memcpy");
+    CudaMatmul::memcpyDevice(destination.buffer.deviceData, source.buffer.deviceData, source.byteCount());
 }
 
 void CudaOps::scaleInPlace(CudaMatrix& matrix, float scalar) {
@@ -884,7 +884,7 @@ void CudaOps::scaleInPlace(CudaMatrix& matrix, float scalar) {
 
     const int elementCount = static_cast<int>(matrix.elementCount());
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsScaleEntry<<<blockCount, CudaOps::threadCount>>>(matrix.buffer.deviceData, scalar, elementCount);
+    CudaOpsScaleEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(matrix.buffer.deviceData, scalar, elementCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsScaleEntry launch");
 }
 
@@ -892,7 +892,7 @@ void CudaOps::zeroInPlace(CudaMatrix& matrix) {
     if (matrix.empty()) return;
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::zeroInPlace no CUDA device");
 
-    CudaMatmul::throwIfCudaFailed(cudaMemset(matrix.buffer.deviceData, 0, matrix.byteCount()), "CudaOps::zeroInPlace memset");
+    CudaMatmul::memsetDevice(matrix.buffer.deviceData, 0, matrix.byteCount());
 }
 
 void CudaOps::extractHeadInto(const CudaMatrix& full, int headIndex, int headDimension, CudaMatrix& head) {
@@ -909,7 +909,7 @@ void CudaOps::extractHeadInto(const CudaMatrix& full, int headIndex, int headDim
     const int sourceStrideColumns = static_cast<int>(full.cols);
     const int elementCount = headDimension * usedColumnCount;
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsExtractHeadEntry<<<blockCount, CudaOps::threadCount>>>(full.buffer.deviceData, head.buffer.deviceData, headIndex, headDimension, sourceStrideColumns, usedColumnCount);
+    CudaOpsExtractHeadEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(full.buffer.deviceData, head.buffer.deviceData, headIndex, headDimension, sourceStrideColumns, usedColumnCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsExtractHeadEntry launch");
 }
 
@@ -921,7 +921,7 @@ void CudaOps::writeHead(CudaMatrix& full, int headIndex, int headDimension, cons
     const int sequenceLength = static_cast<int>(full.cols);
     const int elementCount = headDimension * sequenceLength;
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsWriteHeadEntry<<<blockCount, CudaOps::threadCount>>>(full.buffer.deviceData, head.buffer.deviceData, headIndex, headDimension, sequenceLength, static_cast<int>(full.rows));
+    CudaOpsWriteHeadEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(full.buffer.deviceData, head.buffer.deviceData, headIndex, headDimension, sequenceLength, static_cast<int>(full.rows));
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsWriteHeadEntry launch");
 }
 
@@ -938,7 +938,7 @@ void CudaOps::writeColumnsInto(CudaMatrix& destination, int destinationStartColu
     const int sourceColumnCount = static_cast<int>(source.cols);
     const int elementCount = embeddingDim * sourceColumnCount;
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsWriteColumnsEntry<<<blockCount, CudaOps::threadCount>>>(destination.buffer.deviceData, source.buffer.deviceData, embeddingDim, destinationStrideColumns, destinationStartColumn, sourceColumnCount);
+    CudaOpsWriteColumnsEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(destination.buffer.deviceData, source.buffer.deviceData, embeddingDim, destinationStrideColumns, destinationStartColumn, sourceColumnCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsWriteColumnsEntry launch");
 }
 
@@ -955,7 +955,7 @@ void CudaOps::extractColumnsInto(const CudaMatrix& source, int sourceStartColumn
     const int sourceStrideColumns = static_cast<int>(source.cols);
     const int elementCount = embeddingDim * columnCount;
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsExtractColumnsEntry<<<blockCount, CudaOps::threadCount>>>(source.buffer.deviceData, out.buffer.deviceData, embeddingDim, sourceStrideColumns, sourceStartColumn, columnCount);
+    CudaOpsExtractColumnsEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(source.buffer.deviceData, out.buffer.deviceData, embeddingDim, sourceStrideColumns, sourceStartColumn, columnCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsExtractColumnsEntry launch");
 }
 
@@ -972,7 +972,7 @@ void CudaOps::addColumnsInPlace(CudaMatrix& destination, int destinationStartCol
     const int sourceColumnCount = static_cast<int>(source.cols);
     const int elementCount = embeddingDim * sourceColumnCount;
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsAddColumnsEntry<<<blockCount, CudaOps::threadCount>>>(destination.buffer.deviceData, source.buffer.deviceData, embeddingDim, destinationStrideColumns, destinationStartColumn, sourceColumnCount);
+    CudaOpsAddColumnsEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(destination.buffer.deviceData, source.buffer.deviceData, embeddingDim, destinationStrideColumns, destinationStartColumn, sourceColumnCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsAddColumnsEntry launch");
 }
 
@@ -993,7 +993,7 @@ void CudaOps::applySparseAttentionMaskInPlace(CudaMatrix& scores, int windowSize
     const int queryCount = static_cast<int>(scores.cols);
     const int elementCount = keyCount * queryCount;
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsSparseAttentionMaskEntry<<<blockCount, CudaOps::threadCount>>>(scores.buffer.deviceData, keyCount, queryCount, queryPositionStart, windowSize, globalTokenCount, segmentLength);
+    CudaOpsSparseAttentionMaskEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(scores.buffer.deviceData, keyCount, queryCount, queryPositionStart, windowSize, globalTokenCount, segmentLength);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSparseAttentionMaskEntry launch");
 }
 
@@ -1005,7 +1005,7 @@ void CudaOps::softmaxInto(const CudaMatrix& logits, CudaMatrix& out) {
     const int rowCount = static_cast<int>(logits.rows);
     const int columnCount = static_cast<int>(logits.cols);
     const int blockCount = (columnCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsSoftmaxEntry<<<blockCount, CudaOps::threadCount>>>(logits.buffer.deviceData, out.buffer.deviceData, rowCount, columnCount);
+    CudaOpsSoftmaxEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(logits.buffer.deviceData, out.buffer.deviceData, rowCount, columnCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSoftmaxEntry launch");
 }
 
@@ -1019,7 +1019,7 @@ void CudaOps::softmaxBackwardInto(const CudaMatrix& probabilities, const CudaMat
     const int rowCount = static_cast<int>(probabilities.rows);
     const int columnCount = static_cast<int>(probabilities.cols);
     const int blockCount = (columnCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsSoftmaxBackwardEntry<<<blockCount, CudaOps::threadCount>>>(probabilities.buffer.deviceData, probabilityGradient.buffer.deviceData, scoreGradient.buffer.deviceData, rowCount, columnCount);
+    CudaOpsSoftmaxBackwardEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(probabilities.buffer.deviceData, probabilityGradient.buffer.deviceData, scoreGradient.buffer.deviceData, rowCount, columnCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSoftmaxBackwardEntry launch");
 }
 
@@ -1034,7 +1034,7 @@ void CudaOps::zeroForbiddenScoreGradientsInPlace(CudaMatrix& scoresGrad, int win
     const int queryCount = static_cast<int>(scoresGrad.cols);
     const int elementCount = keyCount * queryCount;
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsZeroForbiddenScoreGradientsEntry<<<blockCount, CudaOps::threadCount>>>(scoresGrad.buffer.deviceData, keyCount, queryCount, queryPositionStart, windowSize, globalTokenCount, segmentLength);
+    CudaOpsZeroForbiddenScoreGradientsEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(scoresGrad.buffer.deviceData, keyCount, queryCount, queryPositionStart, windowSize, globalTokenCount, segmentLength);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsZeroForbiddenScoreGradientsEntry launch");
 }
 
@@ -1055,7 +1055,7 @@ void CudaOps::rotaryRotateInPlace(CudaMatrix& tensor, int headCount, int headDim
 
     const int sequenceLength = static_cast<int>(tensor.cols);
     const int blockCount = (sequenceLength + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsRotaryRotateEntry<<<blockCount, CudaOps::threadCount>>>(tensor.buffer.deviceData, headCount, headDimension, pairCount, sequenceLength, positionOffset, segmentLength, cosTable.buffer.deviceData, sinTable.buffer.deviceData);
+    CudaOpsRotaryRotateEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(tensor.buffer.deviceData, headCount, headDimension, pairCount, sequenceLength, positionOffset, segmentLength, cosTable.buffer.deviceData, sinTable.buffer.deviceData);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsRotaryRotateEntry launch");
 }
 
@@ -1076,7 +1076,7 @@ void CudaOps::rotaryRotateInverseInPlace(CudaMatrix& tensor, int headCount, int 
 
     const int sequenceLength = static_cast<int>(tensor.cols);
     const int blockCount = (sequenceLength + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsRotaryRotateInverseEntry<<<blockCount, CudaOps::threadCount>>>(tensor.buffer.deviceData, headCount, headDimension, pairCount, sequenceLength, positionOffset, segmentLength, cosTable.buffer.deviceData, sinTable.buffer.deviceData);
+    CudaOpsRotaryRotateInverseEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(tensor.buffer.deviceData, headCount, headDimension, pairCount, sequenceLength, positionOffset, segmentLength, cosTable.buffer.deviceData, sinTable.buffer.deviceData);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsRotaryRotateInverseEntry launch");
 }
 
@@ -1098,7 +1098,7 @@ void CudaOps::embeddingGatherInto(const CudaMatrix& weight, const int* tokenIdsD
 
     const int elementCount = embeddingDim * static_cast<int>(tokenCount);
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsEmbeddingGatherEntry<<<blockCount, CudaOps::threadCount>>>(weight.buffer.deviceData, tokenIdsDevice, out.buffer.deviceData, embeddingDim, static_cast<int>(tokenCount), vocabularySize);
+    CudaOpsEmbeddingGatherEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(weight.buffer.deviceData, tokenIdsDevice, out.buffer.deviceData, embeddingDim, static_cast<int>(tokenCount), vocabularySize);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsEmbeddingGatherEntry launch");
 }
 
@@ -1121,7 +1121,7 @@ void CudaOps::embeddingScatterAddInto(CudaMatrix& weightGradient, const int* tok
     const int embeddingDim = static_cast<int>(weightGradient.cols);
     const int elementCount = embeddingDim * static_cast<int>(tokenCount);
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsEmbeddingScatterAddEntry<<<blockCount, CudaOps::threadCount>>>(weightGradient.buffer.deviceData, tokenIdsDevice, outputGradient.buffer.deviceData, embeddingDim, static_cast<int>(tokenCount), vocabularySize);
+    CudaOpsEmbeddingScatterAddEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(weightGradient.buffer.deviceData, tokenIdsDevice, outputGradient.buffer.deviceData, embeddingDim, static_cast<int>(tokenCount), vocabularySize);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsEmbeddingScatterAddEntry launch");
 }
 
@@ -1135,7 +1135,7 @@ void CudaOps::embeddingZeroRows(CudaMatrix& weightGradient, const int* tokenIdsD
     const int embeddingDim = static_cast<int>(weightGradient.cols);
     const int elementCount = embeddingDim * static_cast<int>(tokenCount);
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsEmbeddingZeroRowsEntry<<<blockCount, CudaOps::threadCount>>>(weightGradient.buffer.deviceData, tokenIdsDevice, embeddingDim, static_cast<int>(tokenCount), vocabularySize);
+    CudaOpsEmbeddingZeroRowsEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(weightGradient.buffer.deviceData, tokenIdsDevice, embeddingDim, static_cast<int>(tokenCount), vocabularySize);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsEmbeddingZeroRowsEntry launch");
 }
 
@@ -1153,7 +1153,7 @@ float CudaOps::crossEntropyLossFromIds(const CudaMatrix& probabilities, const Cu
     const int vocabularySize = static_cast<int>(probabilities.rows);
     const int tokenCountInt = static_cast<int>(tokenCount);
     const int blockCount = (tokenCountInt + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsCrossEntropyLossFromIdsEntry<<<blockCount, CudaOps::threadCount>>>(probabilities.buffer.deviceData, targetTokenIds.deviceData, columnLossScratch.buffer.deviceData, vocabularySize, tokenCountInt);
+    CudaOpsCrossEntropyLossFromIdsEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(probabilities.buffer.deviceData, targetTokenIds.deviceData, columnLossScratch.buffer.deviceData, vocabularySize, tokenCountInt);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsCrossEntropyLossFromIdsEntry launch");
     CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaOps::crossEntropyLossFromIds synchronize");
 
@@ -1176,7 +1176,7 @@ void CudaOps::crossEntropyAddMeanLossFromIds(const CudaMatrix& probabilities, co
     const int vocabularySize = static_cast<int>(probabilities.rows);
     const int tokenCountInt = static_cast<int>(tokenCount);
     const int blockCount = (tokenCountInt + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsCrossEntropyAddMeanLossFromIdsEntry<<<blockCount, CudaOps::threadCount>>>(probabilities.buffer.deviceData, targetTokenIds.deviceData, lossSum.buffer.deviceData, vocabularySize, tokenCountInt);
+    CudaOpsCrossEntropyAddMeanLossFromIdsEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(probabilities.buffer.deviceData, targetTokenIds.deviceData, lossSum.buffer.deviceData, vocabularySize, tokenCountInt);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsCrossEntropyAddMeanLossFromIdsEntry launch");
 }
 
@@ -1193,7 +1193,7 @@ void CudaOps::crossEntropyLogitGradientFromIdsInto(const CudaMatrix& probabiliti
     const int tokenCountInt = static_cast<int>(tokenCount);
     const int elementCount = vocabularySize * tokenCountInt;
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsCrossEntropyLogitGradientFromIdsEntry<<<blockCount, CudaOps::threadCount>>>(probabilities.buffer.deviceData, targetTokenIds.deviceData, logitGradient.buffer.deviceData, vocabularySize, tokenCountInt);
+    CudaOpsCrossEntropyLogitGradientFromIdsEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(probabilities.buffer.deviceData, targetTokenIds.deviceData, logitGradient.buffer.deviceData, vocabularySize, tokenCountInt);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsCrossEntropyLogitGradientFromIdsEntry launch");
 }
 
@@ -1214,7 +1214,7 @@ void CudaOps::softmaxCrossEntropyFromLogitsInto(const CudaMatrix& logits, const 
     const int vocabularySize = static_cast<int>(logits.rows);
     const int tokenCountInt = static_cast<int>(tokenCount);
     const int blockCount = (tokenCountInt + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsSoftmaxCrossEntropyFromLogitsEntry<<<blockCount, CudaOps::threadCount>>>(logits.buffer.deviceData, targetTokenIds.deviceData, probabilities.buffer.deviceData, logitGradient.buffer.deviceData, lossSum.buffer.deviceData, vocabularySize, tokenCountInt, lossScale, meanDivisor);
+    CudaOpsSoftmaxCrossEntropyFromLogitsEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(logits.buffer.deviceData, targetTokenIds.deviceData, probabilities.buffer.deviceData, logitGradient.buffer.deviceData, lossSum.buffer.deviceData, vocabularySize, tokenCountInt, lossScale, meanDivisor);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSoftmaxCrossEntropyFromLogitsEntry launch");
 }
 
@@ -1344,7 +1344,7 @@ void CudaOps::fillInPlace(CudaMatrix& matrix, float value) {
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::fillInPlace no CUDA device");
     const int elementCount = static_cast<int>(matrix.elementCount());
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsFillEntry<<<blockCount, CudaOps::threadCount>>>(matrix.buffer.deviceData, value, elementCount);
+    CudaOpsFillEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(matrix.buffer.deviceData, value, elementCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsFillEntry launch");
 }
 
@@ -1359,7 +1359,7 @@ void CudaOps::broadcastBiasRowsAddInPlace(CudaMatrix& product, const CudaMatrix&
     const int columnCount = static_cast<int>(product.cols);
     const int elementCount = rowCount * columnCount;
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsBroadcastBiasRowsAddEntry<<<blockCount, CudaOps::threadCount>>>(product.buffer.deviceData, bias.buffer.deviceData, rowStart, rowCount, columnCount);
+    CudaOpsBroadcastBiasRowsAddEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(product.buffer.deviceData, bias.buffer.deviceData, rowStart, rowCount, columnCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsBroadcastBiasRowsAddEntry launch");
 }
 
@@ -1374,7 +1374,7 @@ void CudaOps::addRowsInPlace(CudaMatrix& destination, int rowStart, const CudaMa
     const int columnCount = static_cast<int>(source.cols);
     const int elementCount = rowCount * columnCount;
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsAddRowsInPlaceEntry<<<blockCount, CudaOps::threadCount>>>(destination.buffer.deviceData, source.buffer.deviceData, rowStart, rowCount, columnCount);
+    CudaOpsAddRowsInPlaceEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(destination.buffer.deviceData, source.buffer.deviceData, rowStart, rowCount, columnCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsAddRowsInPlaceEntry launch");
 }
 
@@ -1401,7 +1401,7 @@ void CudaOps::onlineSoftmaxUpdateFromChunk(const float* logitChunk, int chunkRow
 
     const int tokenCountInt = static_cast<int>(tokenCount);
     const int blockCount = (tokenCountInt + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsOnlineSoftmaxUpdateEntry<<<blockCount, CudaOps::threadCount>>>(logitChunk, chunkRows, tokenCountInt, maximumLogits.buffer.deviceData, sumExp.buffer.deviceData);
+    CudaOpsOnlineSoftmaxUpdateEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(logitChunk, chunkRows, tokenCountInt, maximumLogits.buffer.deviceData, sumExp.buffer.deviceData);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsOnlineSoftmaxUpdateEntry launch");
 }
 
@@ -1419,7 +1419,7 @@ void CudaOps::captureTargetLogitFromChunk(const float* logitChunk, const CudaInt
 
     const int tokenCountInt = static_cast<int>(tokenCount);
     const int blockCount = (tokenCountInt + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsCaptureTargetLogitEntry<<<blockCount, CudaOps::threadCount>>>(logitChunk, targetTokenIds.deviceData, rowStart, chunkRows, tokenCountInt, targetLogits.buffer.deviceData);
+    CudaOpsCaptureTargetLogitEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(logitChunk, targetTokenIds.deviceData, rowStart, chunkRows, tokenCountInt, targetLogits.buffer.deviceData);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsCaptureTargetLogitEntry launch");
 }
 
@@ -1435,7 +1435,7 @@ void CudaOps::onlineSoftmaxAddMeanCrossEntropy(const CudaMatrix& targetLogits, c
 
     const int tokenCountInt = static_cast<int>(tokenCount);
     const int blockCount = (tokenCountInt + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsOnlineSoftmaxAddCeEntry<<<blockCount, CudaOps::threadCount>>>(
+    CudaOpsOnlineSoftmaxAddCeEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(
         targetLogits.buffer.deviceData,
         maximumLogits.buffer.deviceData,
         sumExp.buffer.deviceData,
@@ -1470,7 +1470,7 @@ void CudaOps::onlineSoftmaxLogitGradientChunkInto(const float* logitChunk, const
     const int tokenCountInt = static_cast<int>(tokenCount);
     const int elementCount = chunkRows * tokenCountInt;
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsOnlineSoftmaxLogitGradChunkEntry<<<blockCount, CudaOps::threadCount>>>(
+    CudaOpsOnlineSoftmaxLogitGradChunkEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(
         logitChunk,
         targetTokenIds.deviceData,
         rowStart,
@@ -1496,6 +1496,6 @@ void CudaOps::sumColumnsAddIntoRows(const CudaMatrix& gradient, CudaMatrix& bias
     const int rowCount = static_cast<int>(gradient.rows);
     const int columnCount = static_cast<int>(gradient.cols);
     const int blockCount = (rowCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
-    CudaOpsSumColumnsAddIntoRowsEntry<<<blockCount, CudaOps::threadCount>>>(gradient.buffer.deviceData, biasGradient.buffer.deviceData, rowStart, rowCount, columnCount);
+    CudaOpsSumColumnsAddIntoRowsEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(gradient.buffer.deviceData, biasGradient.buffer.deviceData, rowStart, rowCount, columnCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSumColumnsAddIntoRowsEntry launch");
 }

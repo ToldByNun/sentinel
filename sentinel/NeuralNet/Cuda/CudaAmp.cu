@@ -177,7 +177,7 @@ static void launchCastFloatToHalf(const float* source, __half* destination, int 
     if (elementCount <= 0) return;
     const int threads = 256;
     const int blocks = (elementCount + threads - 1) / threads;
-    CudaAmpCastFloatToHalfEntry<<<blocks, threads>>>(source, destination, elementCount);
+    CudaAmpCastFloatToHalfEntry<<<blocks, threads, 0, CudaMatmul::activeStream()>>>(source, destination, elementCount);
     throwIfCudaFailedAmp(cudaGetLastError(), "CudaAmpCastFloatToHalfEntry launch");
 }
 
@@ -185,7 +185,7 @@ static void launchCastFloatToHalfSaturated(const float* source, __half* destinat
     if (elementCount <= 0) return;
     const int threads = 256;
     const int blocks = (elementCount + threads - 1) / threads;
-    CudaAmpCastFloatToHalfSaturatedEntry<<<blocks, threads>>>(source, destination, elementCount);
+    CudaAmpCastFloatToHalfSaturatedEntry<<<blocks, threads, 0, CudaMatmul::activeStream()>>>(source, destination, elementCount);
     throwIfCudaFailedAmp(cudaGetLastError(), "CudaAmpCastFloatToHalfSaturatedEntry launch");
 }
 
@@ -193,7 +193,7 @@ static void launchCastHalfToFloat(const __half* source, float* destination, int 
     if (elementCount <= 0) return;
     const int threads = 256;
     const int blocks = (elementCount + threads - 1) / threads;
-    CudaAmpCastHalfToFloatEntry<<<blocks, threads>>>(source, destination, elementCount);
+    CudaAmpCastHalfToFloatEntry<<<blocks, threads, 0, CudaMatmul::activeStream()>>>(source, destination, elementCount);
     throwIfCudaFailedAmp(cudaGetLastError(), "CudaAmpCastHalfToFloatEntry launch");
 }
 
@@ -232,7 +232,7 @@ bool CudaAmp::hasNonFinite(const CudaMatrix& matrix) {
     const int elementCount = static_cast<int>(matrix.elementCount());
     const int threads = 256;
     const int blocks = (elementCount + threads - 1) / threads;
-    CudaAmpHasNonFiniteEntry<<<blocks, threads>>>(matrix.buffer.deviceData, elementCount, reinterpret_cast<int*>(CudaAmp::nonFiniteFlag.deviceData));
+    CudaAmpHasNonFiniteEntry<<<blocks, threads, 0, CudaMatmul::activeStream()>>>(matrix.buffer.deviceData, elementCount, reinterpret_cast<int*>(CudaAmp::nonFiniteFlag.deviceData));
     throwIfCudaFailedAmp(cudaGetLastError(), "CudaAmpHasNonFiniteEntry launch");
 
     int flag = 0;
@@ -245,7 +245,7 @@ static void launchHasNonFiniteIntoFlag(const CudaMatrix& matrix, int* deviceFlag
     const int elementCount = static_cast<int>(matrix.elementCount());
     const int threads = 256;
     const int blocks = (elementCount + threads - 1) / threads;
-    CudaAmpHasNonFiniteEntry<<<blocks, threads>>>(matrix.buffer.deviceData, elementCount, deviceFlag);
+    CudaAmpHasNonFiniteEntry<<<blocks, threads, 0, CudaMatmul::activeStream()>>>(matrix.buffer.deviceData, elementCount, deviceFlag);
     throwIfCudaFailedAmp(cudaGetLastError(), "CudaAmpHasNonFiniteEntry launch");
 }
 
@@ -462,7 +462,7 @@ static bool launchCublasLtMatmulFp16Halves(
         algoPointer,
         localLt.workspace.deviceData,
         localLt.workspace.capacityBytes,
-        nullptr);
+        CudaMatmul::activeStream());
 
     if (matmulStatus != CUBLAS_STATUS_SUCCESS) {
         if (kernelStartEvent != nullptr) cudaEventDestroy(kernelStartEvent);
