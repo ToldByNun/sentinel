@@ -8,12 +8,58 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <cuda_runtime.h>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 bool CudaAdam::preferInt8Moments = true;
+bool CudaAdam::preferCpuOffload = false;
 int CudaAdam::int8BlockSize = 256;
+
+namespace {
+void throwIfCudaFailedPinned(cudaError_t status, const char* what) {
+    if (status == cudaSuccess) return;
+    throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(status));
+}
+
+struct CudaAdamPinnedScratch {
+    float* parameter = nullptr;
+    float* gradient = nullptr;
+    size_t capacity = 0;
+
+    ~CudaAdamPinnedScratch() {
+        if (this->parameter != nullptr) cudaFreeHost(this->parameter);
+        if (this->gradient != nullptr) cudaFreeHost(this->gradient);
+        this->parameter = nullptr;
+        this->gradient = nullptr;
+        this->capacity = 0;
+    }
+
+    void ensure(size_t elementCount) {
+        if (elementCount <= this->capacity) return;
+        if (this->parameter != nullptr) {
+            throwIfCudaFailedPinned(cudaFreeHost(this->parameter), "CudaAdamPinnedScratch free parameter");
+            this->parameter = nullptr;
+        }
+        if (this->gradient != nullptr) {
+            throwIfCudaFailedPinned(cudaFreeHost(this->gradient), "CudaAdamPinnedScratch free gradient");
+            this->gradient = nullptr;
+        }
+        this->capacity = 0;
+        throwIfCudaFailedPinned(
+            cudaMallocHost(reinterpret_cast<void**>(&this->parameter), elementCount * sizeof(float)),
+            "CudaAdamPinnedScratch malloc parameter");
+        throwIfCudaFailedPinned(
+            cudaMallocHost(reinterpret_cast<void**>(&this->gradient), elementCount * sizeof(float)),
+            "CudaAdamPinnedScratch malloc gradient");
+        this->capacity = elementCount;
+    }
+};
+
+thread_local CudaAdamPinnedScratch gCudaAdamPinnedScratch;
+}
 
 CudaAdamState::CudaAdamState() : elementCount(0), scaleCount(0) {}
 
@@ -60,6 +106,17 @@ CudaAdamState CudaAdamState::zerosLike(const CudaMatrix& parameter) {
     else
         state.ensureFp32(parameter);
     return state;
+}
+
+void CudaAdamState::free() {
+    this->firstMoment.free();
+    this->secondMoment.free();
+    this->firstMomentQ.free();
+    this->secondMomentQ.free();
+    this->firstMomentScales.free();
+    this->secondMomentScales.free();
+    this->elementCount = 0;
+    this->scaleCount = 0;
 }
 
 void CudaAdamState::downloadInto(AdamState& host, size_t rows, size_t cols) const {
@@ -380,6 +437,44 @@ void CudaAdam::update(CudaMatrix& parameter, CudaAdamState& state, const CudaMat
         item.scaleCount = 0;
     }
     this->updateMany(&item, 1, gradientScale);
+}
+
+void CudaAdam::updateCpuOffloaded(CudaMatrix& parameter, AdamState& hostState, const CudaMatrix& gradient, float gradientScale) const {
+    if (this->timeStep <= 0) throw std::invalid_argument("CudaAdam::updateCpuOffloaded requires step() before update");
+    if (parameter.empty() || gradient.empty())
+        throw std::invalid_argument("CudaAdam::updateCpuOffloaded empty parameter/gradient");
+    if (parameter.rows != gradient.rows || parameter.cols != gradient.cols)
+        throw std::invalid_argument("CudaAdam::updateCpuOffloaded parameter/gradient shape mismatch");
+    if (parameter.buffer.deviceData == nullptr || gradient.buffer.deviceData == nullptr)
+        throw std::invalid_argument("CudaAdam::updateCpuOffloaded null device pointer");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaAdam::updateCpuOffloaded no CUDA device");
+
+    const size_t elementCount = parameter.elementCount();
+    const size_t bytes = elementCount * sizeof(float);
+    gCudaAdamPinnedScratch.ensure(elementCount);
+
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpy(gCudaAdamPinnedScratch.parameter, parameter.buffer.deviceData, bytes, cudaMemcpyDeviceToHost),
+        "CudaAdam::updateCpuOffloaded D2H parameter");
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpy(gCudaAdamPinnedScratch.gradient, gradient.buffer.deviceData, bytes, cudaMemcpyDeviceToHost),
+        "CudaAdam::updateCpuOffloaded D2H gradient");
+
+    Matrix hostParameter(parameter.rows, parameter.cols);
+    Matrix hostGradient(gradient.rows, gradient.cols);
+    std::memcpy(hostParameter.data.data(), gCudaAdamPinnedScratch.parameter, bytes);
+    std::memcpy(hostGradient.data.data(), gCudaAdamPinnedScratch.gradient, bytes);
+    if (gradientScale != 1.0f)
+        Matrix::scaleInPlace(hostGradient, gradientScale);
+
+    Adam hostAdam(this->learningRate, this->beta1, this->beta2, this->epsilon);
+    hostAdam.timeStep = this->timeStep;
+    hostAdam.update(hostParameter, hostState, hostGradient);
+
+    std::memcpy(gCudaAdamPinnedScratch.parameter, hostParameter.data.data(), bytes);
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpy(parameter.buffer.deviceData, gCudaAdamPinnedScratch.parameter, bytes, cudaMemcpyHostToDevice),
+        "CudaAdam::updateCpuOffloaded H2D parameter");
 }
 
 void CudaAdam::updateMany(const CudaAdamUpdateItem* items, int itemCount, float gradientScale) const {
