@@ -1,4 +1,5 @@
 #include "TextRowReader.hpp"
+#include "ArrowChunkReader.hpp"
 #include "JsonlLoader.hpp"
 
 #include <algorithm>
@@ -38,12 +39,6 @@ bool looksLikeHfDatasetDir(const std::filesystem::path& directory) {
     return scanForArrow(directory) || scanForArrow(directory / "train");
 }
 
-[[noreturn]] void throwArrowNotReady(const std::string& path) {
-    throw std::runtime_error(
-        "createTextRowReader: Arrow corpus not wired yet (path=" + path
-        + "); use a .jsonl file for now");
-}
-
 } // namespace
 
 std::unique_ptr<TextRowReader> createTextRowReader(const std::string& path) {
@@ -56,8 +51,11 @@ std::unique_ptr<TextRowReader> createTextRowReader(const std::string& path) {
         throw std::runtime_error("createTextRowReader: path does not exist: " + path);
 
     if (fs::is_directory(fsPath)) {
-        if (looksLikeHfDatasetDir(fsPath))
-            throwArrowNotReady(path);
+        if (looksLikeHfDatasetDir(fsPath)) {
+            auto reader = std::make_unique<ArrowChunkReader>();
+            reader->open(path);
+            return reader;
+        }
         throw std::runtime_error(
             "createTextRowReader: unsupported directory (expected HF Arrow dataset or .jsonl file): " + path);
     }
@@ -65,8 +63,11 @@ std::unique_ptr<TextRowReader> createTextRowReader(const std::string& path) {
     if (!fs::is_regular_file(fsPath))
         throw std::runtime_error("createTextRowReader: not a file or directory: " + path);
 
-    if (hasExtension(fsPath, ".arrow"))
-        throwArrowNotReady(path);
+    if (hasExtension(fsPath, ".arrow")) {
+        auto reader = std::make_unique<ArrowChunkReader>();
+        reader->open(path);
+        return reader;
+    }
 
     if (hasExtension(fsPath, ".jsonl")) {
         auto reader = std::make_unique<JsonlChunkReader>();
@@ -75,5 +76,5 @@ std::unique_ptr<TextRowReader> createTextRowReader(const std::string& path) {
     }
 
     throw std::runtime_error(
-        "createTextRowReader: unknown corpus format (use .jsonl, or Arrow later): " + path);
+        "createTextRowReader: unknown corpus format (use .jsonl or .arrow / HF dataset dir): " + path);
 }
