@@ -441,8 +441,8 @@ public:
     /// <summary>compare GPU FP32 Adam vs CPU-offloaded Adam: weight parity + VRAM delta after moments allocate</summary>
     static void runTrainCpuAdamOffloadSmokeDemo(int vocabularySize = 2000, int embeddingDim = 128, int sequenceLength = 64, int blockCount = 2, int headCount = 4);
 
-    /// <summary>breakdown of one packed train step embed attn ffn ce adam</summary>
-    static void runTrainProfileDemo(int vocabularySize = 1000, int embeddingDim = 64, int sequenceLength = 48, int blockCount = 2, int headCount = 4, bool preferFlash = true, int maxPackedColumns = 0);
+    /// <summary>breakdown of one packed train step; packBatchSize 0 => min(32, maxPack/seq); ckpt default off for throughput</summary>
+    static void runTrainProfileDemo(int vocabularySize = 1000, int embeddingDim = 64, int sequenceLength = 48, int blockCount = 2, int headCount = 4, bool preferFlash = true, int maxPackedColumns = 0, int packBatchSize = 0, bool activationCheckpointing = false);
 
     /// <summary>
     /// consumer VRAM proof: larger LM (d&gt;=256), auto pack budget, loss scale, timed packed epoch

@@ -39,6 +39,8 @@ int main() {
     // Flip preferCpuAdamOffload / useCheckpointing when VRAM is the limiter, not tok/s.
     const bool runSmokes = false;
     const bool runSpeedBench = false;
+    // Phase 0: scale train-step breakdown (8x768 pack32 ckpt=off chunked CE)
+    const bool runScaleProfile = false;
 
     const std::string samplePath = "../SERA-Data/sera_sample.jsonl";
     const size_t maximumTextCharacters = 1200;
@@ -57,6 +59,22 @@ int main() {
     const int testReservoirCap = 512;
     const bool preferCpuAdamOffload = false;
     const bool useCheckpointing = false;
+
+    if (runScaleProfile) {
+        SmokeLog::section("scale profile");
+        if (!CudaMatmul::isAvailable()) {
+            SmokeLog::skip("scale profile (no CUDA)");
+            return 1;
+        }
+        try {
+            // vocab=4000 embed=768 seq=256 blocks=8 heads=12 pack=32 ckpt=off flash=on chunked CE
+            CudaLanguageModel::runTrainProfileDemo(4000, 768, 256, 8, 12, true, 0, 32, false);
+        } catch (const std::exception& ex) {
+            SmokeLog::result("scale profile", "FAILED: %s", ex.what());
+            return 1;
+        }
+        return 0;
+    }
 
     if (runSpeedBench) {
         SmokeLog::section("speed bench");
