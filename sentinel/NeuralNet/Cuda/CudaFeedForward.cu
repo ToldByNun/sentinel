@@ -83,25 +83,37 @@ void CudaFeedForward::backward(const CudaMatrix& outputGradient, CudaMatrix& inp
     if (outputGradient.rows != this->downWeight.rows || outputGradient.cols != this->inputCache.cols)
         throw std::invalid_argument("CudaFeedForward::backward shape mismatch");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaFeedForward::backward no CUDA device");
+    if (this->gateUpWeight.empty())
+        this->syncFusedGateUpWeight();
 
     CudaMatrix::multiplyInto(outputGradient, this->hidden, downWeightGradient, false, true);
     CudaOps::sumColumnsInto(outputGradient, downBiasGradient);
 
     CudaMatrix::multiplyInto(this->downWeight, outputGradient, this->hiddenGradient, true, false);
-    CudaOps::multiplyElementwiseInto(this->hiddenGradient, this->gateActivated, this->upGradient);
-    CudaOps::multiplyElementwiseInto(this->hiddenGradient, this->up, this->gateGradient);
+    CudaOps::swigluBackwardIntoStacked(
+        this->hiddenGradient,
+        this->gatePreActivation,
+        this->up,
+        this->gateActivated,
+        this->gateGradient,
+        this->upGradient,
+        this->gateUpHiddenGradient);
 
-    CudaOps::siluDerivativeInto(this->gatePreActivation, this->siluDerivative);
-    CudaOps::multiplyElementwiseInPlace(this->gateGradient, this->siluDerivative);
+    // One GEMM for stacked [dW_gate; dW_up] = stackedGrad @ X^T
+    CudaMatrix::multiplyInto(this->gateUpHiddenGradient, this->inputCache, this->gateUpWeightGradient, false, true);
+    gateWeightGradient.ensureSize(this->gateWeight.rows, this->gateWeight.cols);
+    upWeightGradient.ensureSize(this->upWeight.rows, this->upWeight.cols);
+    const size_t sliceBytes = this->gateWeight.byteCount();
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpy(gateWeightGradient.buffer.deviceData, this->gateUpWeightGradient.buffer.deviceData, sliceBytes, cudaMemcpyDeviceToDevice),
+        "CudaFeedForward::backward split gate weight grad");
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpy(upWeightGradient.buffer.deviceData, this->gateUpWeightGradient.buffer.deviceData + this->gateWeight.elementCount(), sliceBytes, cudaMemcpyDeviceToDevice),
+        "CudaFeedForward::backward split up weight grad");
+    CudaOps::sumColumnsStackedHalvesInto(this->gateUpHiddenGradient, gateBiasGradient, upBiasGradient);
 
-    CudaMatrix::multiplyInto(this->gateGradient, this->inputCache, gateWeightGradient, false, true);
-    CudaOps::sumColumnsInto(this->gateGradient, gateBiasGradient);
-    CudaMatrix::multiplyInto(this->upGradient, this->inputCache, upWeightGradient, false, true);
-    CudaOps::sumColumnsInto(this->upGradient, upBiasGradient);
-
-    CudaMatrix::multiplyInto(this->gateWeight, this->gateGradient, inputGradient, true, false);
-    CudaMatrix::multiplyInto(this->upWeight, this->upGradient, this->temp, true, false);
-    CudaOps::addInPlace(inputGradient, this->temp);
+    // One GEMM for dX = gateUpWeight^T @ stackedGrad
+    CudaMatrix::multiplyInto(this->gateUpWeight, this->gateUpHiddenGradient, inputGradient, true, false);
 }
 
 static float maximumAbsoluteDifference(const Matrix& left, const Matrix& right) {

@@ -28,6 +28,22 @@ public:
         CudaMatrix& gateActivated,
         CudaMatrix& hidden);
 
+    /// <summary>
+    /// SwiGLU bwd elementwise: write stacked [dGate; dUp] (2H x T) from dHidden
+    /// also fills gateGradient/upGradient caches
+    /// </summary>
+    static void swigluBackwardIntoStacked(
+        const CudaMatrix& hiddenGradient,
+        const CudaMatrix& gatePreActivation,
+        const CudaMatrix& up,
+        const CudaMatrix& gateActivated,
+        CudaMatrix& gateGradient,
+        CudaMatrix& upGradient,
+        CudaMatrix& stackedGateUpGradient);
+
+    /// <summary>sum columns of stacked [A;B] halves into two bias gradient columns</summary>
+    static void sumColumnsStackedHalvesInto(const CudaMatrix& stacked, CudaMatrix& firstBiasGradient, CudaMatrix& secondBiasGradient);
+
     /// <summary>SiLU derivative writing into out</summary>
     static void siluDerivativeInto(const CudaMatrix& input, CudaMatrix& out);
 

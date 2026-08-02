@@ -247,9 +247,9 @@ size_t CudaLanguageModel::bytesPerPackedColumn() const {
     }
 
     // Each block keeps its own attn/FFN scratch sized to maxPackedColumns (not peak-of-one).
-    // Attn ~ QKV+out+caches+flash+qkvProjected (~15 d); FFN ~ gateUp(2h)+gate/up/hidden/act/cache/bwd (~6 h + 4 d).
+    // Attn ~ QKV+out+caches+flash+qkvProjected (~15 d); FFN ~ gateUp(2h)+bwd stacked(2h)+gate/up/hidden/act/cache (~8 h + 4 d).
     const size_t perBlockScratch =
-        (15ull * embeddingDim + 6ull * ffnHidden + 4ull * embeddingDim) * floatBytes;
+        (15ull * embeddingDim + 8ull * ffnHidden + 4ull * embeddingDim) * floatBytes;
     bytes += this->blocks.size() * perBlockScratch;
 
     // AMP activation half cast scratch (shared, one active gemm).
