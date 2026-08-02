@@ -16,7 +16,7 @@
 #include "../Optimizers/Adam.hpp"
 
 CudaLanguageModel::CudaLanguageModel()
-    : maximumPositionCount(0), maxPackedColumns(1024), logitChunkRows(2048), gradientAccumulationSteps(4), activationCheckpointing(true), adam(0.001f), trainStateReady(false) {}
+    : maximumPositionCount(0), maxPackedColumns(8192), logitChunkRows(2048), gradientAccumulationSteps(4), activationCheckpointing(true), adam(0.001f), trainStateReady(false) {}
 
 void CudaTransformerBlockAdamStates::ensureFrom(const CudaTransformerBlock& block) {
     // moments stay empty until first Adam update (lazy allocation for low VRAM before train)
@@ -614,28 +614,43 @@ void CudaLanguageModel::trainOnExamples(
         processedExampleCount += exampleCount;
         processedPredictionCount += dataset.totalPredictionCount();
     }
+    if (exampleCount <= 0) {
+        if (flushRemainder && accumulatedExampleCount > 0) {
+            this->applyGradients(this->trainGradients, 1.0f / static_cast<float>(accumulatedExampleCount));
+            this->trainGradients.zeroInPlace();
+            accumulatedExampleCount = 0;
+            microbatchesSinceStep = 0;
+        }
+        return;
+    }
+
+    // Packing window is independent of Adam batchSize: wide enough to fill maxPackedColumns
+    // at the smallest length bucket (lengthBucketStep).
+    const int packWindow = (std::max)(
+        batchSize,
+        (std::max)(1, this->maxPackedColumns / CudaLanguageModel::lengthBucketStep)
+    );
+    const int examplesPerAdamStep = batchSize * this->gradientAccumulationSteps;
+
+    std::vector<int> order(static_cast<size_t>(exampleCount));
+    for (int index = 0; index < exampleCount; ++index)
+        order[static_cast<size_t>(index)] = index;
+    std::stable_sort(order.begin(), order.end(), [&dataset](int left, int right) {
+        return dataset.examples[static_cast<size_t>(left)].inputTokenIds.size()
+            < dataset.examples[static_cast<size_t>(right)].inputTokenIds.size();
+    });
 
     std::vector<const LanguageModelExample*> packPointers;
-    packPointers.reserve(static_cast<size_t>(batchSize));
+    packPointers.reserve(static_cast<size_t>((std::max)(1, this->maxPackedColumns / CudaLanguageModel::lengthBucketStep)));
 
-    for (int batchStart = 0; batchStart < exampleCount; batchStart += batchSize) {
-        int batchEnd = batchStart + batchSize;
-        if (batchEnd > exampleCount) batchEnd = exampleCount;
-        const int batchCount = batchEnd - batchStart;
+    for (int windowStart = 0; windowStart < exampleCount; windowStart += packWindow) {
+        int windowEnd = windowStart + packWindow;
+        if (windowEnd > exampleCount) windowEnd = exampleCount;
 
-        std::vector<int> batchIndices;
-        batchIndices.reserve(static_cast<size_t>(batchCount));
-        for (int index = batchStart; index < batchEnd; ++index)
-            batchIndices.push_back(index);
-        std::stable_sort(batchIndices.begin(), batchIndices.end(), [&dataset](int left, int right) {
-            return dataset.examples[static_cast<size_t>(left)].inputTokenIds.size()
-                < dataset.examples[static_cast<size_t>(right)].inputTokenIds.size();
-        });
-
-        int packStart = 0;
-        while (packStart < static_cast<int>(batchIndices.size())) {
+        int packStart = windowStart;
+        while (packStart < windowEnd) {
             const int trueLength = static_cast<int>(
-                dataset.examples[static_cast<size_t>(batchIndices[static_cast<size_t>(packStart)])].inputTokenIds.size()
+                dataset.examples[static_cast<size_t>(order[static_cast<size_t>(packStart)])].inputTokenIds.size()
             );
             const int bucketLength = CudaLanguageModel::lengthBucket(trueLength, this->maximumPositionCount);
             int maxExamplesInPack = 1;
@@ -644,14 +659,14 @@ void CudaLanguageModel::trainOnExamples(
 
             packPointers.clear();
             int packEnd = packStart;
-            while (packEnd < static_cast<int>(batchIndices.size())
+            while (packEnd < windowEnd
                 && static_cast<int>(packPointers.size()) < maxExamplesInPack) {
                 const int candidateLength = static_cast<int>(
-                    dataset.examples[static_cast<size_t>(batchIndices[static_cast<size_t>(packEnd)])].inputTokenIds.size()
+                    dataset.examples[static_cast<size_t>(order[static_cast<size_t>(packEnd)])].inputTokenIds.size()
                 );
                 if (CudaLanguageModel::lengthBucket(candidateLength, this->maximumPositionCount) != bucketLength)
                     break;
-                packPointers.push_back(&dataset.examples[static_cast<size_t>(batchIndices[static_cast<size_t>(packEnd)])]);
+                packPointers.push_back(&dataset.examples[static_cast<size_t>(order[static_cast<size_t>(packEnd)])]);
                 ++packEnd;
             }
 
@@ -662,20 +677,18 @@ void CudaLanguageModel::trainOnExamples(
             packedTokenSum += static_cast<long long>(packExampleCount) * static_cast<long long>(bucketLength);
 
             this->accumulateBucketPackedExamples(packPointers.data(), packExampleCount, bucketLength, this->trainGradients);
+
+            accumulatedExampleCount += packExampleCount;
+            const bool isLastPack = flushRemainder && packEnd >= exampleCount;
+            if (accumulatedExampleCount >= examplesPerAdamStep || isLastPack) {
+                this->applyGradients(this->trainGradients, 1.0f / static_cast<float>(accumulatedExampleCount));
+                this->trainGradients.zeroInPlace();
+                accumulatedExampleCount = 0;
+                microbatchesSinceStep = 0;
+            }
+
             packStart = packEnd;
         }
-
-        accumulatedExampleCount += batchCount;
-        ++microbatchesSinceStep;
-
-        const bool isLastBatch = flushRemainder && batchEnd >= exampleCount;
-        if (microbatchesSinceStep < this->gradientAccumulationSteps && !isLastBatch)
-            continue;
-
-        this->applyGradients(this->trainGradients, 1.0f / static_cast<float>(accumulatedExampleCount));
-        this->trainGradients.zeroInPlace();
-        accumulatedExampleCount = 0;
-        microbatchesSinceStep = 0;
     }
 
     if (flushRemainder && accumulatedExampleCount > 0) {

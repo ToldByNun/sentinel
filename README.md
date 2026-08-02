@@ -70,7 +70,7 @@ JSONL is read once and tokenized into compact examples (peak text RAM only durin
 LanguageModel model(vocab, embedDim, maxPos, Adam(0.001f), blocks, heads);
 model.enableCuda();
 model.enableCudaTrain();          // packed batches, checkpointing, AMP
-model.setCudaMaxPackedColumns(2048);
+model.setCudaMaxPackedColumns(8192);
 model.setCudaPreferFlashAttention(true);
 model.train(trainSet, testSet, epochs, logEvery, batchSize, gradAccum);
 ```
