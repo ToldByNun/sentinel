@@ -1,6 +1,6 @@
 #include "JsonlLoader.hpp"
 
-#include <fstream>
+#include <iterator>
 #include <stdexcept>
 
 std::string JsonlLoader::extractString(const std::string& line, const std::string& key) {
@@ -38,6 +38,14 @@ std::string JsonlLoader::extractString(const std::string& line, const std::strin
     return result;
 }
 
+bool JsonlLoader::tryParseLine(const std::string& line, JsonlRow& out) {
+    if (line.empty()) return false;
+
+    out.text = JsonlLoader::extractString(line, "problem_statement");
+    out.source = JsonlLoader::extractString(line, "source");
+    return !out.text.empty();
+}
+
 int JsonlLoader::sourceToLabel(const std::string& source) {
     if (source.find("T1") != std::string::npos) return 0;
     if (source.find("T2") != std::string::npos) return 1;
@@ -45,24 +53,69 @@ int JsonlLoader::sourceToLabel(const std::string& source) {
     return -1;
 }
 
+void JsonlChunkReader::open(const std::string& path) {
+    if (path.empty()) throw std::invalid_argument("JsonlChunkReader::open empty path");
+
+    this->file.close();
+    this->file.clear();
+    this->file.open(path);
+    if (!this->file.is_open()) throw std::runtime_error("JsonlChunkReader: cannot open " + path);
+
+    this->path = path;
+    this->rowsConsumed = 0;
+}
+
+void JsonlChunkReader::rewind() {
+    if (!this->file.is_open()) throw std::logic_error("JsonlChunkReader::rewind not open");
+
+    this->file.clear();
+    this->file.seekg(0, std::ios::beg);
+    this->rowsConsumed = 0;
+}
+
+bool JsonlChunkReader::nextRows(std::vector<JsonlRow>& out, int maxRows) {
+    if (!this->file.is_open()) throw std::logic_error("JsonlChunkReader::nextRows not open");
+    if (maxRows <= 0) throw std::invalid_argument("JsonlChunkReader::nextRows maxRows must be > 0");
+
+    out.clear();
+    out.reserve(static_cast<size_t>(maxRows));
+
+    std::string line;
+    while (static_cast<int>(out.size()) < maxRows && std::getline(this->file, line)) {
+        JsonlRow row;
+        if (!JsonlLoader::tryParseLine(line, row)) continue;
+
+        out.push_back(std::move(row));
+        ++this->rowsConsumed;
+    }
+
+    return this->file.good();
+}
+
+bool JsonlChunkReader::isOpen() const {
+    return this->file.is_open();
+}
+
+size_t JsonlChunkReader::rowsRead() const {
+    return this->rowsConsumed;
+}
+
 std::vector<JsonlRow> JsonlLoader::load(const std::string& path, int maximumRows) {
-    std::ifstream file(path);
-    if (!file.is_open()) throw std::runtime_error("JsonlLoader: cannot open " + path);
+    JsonlChunkReader reader;
+    reader.open(path);
 
     std::vector<JsonlRow> rows;
-    std::string line;
-    const bool unlimited = maximumRows < 1;
+    if (maximumRows > 0) {
+        reader.nextRows(rows, maximumRows);
+        return rows;
+    }
 
-    while (std::getline(file, line)) {
-        if (!unlimited && static_cast<int>(rows.size()) >= maximumRows) break;
-        if (line.empty()) continue;
-
-        JsonlRow row;
-        row.text = JsonlLoader::extractString(line, "problem_statement");
-        row.source = JsonlLoader::extractString(line, "source");
-        if (row.text.empty()) continue;
-
-        rows.push_back(std::move(row));
+    std::vector<JsonlRow> chunk;
+    const int chunkSize = 1024;
+    while (reader.nextRows(chunk, chunkSize) || !chunk.empty()) {
+        rows.insert(rows.end(), std::make_move_iterator(chunk.begin()), std::make_move_iterator(chunk.end()));
+        if (chunk.empty()) break;
+        chunk.clear();
     }
 
     return rows;
