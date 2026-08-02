@@ -24,3 +24,5 @@ sentinel/_train_int8.txt
 sentinel/_train_int8b.txt
 sentinel/msbuild_release_x64_int8b.log
 sentinel/_ckpt_out.txt
+sentinel/_stream_err.txt
+sentinel/_stream_out.txt

@@ -18,6 +18,7 @@
 #include "../Cuda/CudaMatmul.hpp"
 #include "../Initializers/UniformInit.hpp"
 #include "../Losses/CrossEntropy.hpp"
+#include "../Tokenizer/BPETokenizer.hpp"
 #include "../Utils/SmokeLog.hpp"
 
 #if defined(_OPENMP)
@@ -331,6 +332,60 @@ void LanguageModel::train(const LanguageModelDataset& dataset, int epochs, int l
     this->train(dataset, emptyTest, epochs, logEveryEpochs, 32);
 }
 
+float LanguageModel::trainOnExamples(
+    const LanguageModelDataset& dataset,
+    int batchSize,
+    std::vector<LanguageModelGradients>& threadGradients,
+    std::vector<LanguageModelCache>& threadCaches,
+    LanguageModelGradients& merged
+) {
+    const int exampleCount = static_cast<int>(dataset.examples.size());
+    if (exampleCount <= 0) return 0.0f;
+    if (batchSize <= 0) batchSize = 32;
+
+    const int threadCount = static_cast<int>(threadGradients.size());
+    float epochLoss = 0.0f;
+
+    for (int batchStart = 0; batchStart < exampleCount; batchStart += batchSize) {
+        int batchEnd = batchStart + batchSize;
+        if (batchEnd > exampleCount) batchEnd = exampleCount;
+        const float batchCount = static_cast<float>(batchEnd - batchStart);
+
+        for (int threadIndex = 0; threadIndex < threadCount; ++threadIndex)
+            threadGradients[static_cast<size_t>(threadIndex)].zeroInPlace();
+
+        float batchLoss = 0.0f;
+
+#if defined(_OPENMP)
+        #pragma omp parallel
+#endif
+        {
+            int threadIndex = 0;
+#if defined(_OPENMP)
+            threadIndex = omp_get_thread_num();
+            #pragma omp for reduction(+:batchLoss) schedule(dynamic, 1)
+#endif
+            for (int index = batchStart; index < batchEnd; ++index) {
+                batchLoss += this->accumulateExample(
+                    dataset.examples[static_cast<size_t>(index)],
+                    threadGradients[static_cast<size_t>(threadIndex)],
+                    threadCaches[static_cast<size_t>(threadIndex)]
+                );
+            }
+        }
+
+        merged.zeroInPlace();
+        for (int threadIndex = 0; threadIndex < threadCount; ++threadIndex)
+            merged.addInPlace(threadGradients[static_cast<size_t>(threadIndex)]);
+        merged.scaleInPlace(1.0f / batchCount);
+        this->applyGradients(merged);
+
+        epochLoss += batchLoss;
+    }
+
+    return epochLoss;
+}
+
 void LanguageModel::train(const LanguageModelDataset& trainDataset, const LanguageModelDataset& testDataset, int epochs, int logEveryEpochs, int batchSize, int gradientAccumulationSteps) {
     if (trainDataset.examples.empty()) return;
     if (logEveryEpochs <= 0) logEveryEpochs = 1;
@@ -348,8 +403,6 @@ void LanguageModel::train(const LanguageModelDataset& trainDataset, const Langua
         return;
     }
 
-    const int exampleCount = static_cast<int>(trainDataset.examples.size());
-
     int threadCount = 1;
 #if defined(_OPENMP)
     threadCount = omp_get_max_threads();
@@ -364,41 +417,8 @@ void LanguageModel::train(const LanguageModelDataset& trainDataset, const Langua
     LanguageModelGradients merged = LanguageModelGradients::zerosFrom(*this);
 
     for (int epoch = 0; epoch < epochs; ++epoch) {
-        float epochLoss = 0.0f;
         const auto epochStart = std::chrono::steady_clock::now();
-
-        for (int batchStart = 0; batchStart < exampleCount; batchStart += batchSize) {
-            int batchEnd = batchStart + batchSize;
-            if (batchEnd > exampleCount) batchEnd = exampleCount;
-            const float batchCount = static_cast<float>(batchEnd - batchStart);
-
-            for (int threadIndex = 0; threadIndex < threadCount; ++threadIndex)
-                threadGradients[static_cast<size_t>(threadIndex)].zeroInPlace();
-
-            float batchLoss = 0.0f;
-
-#if defined(_OPENMP)
-            #pragma omp parallel
-#endif
-            {
-                int threadIndex = 0;
-#if defined(_OPENMP)
-                threadIndex = omp_get_thread_num();
-                #pragma omp for reduction(+:batchLoss) schedule(dynamic, 1)
-#endif
-                for (int index = batchStart; index < batchEnd; ++index) {
-                    batchLoss += this->accumulateExample(trainDataset.examples[static_cast<size_t>(index)], threadGradients[static_cast<size_t>(threadIndex)], threadCaches[static_cast<size_t>(threadIndex)]);
-                }
-            }
-
-            merged.zeroInPlace();
-            for (int threadIndex = 0; threadIndex < threadCount; ++threadIndex)
-                merged.addInPlace(threadGradients[static_cast<size_t>(threadIndex)]);
-            merged.scaleInPlace(1.0f / batchCount);
-            this->applyGradients(merged);
-
-            epochLoss += batchLoss;
-        }
+        const float epochLoss = this->trainOnExamples(trainDataset, batchSize, threadGradients, threadCaches, merged);
 
         if (epoch % logEveryEpochs != 0) continue;
 
@@ -411,6 +431,76 @@ void LanguageModel::train(const LanguageModelDataset& trainDataset, const Langua
         std::cout << "  Epoch " << epoch << "  trainLoss=" << averageTrainLoss
                   << "  sec=" << epochSeconds << "  tokens/s=" << tokensPerSecond
                   << "  backend=cpu-openmp";
+
+        if (!testDataset.examples.empty()) {
+            const float testLoss = this->averageLoss(testDataset);
+            std::cout << "  testLoss=" << testLoss;
+        }
+
+        std::cout << '\n';
+    }
+}
+
+void LanguageModel::train(LanguageModelChunkSource& source, int epochs, int logEveryEpochs, int batchSize, int gradientAccumulationSteps) {
+    if (logEveryEpochs <= 0) logEveryEpochs = 1;
+    if (batchSize <= 0) batchSize = 32;
+    if (gradientAccumulationSteps <= 0) gradientAccumulationSteps = 1;
+
+    if (this->cudaTrainEnabled()) {
+        this->syncDeviceIfStale();
+        this->device->adam = CudaAdam(this->optimizer.learningRate, this->optimizer.beta1, this->optimizer.beta2, this->optimizer.epsilon);
+        this->device->adam.timeStep = this->optimizer.timeStep;
+        this->device->train(source, epochs, logEveryEpochs, batchSize, gradientAccumulationSteps);
+        this->device->downloadTo(*this);
+        this->optimizer.timeStep = this->device->adam.timeStep;
+        this->deviceStale = false;
+        return;
+    }
+
+    int threadCount = 1;
+#if defined(_OPENMP)
+    threadCount = omp_get_max_threads();
+    if (threadCount < 1) threadCount = 1;
+#endif
+
+    std::vector<LanguageModelGradients> threadGradients(static_cast<size_t>(threadCount));
+    std::vector<LanguageModelCache> threadCaches(static_cast<size_t>(threadCount));
+    for (int threadIndex = 0; threadIndex < threadCount; ++threadIndex)
+        threadGradients[static_cast<size_t>(threadIndex)] = LanguageModelGradients::zerosFrom(*this);
+
+    LanguageModelGradients merged = LanguageModelGradients::zerosFrom(*this);
+    LanguageModelDataset chunk;
+    const LanguageModelDataset& testDataset = source.testDataset();
+
+    for (int epoch = 0; epoch < epochs; ++epoch) {
+        const auto epochStart = std::chrono::steady_clock::now();
+        float epochLoss = 0.0f;
+        int processedExampleCount = 0;
+        int processedPredictionCount = 0;
+
+        source.rewindTrain();
+        for (;;) {
+            const bool more = source.nextTrainChunk(chunk);
+            if (chunk.examples.empty()) break;
+            epochLoss += this->trainOnExamples(chunk, batchSize, threadGradients, threadCaches, merged);
+            processedExampleCount += chunk.size();
+            processedPredictionCount += chunk.totalPredictionCount();
+            if (!more) break;
+        }
+
+        if (epoch % logEveryEpochs != 0) continue;
+
+        const float averageTrainLoss = processedExampleCount > 0
+            ? epochLoss / static_cast<float>(processedExampleCount)
+            : 0.0f;
+        const auto epochEnd = std::chrono::steady_clock::now();
+        const double epochSeconds = std::chrono::duration<double>(epochEnd - epochStart).count();
+        const double tokensPerSecond = epochSeconds > 0.0
+            ? static_cast<double>(processedPredictionCount) / epochSeconds
+            : 0.0;
+        std::cout << "  Epoch " << epoch << "  trainLoss=" << averageTrainLoss
+                  << "  sec=" << epochSeconds << "  tokens/s=" << tokensPerSecond
+                  << "  backend=cpu-stream";
 
         if (!testDataset.examples.empty()) {
             const float testLoss = this->averageLoss(testDataset);
@@ -757,6 +847,67 @@ void LanguageModel::runCheckpointSmokeDemo() {
         && restored.optimizer.learningRate == model.optimizer.learningRate;
     SmokeLog::result("LanguageModel checkpoint", "path=%s  logitsDiff=%.2e  timeStep=%d  optOk=%s",
         path.c_str(), maximumDifference, restored.optimizer.timeStep, optimizerMatch ? "yes" : "no");
+
+    std::remove(path.c_str());
+}
+
+void LanguageModel::runStreamingSmokeDemo() {
+    const std::string path = "streaming_smoke.jsonl";
+    {
+        std::ofstream out(path, std::ios::binary);
+        if (!out) throw std::runtime_error("LanguageModel::runStreamingSmokeDemo cannot write temp jsonl");
+        const char* rows[] = {
+            "{\"problem_statement\": \"alpha beta gamma delta epsilon\", \"source\": \"Sera-T1\"}",
+            "{\"problem_statement\": \"one two three four five six\", \"source\": \"Sera-T2\"}",
+            "{\"problem_statement\": \"red blue green yellow orange\", \"source\": \"Sera-T1\"}",
+            "{\"problem_statement\": \"cat dog bird fish mouse\", \"source\": \"Sera-T2\"}",
+            "{\"problem_statement\": \"train test val split batch\", \"source\": \"Sera-T1\"}",
+            "{\"problem_statement\": \"cuda kernel launch grid block\", \"source\": \"Sera-T2\"}",
+            "{\"problem_statement\": \"token embed rope attention\", \"source\": \"Sera-T1\"}",
+            "{\"problem_statement\": \"loss scale adam moments\", \"source\": \"Sera-T2\"}",
+        };
+        for (const char* row : rows)
+            out << row << '\n';
+    }
+
+    LanguageModelChunkSource source(path, 0, 32, 3, 0.75f, 7u, 2);
+    std::vector<std::string> sample = source.prepareTokenizerSample(8);
+    if (sample.empty()) {
+        SmokeLog::result("LanguageModel stream", "skipped empty tokenizer sample");
+        std::remove(path.c_str());
+        return;
+    }
+
+    BPETokenizer tokenizer;
+    tokenizer.train(sample, 64);
+    source.setTokenizer(&tokenizer);
+    source.prepareTestReservoir();
+
+    LanguageModel model(tokenizer.vocabSize(), 32, 32, Adam(0.001f), 1, 2);
+    model.enableCuda();
+    if (model.cudaEnabled())
+        model.enableCudaTrain();
+
+    model.train(source, 1, 1, 2, 1);
+
+    int chunkCount = 0;
+    int exampleCount = 0;
+    LanguageModelDataset chunk;
+    source.rewindTrain();
+    for (;;) {
+        const bool more = source.nextTrainChunk(chunk);
+        if (chunk.examples.empty()) break;
+        ++chunkCount;
+        exampleCount += chunk.size();
+        if (!more) break;
+    }
+
+    SmokeLog::result("LanguageModel stream", "chunks=%d  trainExamples=%d  test=%d  vocab=%d  backend=%s",
+        chunkCount,
+        exampleCount,
+        source.testDataset().size(),
+        tokenizer.vocabSize(),
+        model.cudaTrainEnabled() ? "cuda-stream" : "cpu-stream");
 
     std::remove(path.c_str());
 }

@@ -7,13 +7,11 @@
 #include "NeuralNet/Cuda/CudaTransformerBlock.hpp"
 #include "NeuralNet/Layers/CausalSelfAttention.hpp"
 #include "NeuralNet/Tokenizer/BPETokenizer.hpp"
-#include "NeuralNet/Data/DatasetSplit.hpp"
-#include "NeuralNet/Data/JsonlLoader.hpp"
+#include "NeuralNet/Data/LanguageModelChunkSource.hpp"
 #include "NeuralNet/Data/LanguageModelDataset.hpp"
 #include "NeuralNet/Network/LanguageModel.hpp"
 #include "NeuralNet/Optimizers/Adam.hpp"
 #include "NeuralNet/Utils/SmokeLog.hpp"
-#include "NeuralNet/Utils/TextUtil.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -72,6 +70,7 @@ int main() {
     CudaLanguageModel::runSmokeDemo(128, 64, 32, 2, 4);
     CudaLanguageModel::runKvCacheSmokeDemo(128, 64, 32, 2, 4);
     LanguageModel::runCheckpointSmokeDemo();
+    LanguageModel::runStreamingSmokeDemo();
     CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);
     CudaLanguageModel::runTrainSmokeDemo(1000, 64, 48, 2, 4);
     CudaLanguageModel::runTrainInt8AdamSmokeDemo(1000, 64, 48, 2, 4);
@@ -84,46 +83,46 @@ int main() {
 
     SmokeLog::section("sera train");
 
-    // 0 = load entire jsonl (sera_sample has 10000 rows)
-    std::vector<JsonlRow> rows = JsonlLoader::load(samplePath, 0);
-
-    std::vector<std::string> texts;
-    for (const JsonlRow& row : rows) {
-        if (row.text.empty()) continue;
-        texts.push_back(TextUtil::truncate(row.text, maximumTextCharacters));
-    }
-
-    if (texts.empty()) {
+    LanguageModelChunkSource source(samplePath, maximumTextCharacters, maximumTokenCount, 256, trainRatio, 42u, 256);
+    std::vector<std::string> tokenizerSample = source.prepareTokenizerSample(2000);
+    if (tokenizerSample.empty()) {
         SmokeLog::note(("no usable rows from " + samplePath).c_str());
         return 1;
     }
 
-    DatasetSplit split = DatasetSplit::partitionTexts(texts, trainRatio, 42u);
-
     BPETokenizer tokenizer;
-    tokenizer.train(split.trainTexts, 1000);
+    tokenizer.train(tokenizerSample, 1000);
+    source.setTokenizer(&tokenizer);
+    source.prepareTestReservoir();
 
-    LanguageModelDataset trainDataset = LanguageModelDataset::build(split.trainTexts, tokenizer, maximumTokenCount, false);
-    LanguageModelDataset testDataset = LanguageModelDataset::build(split.testTexts, tokenizer, maximumTokenCount, false);
-
-    SmokeLog::result("data", "texts=%zu  train=%d  test=%d  vocab=%d  positions=%d",
-        texts.size(), trainDataset.size(), testDataset.size(), tokenizer.vocabSize(), trainDataset.totalPredictionCount());
-
-    if (trainDataset.examples.empty()) {
+    // peek one chunk for parity/generate; do not encode the whole file just for logging
+    LanguageModelDataset promptChunk;
+    source.rewindTrain();
+    const bool moreAfterPrompt = source.nextTrainChunk(promptChunk);
+    source.rewindTrain();
+    if (promptChunk.examples.empty()) {
         SmokeLog::note("no language-model examples (need sequences with >= 2 tokens)");
         return 1;
     }
 
+    SmokeLog::result("data", "stream=%s  peekTrain=%d  test=%d  vocab=%d  chunk=%d  more=%s",
+        samplePath.c_str(),
+        promptChunk.size(),
+        source.testDataset().size(),
+        tokenizer.vocabSize(),
+        source.chunkExampleCount(),
+        moreAfterPrompt ? "yes" : "no");
+
     LanguageModel model(tokenizer.vocabSize(), embeddingDim, maximumPositionCount, Adam(0.001f), 2, 4);
 
-    const std::vector<int>& parityTokenIds = trainDataset.examples[0].inputTokenIds;
+    const std::vector<int> parityTokenIds = promptChunk.examples[0].inputTokenIds;
     Matrix cpuLogits = model.forward(parityTokenIds);
 
     model.enableCuda();
     model.enableCudaTrain();
     model.setCudaMaxPackedColumns(2048);
     model.setCudaPreferFlashAttention(true);
-    SmokeLog::result("model", "blocks=%zu  heads=%d  cuda=%s  train=%s  maxTok=%zu maxPackCols=2048 flash=on",
+    SmokeLog::result("model", "blocks=%zu  heads=%d  cuda=%s  train=%s  maxTok=%zu maxPackCols=2048 flash=on stream=on",
         model.blocks.size(),
         model.blocks[0].attention.headCount,
         model.cudaEnabled() ? "on" : "off",
@@ -138,16 +137,15 @@ int main() {
         SmokeLog::result("framework parity", "diff=%.2e", maximumDifference);
     }
 
-    // longer sequences + flash; 2 epochs for timing, accum=2
-    model.train(trainDataset, testDataset, 2, 1, 32, 2);
+    model.train(source, 2, 1, 32, 2);
     model.saveCheckpoint("sera_demo.snlm", true);
 
-    SmokeLog::result("final", "trainLoss=%.6f", model.averageLoss(trainDataset));
-    if (!testDataset.examples.empty())
-        SmokeLog::result("final", "testLoss=%.6f", model.averageLoss(testDataset));
+    SmokeLog::result("final", "trainLoss=n/a (streamed)");
+    if (!source.testDataset().examples.empty())
+        SmokeLog::result("final", "testLoss=%.6f", model.averageLoss(source.testDataset()));
     SmokeLog::result("checkpoint", "saved sera_demo.snlm (weights+adam)");
 
-    const std::vector<int> prompt = trainDataset.examples[0].inputTokenIds;
+    const std::vector<int> prompt = promptChunk.examples[0].inputTokenIds;
     const std::vector<int> greedy = model.generate(prompt, 32, 0.0f, 0, 7u);
     const std::vector<int> sampled = model.generate(prompt, 32, 0.9f, 40, 7u);
 

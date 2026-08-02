@@ -1,0 +1,8 @@
+{"problem_statement": "alpha beta gamma delta epsilon", "source": "Sera-T1"}
+{"problem_statement": "one two three four five six", "source": "Sera-T2"}
+{"problem_statement": "red blue green yellow orange", "source": "Sera-T1"}
+{"problem_statement": "cat dog bird fish mouse", "source": "Sera-T2"}
+{"problem_statement": "train test val split batch", "source": "Sera-T1"}
+{"problem_statement": "cuda kernel launch grid block", "source": "Sera-T2"}
+{"problem_statement": "token embed rope attention", "source": "Sera-T1"}
+{"problem_statement": "loss scale adam moments", "source": "Sera-T2"}

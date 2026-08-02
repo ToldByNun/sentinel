@@ -30,7 +30,7 @@ cd sentinel
 ..\x64\Release\sentinel.exe
 ```
 
-`main.cpp` runs smoke tests (matmul, layers, attention, Adam, …) then a short SERA LM train (2 epochs, embed=64).
+`main.cpp` runs smoke tests (matmul, layers, attention, Adam, streaming dataset, …) then a short streamed SERA LM train (2 epochs, embed=64).
 
 ## Layout
 
@@ -50,6 +50,19 @@ model.loadCheckpoint("run.snlm");         // restores weights, Adam, timeStep
 ```
 
 Binary format `SNLM` v1. Architecture must match. Int8 Adam moments are dequantized to FP32 for the file.
+
+## Streaming data
+
+```cpp
+LanguageModelChunkSource source(path, maxChars, maxTokens, /*chunk*/256, /*trainRatio*/0.8f, seed, /*testCap*/256);
+auto sample = source.prepareTokenizerSample(2000);
+tokenizer.train(sample, 1000);
+source.setTokenizer(&tokenizer);
+source.prepareTestReservoir();
+model.train(source, epochs, logEvery, batchSize, gradAccum);  // testLoss from reservoir
+```
+
+JSONL is read in chunks (peak RAM ≈ chunk + test reservoir + tokenizer sample). Train/test split is a deterministic row-index hash.
 
 ## Training (quick)
 

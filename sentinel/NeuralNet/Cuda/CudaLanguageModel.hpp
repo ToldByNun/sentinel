@@ -4,8 +4,8 @@
 
 
 
+#include "../Data/LanguageModelChunkSource.hpp"
 #include "../Data/LanguageModelDataset.hpp"
-
 #include "../Network/LanguageModel.hpp"
 
 #include "CudaAdam.hpp"
@@ -341,13 +341,26 @@ public:
 
 
     /// <summary>sequential batch training loop on device</summary>
-
     void train(const LanguageModelDataset& trainDataset, const LanguageModelDataset& testDataset, int epochs, int logEveryEpochs, int batchSize, int gradientAccumulationSteps = 4);
 
+    /// <summary>stream train chunks; testLoss from source.testDataset()</summary>
+    void train(LanguageModelChunkSource& source, int epochs, int logEveryEpochs, int batchSize, int gradientAccumulationSteps = 4);
 
+    /// <summary>
+    /// train batches from one in-memory slice
+    /// keeps Adam accum state across calls; flushRemainder forces a step at the end
+    /// </summary>
+    void trainOnExamples(
+        const LanguageModelDataset& dataset,
+        int batchSize,
+        bool flushRemainder,
+        int& accumulatedExampleCount,
+        int& microbatchesSinceStep,
+        int& processedExampleCount,
+        int& processedPredictionCount
+    );
 
     /// <summary>mean cross entropy over dataset examples on device</summary>
-
     float averageLoss(const LanguageModelDataset& dataset);
 
 

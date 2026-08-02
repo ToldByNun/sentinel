@@ -1,6 +1,7 @@
 #ifndef LANGUAGEMODEL_HPP
 #define LANGUAGEMODEL_HPP
 
+#include "../Data/LanguageModelChunkSource.hpp"
 #include "../Data/LanguageModelDataset.hpp"
 #include "../Layers/Dense.hpp"
 #include "../Layers/Embedding.hpp"
@@ -126,6 +127,9 @@ public:
     /// <summary>train and also report testLoss every logEveryEpochs</summary>
     void train(const LanguageModelDataset& trainDataset, const LanguageModelDataset& testDataset, int epochs, int logEveryEpochs = 1, int batchSize = 32, int gradientAccumulationSteps = 4);
 
+    /// <summary>stream train chunks from JSONL; testLoss uses the source reservoir</summary>
+    void train(LanguageModelChunkSource& source, int epochs, int logEveryEpochs = 1, int batchSize = 32, int gradientAccumulationSteps = 4);
+
     /// <summary>next-token generation temperature&lt;=0 is greedy otherwise sample with optional topK</summary>
     std::vector<int> generate(const std::vector<int>& promptTokenIds, int newTokenCount, float temperature = 1.0f, int topK = 40, unsigned seed = 42u);
 
@@ -137,6 +141,9 @@ public:
 
     /// <summary>save/load roundtrip smoke on a tiny model</summary>
     static void runCheckpointSmokeDemo();
+
+    /// <summary>JSONL chunk source smoke: tiny file, one streamed epoch</summary>
+    static void runStreamingSmokeDemo();
 
 private:
     friend class CudaLanguageModel;
@@ -165,6 +172,9 @@ private:
 
     /// <summary>forward + backward into thread local gradient bucket (weights stay read only)</summary>
     float accumulateExample(const LanguageModelExample& example, LanguageModelGradients& gradients, LanguageModelCache& cache) const;
+
+    /// <summary>train one in-memory slice (OpenMP); returns sum of per-example losses</summary>
+    float trainOnExamples(const LanguageModelDataset& dataset, int batchSize, std::vector<LanguageModelGradients>& threadGradients, std::vector<LanguageModelCache>& threadCaches, LanguageModelGradients& merged);
 
     /// <summary>one Adam step from averaged batch gradients</summary>
     void applyGradients(const LanguageModelGradients& gradients);

@@ -525,6 +525,81 @@ float CudaLanguageModel::averageLoss(const LanguageModelDataset& dataset) {
     return lossHost.at(0, 0) / static_cast<float>(dataset.size());
 }
 
+void CudaLanguageModel::trainOnExamples(
+    const LanguageModelDataset& dataset,
+    int batchSize,
+    bool flushRemainder,
+    int& accumulatedExampleCount,
+    int& microbatchesSinceStep,
+    int& processedExampleCount,
+    int& processedPredictionCount
+) {
+    if (batchSize <= 0) batchSize = 32;
+    if (this->gradientAccumulationSteps <= 0) this->gradientAccumulationSteps = 1;
+
+    const int exampleCount = static_cast<int>(dataset.examples.size());
+    if (exampleCount > 0) {
+        processedExampleCount += exampleCount;
+        processedPredictionCount += dataset.totalPredictionCount();
+    }
+
+    std::vector<const LanguageModelExample*> packPointers;
+    packPointers.reserve(static_cast<size_t>(batchSize));
+
+    for (int batchStart = 0; batchStart < exampleCount; batchStart += batchSize) {
+        int batchEnd = batchStart + batchSize;
+        if (batchEnd > exampleCount) batchEnd = exampleCount;
+        const int batchCount = batchEnd - batchStart;
+
+        std::vector<int> batchIndices;
+        batchIndices.reserve(static_cast<size_t>(batchCount));
+        for (int index = batchStart; index < batchEnd; ++index)
+            batchIndices.push_back(index);
+        std::stable_sort(batchIndices.begin(), batchIndices.end(), [&dataset](int left, int right) {
+            return dataset.examples[static_cast<size_t>(left)].inputTokenIds.size()
+                < dataset.examples[static_cast<size_t>(right)].inputTokenIds.size();
+        });
+
+        int packStart = 0;
+        while (packStart < static_cast<int>(batchIndices.size())) {
+            const size_t segmentLength = dataset.examples[static_cast<size_t>(batchIndices[static_cast<size_t>(packStart)])].inputTokenIds.size();
+            int maxExamplesInPack = 1;
+            if (segmentLength > 0 && this->maxPackedColumns > 0)
+                maxExamplesInPack = (std::max)(1, this->maxPackedColumns / static_cast<int>(segmentLength));
+
+            packPointers.clear();
+            int packEnd = packStart;
+            while (packEnd < static_cast<int>(batchIndices.size())
+                && static_cast<int>(packPointers.size()) < maxExamplesInPack
+                && dataset.examples[static_cast<size_t>(batchIndices[static_cast<size_t>(packEnd)])].inputTokenIds.size() == segmentLength) {
+                packPointers.push_back(&dataset.examples[static_cast<size_t>(batchIndices[static_cast<size_t>(packEnd)])]);
+                ++packEnd;
+            }
+            this->accumulatePackedExamples(packPointers.data(), static_cast<int>(packPointers.size()), this->trainGradients);
+            packStart = packEnd;
+        }
+
+        accumulatedExampleCount += batchCount;
+        ++microbatchesSinceStep;
+
+        const bool isLastBatch = flushRemainder && batchEnd >= exampleCount;
+        if (microbatchesSinceStep < this->gradientAccumulationSteps && !isLastBatch)
+            continue;
+
+        this->applyGradients(this->trainGradients, 1.0f / static_cast<float>(accumulatedExampleCount));
+        this->trainGradients.zeroInPlace();
+        accumulatedExampleCount = 0;
+        microbatchesSinceStep = 0;
+    }
+
+    if (flushRemainder && accumulatedExampleCount > 0) {
+        this->applyGradients(this->trainGradients, 1.0f / static_cast<float>(accumulatedExampleCount));
+        this->trainGradients.zeroInPlace();
+        accumulatedExampleCount = 0;
+        microbatchesSinceStep = 0;
+    }
+}
+
 void CudaLanguageModel::train(const LanguageModelDataset& trainDataset, const LanguageModelDataset& testDataset, int epochs, int logEveryEpochs, int batchSize, int gradientAccumulationSteps) {
     if (trainDataset.examples.empty()) return;
     if (logEveryEpochs <= 0) logEveryEpochs = 1;
@@ -536,11 +611,6 @@ void CudaLanguageModel::train(const LanguageModelDataset& trainDataset, const La
     this->ensureTrainState();
     this->ensureTrainWorkspaces();
 
-    const int exampleCount = static_cast<int>(trainDataset.examples.size());
-    const int predictionCount = trainDataset.totalPredictionCount();
-    std::vector<const LanguageModelExample*> packPointers;
-    packPointers.reserve(static_cast<size_t>(batchSize));
-
     for (int epoch = 0; epoch < epochs; ++epoch) {
         CudaOps::zeroInPlace(this->epochLossSum);
         const auto epochStart = std::chrono::steady_clock::now();
@@ -548,52 +618,9 @@ void CudaLanguageModel::train(const LanguageModelDataset& trainDataset, const La
         this->trainGradients.zeroInPlace();
         int accumulatedExampleCount = 0;
         int microbatchesSinceStep = 0;
-
-        for (int batchStart = 0; batchStart < exampleCount; batchStart += batchSize) {
-            int batchEnd = batchStart + batchSize;
-            if (batchEnd > exampleCount) batchEnd = exampleCount;
-            const int batchCount = batchEnd - batchStart;
-
-            std::vector<int> batchIndices;
-            batchIndices.reserve(static_cast<size_t>(batchCount));
-            for (int index = batchStart; index < batchEnd; ++index)
-                batchIndices.push_back(index);
-            std::stable_sort(batchIndices.begin(), batchIndices.end(), [&trainDataset](int left, int right) {
-                return trainDataset.examples[static_cast<size_t>(left)].inputTokenIds.size()
-                    < trainDataset.examples[static_cast<size_t>(right)].inputTokenIds.size();
-            });
-
-            int packStart = 0;
-            while (packStart < static_cast<int>(batchIndices.size())) {
-                const size_t segmentLength = trainDataset.examples[static_cast<size_t>(batchIndices[static_cast<size_t>(packStart)])].inputTokenIds.size();
-                int maxExamplesInPack = 1;
-                if (segmentLength > 0 && this->maxPackedColumns > 0)
-                    maxExamplesInPack = (std::max)(1, this->maxPackedColumns / static_cast<int>(segmentLength));
-
-                packPointers.clear();
-                int packEnd = packStart;
-                while (packEnd < static_cast<int>(batchIndices.size())
-                    && static_cast<int>(packPointers.size()) < maxExamplesInPack
-                    && trainDataset.examples[static_cast<size_t>(batchIndices[static_cast<size_t>(packEnd)])].inputTokenIds.size() == segmentLength) {
-                    packPointers.push_back(&trainDataset.examples[static_cast<size_t>(batchIndices[static_cast<size_t>(packEnd)])]);
-                    ++packEnd;
-                }
-                this->accumulatePackedExamples(packPointers.data(), static_cast<int>(packPointers.size()), this->trainGradients);
-                packStart = packEnd;
-            }
-
-            accumulatedExampleCount += batchCount;
-            ++microbatchesSinceStep;
-
-            const bool isLastBatch = batchEnd >= exampleCount;
-            if (microbatchesSinceStep < this->gradientAccumulationSteps && !isLastBatch)
-                continue;
-
-            this->applyGradients(this->trainGradients, 1.0f / static_cast<float>(accumulatedExampleCount));
-            this->trainGradients.zeroInPlace();
-            accumulatedExampleCount = 0;
-            microbatchesSinceStep = 0;
-        }
+        int processedExampleCount = 0;
+        int processedPredictionCount = 0;
+        this->trainOnExamples(trainDataset, batchSize, true, accumulatedExampleCount, microbatchesSinceStep, processedExampleCount, processedPredictionCount);
 
         CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaLanguageModel::train epoch synchronize");
         const auto epochEnd = std::chrono::steady_clock::now();
@@ -602,9 +629,73 @@ void CudaLanguageModel::train(const LanguageModelDataset& trainDataset, const La
         if (epoch % logEveryEpochs != 0) continue;
 
         Matrix lossHost = this->epochLossSum.download();
-        const float averageTrainLoss = lossHost.at(0, 0) / static_cast<float>(trainDataset.size());
-        const double tokensPerSecond = epochSeconds > 0.0 ? static_cast<double>(predictionCount) / epochSeconds : 0.0;
+        const float averageTrainLoss = processedExampleCount > 0
+            ? lossHost.at(0, 0) / static_cast<float>(processedExampleCount)
+            : 0.0f;
+        const double tokensPerSecond = epochSeconds > 0.0 ? static_cast<double>(processedPredictionCount) / epochSeconds : 0.0;
         std::printf("  Epoch %-3d  trainLoss=%.6f  sec=%.2f  tokens/s=%.0f  backend=cuda", epoch, averageTrainLoss, epochSeconds, tokensPerSecond);
+
+        if (CudaAmp::lossScalingActive())
+            std::printf("  ampScale=%.0f", CudaAmp::lossScaler.scale);
+
+        if (!testDataset.examples.empty()) {
+            const float testLoss = this->averageLoss(testDataset);
+            std::printf("  testLoss=%.6f", testLoss);
+        }
+
+        std::printf("\n");
+    }
+}
+
+void CudaLanguageModel::train(LanguageModelChunkSource& source, int epochs, int logEveryEpochs, int batchSize, int gradientAccumulationSteps) {
+    if (logEveryEpochs <= 0) logEveryEpochs = 1;
+    if (batchSize <= 0) batchSize = 32;
+    if (gradientAccumulationSteps <= 0) gradientAccumulationSteps = 1;
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaLanguageModel::train(chunk) no CUDA device");
+
+    this->gradientAccumulationSteps = gradientAccumulationSteps;
+    this->ensureTrainState();
+    this->ensureTrainWorkspaces();
+
+    LanguageModelDataset chunk;
+    const LanguageModelDataset& testDataset = source.testDataset();
+
+    for (int epoch = 0; epoch < epochs; ++epoch) {
+        CudaOps::zeroInPlace(this->epochLossSum);
+        const auto epochStart = std::chrono::steady_clock::now();
+
+        this->trainGradients.zeroInPlace();
+        int accumulatedExampleCount = 0;
+        int microbatchesSinceStep = 0;
+        int processedExampleCount = 0;
+        int processedPredictionCount = 0;
+
+        source.rewindTrain();
+        for (;;) {
+            const bool more = source.nextTrainChunk(chunk);
+            if (chunk.examples.empty()) break;
+            this->trainOnExamples(chunk, batchSize, !more, accumulatedExampleCount, microbatchesSinceStep, processedExampleCount, processedPredictionCount);
+            if (!more) break;
+        }
+        if (accumulatedExampleCount > 0) {
+            this->applyGradients(this->trainGradients, 1.0f / static_cast<float>(accumulatedExampleCount));
+            this->trainGradients.zeroInPlace();
+            accumulatedExampleCount = 0;
+            microbatchesSinceStep = 0;
+        }
+
+        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaLanguageModel::train(chunk) epoch synchronize");
+        const auto epochEnd = std::chrono::steady_clock::now();
+        const double epochSeconds = std::chrono::duration<double>(epochEnd - epochStart).count();
+
+        if (epoch % logEveryEpochs != 0) continue;
+
+        Matrix lossHost = this->epochLossSum.download();
+        const float averageTrainLoss = processedExampleCount > 0
+            ? lossHost.at(0, 0) / static_cast<float>(processedExampleCount)
+            : 0.0f;
+        const double tokensPerSecond = epochSeconds > 0.0 ? static_cast<double>(processedPredictionCount) / epochSeconds : 0.0;
+        std::printf("  Epoch %-3d  trainLoss=%.6f  sec=%.2f  tokens/s=%.0f  backend=cuda-stream", epoch, averageTrainLoss, epochSeconds, tokensPerSecond);
 
         if (CudaAmp::lossScalingActive())
             std::printf("  ampScale=%.0f", CudaAmp::lossScaler.scale);

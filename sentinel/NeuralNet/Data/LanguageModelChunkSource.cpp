@@ -63,8 +63,10 @@ bool LanguageModelChunkSource::tryAppendExample(LanguageModelDataset& dataset, c
 }
 
 bool LanguageModelChunkSource::refillPendingRows() {
-    if (this->streamExhausted) return false;
+    // Drain pending first — streamExhausted may be set when the last file batch
+    // was read while rows still remain in pendingRows.
     if (this->pendingCursor < this->pendingRows.size()) return true;
+    if (this->streamExhausted) return false;
 
     const bool moreAvailable = this->reader.nextRows(this->pendingRows, LanguageModelChunkSource::rowReadBatch);
     this->pendingBaseIndex = this->reader.rowsRead() - this->pendingRows.size();
@@ -150,9 +152,10 @@ bool LanguageModelChunkSource::nextTrainChunk(LanguageModelDataset& out) {
         this->tryAppendExample(out, row);
     }
 
+    // true only when more train rows may still be produced after this call
     const bool moreTrainData =
-        !this->streamExhausted
-        || this->pendingCursor < this->pendingRows.size();
+        this->pendingCursor < this->pendingRows.size()
+        || !this->streamExhausted;
 
     return moreTrainData;
 }
