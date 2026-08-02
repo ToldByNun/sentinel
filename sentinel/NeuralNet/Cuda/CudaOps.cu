@@ -475,6 +475,27 @@ __global__ void CudaOpsSwigluFromStackedEntry(
     hidden[index] = silu * upValue;
 }
 
+__global__ void CudaOpsSwigluFromStackedBiasedEntry(
+    const float* stackedPreActivation,
+    float* gatePreActivation,
+    float* up,
+    float* gateActivated,
+    float* hidden,
+    int hiddenRows,
+    int columnCount
+) {
+    const int elementCount = hiddenRows * columnCount;
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+    const float gate = stackedPreActivation[index];
+    const float upValue = stackedPreActivation[index + elementCount];
+    const float silu = gate / (1.0f + expf(-gate));
+    gatePreActivation[index] = gate;
+    up[index] = upValue;
+    gateActivated[index] = silu;
+    hidden[index] = silu * upValue;
+}
+
 __global__ void CudaOpsSwigluBackwardStackedEntry(
     const float* hiddenGradient,
     const float* gatePreActivation,
@@ -689,6 +710,38 @@ void CudaOps::swigluFromStackedPreBias(
         hiddenRows,
         columnCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSwigluFromStackedEntry launch");
+}
+
+void CudaOps::swigluFromStacked(
+    const CudaMatrix& stackedPreActivation,
+    CudaMatrix& gatePreActivation,
+    CudaMatrix& up,
+    CudaMatrix& gateActivated,
+    CudaMatrix& hidden
+) {
+    if (stackedPreActivation.empty()) throw std::invalid_argument("CudaOps::swigluFromStacked empty stacked");
+    if (stackedPreActivation.rows % 2ull != 0)
+        throw std::invalid_argument("CudaOps::swigluFromStacked stacked rows must be even");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::swigluFromStacked no CUDA device");
+
+    const int hiddenRows = static_cast<int>(stackedPreActivation.rows / 2ull);
+    const int columnCount = static_cast<int>(stackedPreActivation.cols);
+    gatePreActivation.ensureSize(static_cast<size_t>(hiddenRows), static_cast<size_t>(columnCount));
+    up.ensureSize(static_cast<size_t>(hiddenRows), static_cast<size_t>(columnCount));
+    gateActivated.ensureSize(static_cast<size_t>(hiddenRows), static_cast<size_t>(columnCount));
+    hidden.ensureSize(static_cast<size_t>(hiddenRows), static_cast<size_t>(columnCount));
+
+    const int elementCount = hiddenRows * columnCount;
+    const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsSwigluFromStackedBiasedEntry<<<blockCount, CudaOps::threadCount>>>(
+        stackedPreActivation.buffer.deviceData,
+        gatePreActivation.buffer.deviceData,
+        up.buffer.deviceData,
+        gateActivated.buffer.deviceData,
+        hidden.buffer.deviceData,
+        hiddenRows,
+        columnCount);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSwigluFromStackedBiasedEntry launch");
 }
 
 void CudaOps::swigluBackwardIntoStacked(

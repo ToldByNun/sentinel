@@ -290,7 +290,8 @@ static bool launchCublasLtMatmulFp16Halves(
     int sharedCount,
     bool transposeLeft,
     bool transposeRight,
-    double* kernelMilliseconds
+    double* kernelMilliseconds,
+    const float* deviceBiasOrNull
 ) {
     if (leftHalf == nullptr || rightHalf == nullptr || deviceOut == nullptr) return false;
     if (rowCount <= 0 || columnCount <= 0 || sharedCount <= 0) return false;
@@ -346,6 +347,23 @@ static bool launchCublasLtMatmulFp16Halves(
         return false;
     }
 
+    if (deviceBiasOrNull != nullptr) {
+        const cublasLtEpilogue_t epilogue = CUBLASLT_EPILOGUE_BIAS;
+        if (cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &epilogue, sizeof(epilogue)) != CUBLAS_STATUS_SUCCESS) {
+            destroyDescriptors();
+            return false;
+        }
+        if (cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &deviceBiasOrNull, sizeof(deviceBiasOrNull)) != CUBLAS_STATUS_SUCCESS) {
+            destroyDescriptors();
+            return false;
+        }
+        const cudaDataType_t biasType = CUDA_R_32F;
+        if (cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &biasType, sizeof(biasType)) != CUBLAS_STATUS_SUCCESS) {
+            destroyDescriptors();
+            return false;
+        }
+    }
+
     const cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;
     if (cublasLtMatrixLayoutCreate(&layoutLeft, CUDA_R_16F, leftRows, leftCols, leftCols) != CUBLAS_STATUS_SUCCESS) {
         destroyDescriptors();
@@ -369,6 +387,47 @@ static bool launchCublasLtMatmulFp16Halves(
 
     const float alpha = 1.0f;
     const float beta = 0.0f;
+
+    const cublasLtMatmulAlgo_t* algoPointer = nullptr;
+    cublasLtMatmulHeuristicResult_t heuristicResults[8]{};
+    cublasLtMatmulPreference_t preference = nullptr;
+    if (deviceBiasOrNull != nullptr) {
+        if (cublasLtMatmulPreferenceCreate(&preference) != CUBLAS_STATUS_SUCCESS) {
+            destroyDescriptors();
+            return false;
+        }
+        const size_t workspaceBytesAttr = localLt.workspace.capacityBytes;
+        if (cublasLtMatmulPreferenceSetAttribute(
+                preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceBytesAttr, sizeof(workspaceBytesAttr)) != CUBLAS_STATUS_SUCCESS) {
+            cublasLtMatmulPreferenceDestroy(preference);
+            destroyDescriptors();
+            return false;
+        }
+        int returnedResults = 0;
+        if (cublasLtMatmulAlgoGetHeuristic(
+                localLt.handle, matmulDesc, layoutLeft, layoutRight, layoutOut, layoutOut,
+                preference, 8, heuristicResults, &returnedResults) != CUBLAS_STATUS_SUCCESS
+            || returnedResults <= 0) {
+            cublasLtMatmulPreferenceDestroy(preference);
+            destroyDescriptors();
+            return false;
+        }
+        int chosen = -1;
+        for (int index = 0; index < returnedResults; ++index) {
+            if (heuristicResults[index].state == CUBLAS_STATUS_SUCCESS
+                && heuristicResults[index].workspaceSize <= workspaceBytesAttr) {
+                chosen = index;
+                break;
+            }
+        }
+        cublasLtMatmulPreferenceDestroy(preference);
+        preference = nullptr;
+        if (chosen < 0) {
+            destroyDescriptors();
+            return false;
+        }
+        algoPointer = &heuristicResults[chosen].algo;
+    }
 
     cudaEvent_t kernelStartEvent = nullptr;
     cudaEvent_t kernelStopEvent = nullptr;
@@ -400,7 +459,7 @@ static bool launchCublasLtMatmulFp16Halves(
         layoutOut,
         deviceOut,
         layoutOut,
-        nullptr,
+        algoPointer,
         localLt.workspace.deviceData,
         localLt.workspace.capacityBytes,
         nullptr);
@@ -445,7 +504,7 @@ const void* CudaAmp::castActivationToHalfScratch(const float* source, size_t ele
     return CudaAmp::halfScratchRight.deviceData;
 }
 
-bool CudaAmp::launchCublasLtMatmulFp16PreCastRight(const float* deviceLeft, const void* rightHalf, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds) {
+bool CudaAmp::launchCublasLtMatmulFp16PreCastRight(const float* deviceLeft, const void* rightHalf, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds, const float* deviceBiasOrNull) {
     if (!CudaAmp::preferMixedPrecision) return false;
     if (deviceLeft == nullptr || rightHalf == nullptr || deviceOut == nullptr) return false;
     if (rowCount <= 0 || columnCount <= 0 || sharedCount <= 0) return false;
@@ -462,13 +521,13 @@ bool CudaAmp::launchCublasLtMatmulFp16PreCastRight(const float* deviceLeft, cons
             CudaAmp::castFloatBufferToHalf(deviceLeft, leftElements, CudaAmp::halfScratchLeft);
             leftHalf = CudaAmp::halfScratchLeft.deviceData;
         }
-        return launchCublasLtMatmulFp16Halves(leftHalf, rightHalf, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, kernelMilliseconds);
+        return launchCublasLtMatmulFp16Halves(leftHalf, rightHalf, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, kernelMilliseconds, deviceBiasOrNull);
     } catch (...) {
         return false;
     }
 }
 
-bool CudaAmp::launchCublasLtMatmulFp16(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds) {
+bool CudaAmp::launchCublasLtMatmulFp16(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds, const float* deviceBiasOrNull) {
     if (!CudaAmp::preferMixedPrecision) return false;
     if (deviceLeft == nullptr || deviceRight == nullptr || deviceOut == nullptr) return false;
     if (rowCount <= 0 || columnCount <= 0 || sharedCount <= 0) return false;
@@ -491,7 +550,7 @@ bool CudaAmp::launchCublasLtMatmulFp16(const float* deviceLeft, const float* dev
 
         const void* leftHalf = cachedLeft != nullptr ? cachedLeft : CudaAmp::halfScratchLeft.deviceData;
         const void* rightHalf = cachedRight != nullptr ? cachedRight : CudaAmp::halfScratchRight.deviceData;
-        return launchCublasLtMatmulFp16Halves(leftHalf, rightHalf, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, kernelMilliseconds);
+        return launchCublasLtMatmulFp16Halves(leftHalf, rightHalf, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, kernelMilliseconds, deviceBiasOrNull);
     } catch (...) {
         return false;
     }

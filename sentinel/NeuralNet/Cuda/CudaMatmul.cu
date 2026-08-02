@@ -1,5 +1,6 @@
 #include "CudaMatmul.hpp"
 #include "CudaAmp.hpp"
+#include "CudaOps.hpp"
 
 #include "../Utils/SmokeLog.hpp"
 
@@ -302,6 +303,41 @@ void CudaMatrix::multiplyInto(const CudaMatrix& left, const CudaMatrix& right, C
     CudaMatmul::launchSharedMemoryMatmul(left.buffer.deviceData, right.buffer.deviceData, out.buffer.deviceData, static_cast<int>(leftRows), static_cast<int>(rightCols), static_cast<int>(leftCols), transposeLeft, transposeRight, nullptr);
 }
 
+bool CudaMatrix::multiplyBiasInto(const CudaMatrix& left, const CudaMatrix& right, const CudaMatrix& bias, CudaMatrix& out, bool transposeLeft, bool transposeRight) {
+    if (left.empty() || right.empty()) throw std::invalid_argument("CudaMatrix::multiplyBiasInto empty input");
+    if (bias.empty()) throw std::invalid_argument("CudaMatrix::multiplyBiasInto empty bias");
+    if (bias.cols != 1) throw std::invalid_argument("CudaMatrix::multiplyBiasInto bias must be a column");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaMatrix::multiplyBiasInto no CUDA device");
+
+    const size_t leftRows = transposeLeft ? left.cols : left.rows;
+    const size_t leftCols = transposeLeft ? left.rows : left.cols;
+    const size_t rightRows = transposeRight ? right.cols : right.rows;
+    const size_t rightCols = transposeRight ? right.rows : right.cols;
+    if (leftCols != rightRows) throw std::invalid_argument("CudaMatrix::multiplyBiasInto shape mismatch");
+    if (bias.rows != leftRows) throw std::invalid_argument("CudaMatrix::multiplyBiasInto bias row mismatch");
+
+    out.ensureSize(leftRows, rightCols);
+    const int rowCount = static_cast<int>(leftRows);
+    const int columnCount = static_cast<int>(rightCols);
+    const int sharedCount = static_cast<int>(leftCols);
+    const float* biasPtr = bias.buffer.deviceData;
+
+    if (CudaAmp::launchCublasLtMatmulFp16(
+            left.buffer.deviceData, right.buffer.deviceData, out.buffer.deviceData,
+            rowCount, columnCount, sharedCount, transposeLeft, transposeRight, nullptr, biasPtr))
+        return true;
+    if (CudaMatmul::launchCublasLtMatmul(
+            left.buffer.deviceData, right.buffer.deviceData, out.buffer.deviceData,
+            rowCount, columnCount, sharedCount, transposeLeft, transposeRight, nullptr, biasPtr))
+        return true;
+
+    CudaMatmul::launchSharedMemoryMatmul(
+        left.buffer.deviceData, right.buffer.deviceData, out.buffer.deviceData,
+        rowCount, columnCount, sharedCount, transposeLeft, transposeRight, nullptr);
+    CudaOps::broadcastBiasAddInPlace(out, bias);
+    return false;
+}
+
 void CudaMatrix::multiplyPointersInto(const float* left, size_t leftRows, size_t leftCols, const float* right, size_t rightRows, size_t rightCols, float* out, bool transposeLeft, bool transposeRight) {
     if (left == nullptr || right == nullptr || out == nullptr) throw std::invalid_argument("CudaMatrix::multiplyPointersInto null pointer");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaMatrix::multiplyPointersInto no CUDA device");
@@ -394,7 +430,7 @@ __global__ void CudaMatmulSharedMemoryEntry(const float* left, const float* righ
     CudaMatmul::runSharedMemoryMatmul(left, right, out, rowCount, columnCount, sharedCount, transposeLeft, transposeRight);
 }
 
-bool CudaMatmul::launchCublasLtMatmul(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds) {
+bool CudaMatmul::launchCublasLtMatmul(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds, const float* deviceBiasOrNull) {
     if (!ensureCublasLtHandle()) return false;
 
     CublasLtGemmState& state = cublasLtGemmState();
@@ -427,6 +463,23 @@ bool CudaMatmul::launchCublasLtMatmul(const float* deviceLeft, const float* devi
     if (cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transRight, sizeof(transRight)) != CUBLAS_STATUS_SUCCESS) {
         destroyDescriptors();
         return false;
+    }
+
+    if (deviceBiasOrNull != nullptr) {
+        const cublasLtEpilogue_t epilogue = CUBLASLT_EPILOGUE_BIAS;
+        if (cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &epilogue, sizeof(epilogue)) != CUBLAS_STATUS_SUCCESS) {
+            destroyDescriptors();
+            return false;
+        }
+        if (cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &deviceBiasOrNull, sizeof(deviceBiasOrNull)) != CUBLAS_STATUS_SUCCESS) {
+            destroyDescriptors();
+            return false;
+        }
+        const cudaDataType_t biasType = CUDA_R_32F;
+        if (cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &biasType, sizeof(biasType)) != CUBLAS_STATUS_SUCCESS) {
+            destroyDescriptors();
+            return false;
+        }
     }
 
     const int leftRows = transposeLeft ? sharedCount : rowCount;
@@ -466,6 +519,46 @@ bool CudaMatmul::launchCublasLtMatmul(const float* deviceLeft, const float* devi
     void* workspacePointer = state.workspace.deviceData;
     const size_t workspaceSize = state.workspace.capacityBytes;
 
+    const cublasLtMatmulAlgo_t* algoPointer = nullptr;
+    cublasLtMatmulHeuristicResult_t heuristicResults[8]{};
+    cublasLtMatmulPreference_t preference = nullptr;
+    if (deviceBiasOrNull != nullptr) {
+        if (cublasLtMatmulPreferenceCreate(&preference) != CUBLAS_STATUS_SUCCESS) {
+            destroyDescriptors();
+            return false;
+        }
+        if (cublasLtMatmulPreferenceSetAttribute(
+                preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize)) != CUBLAS_STATUS_SUCCESS) {
+            cublasLtMatmulPreferenceDestroy(preference);
+            destroyDescriptors();
+            return false;
+        }
+        int returnedResults = 0;
+        if (cublasLtMatmulAlgoGetHeuristic(
+                state.handle, matmulDesc, layoutLeft, layoutRight, layoutOut, layoutOut,
+                preference, 8, heuristicResults, &returnedResults) != CUBLAS_STATUS_SUCCESS
+            || returnedResults <= 0) {
+            cublasLtMatmulPreferenceDestroy(preference);
+            destroyDescriptors();
+            return false;
+        }
+        int chosen = -1;
+        for (int index = 0; index < returnedResults; ++index) {
+            if (heuristicResults[index].state == CUBLAS_STATUS_SUCCESS
+                && heuristicResults[index].workspaceSize <= workspaceSize) {
+                chosen = index;
+                break;
+            }
+        }
+        cublasLtMatmulPreferenceDestroy(preference);
+        preference = nullptr;
+        if (chosen < 0) {
+            destroyDescriptors();
+            return false;
+        }
+        algoPointer = &heuristicResults[chosen].algo;
+    }
+
     cudaEvent_t kernelStartEvent = nullptr;
     cudaEvent_t kernelStopEvent = nullptr;
     if (kernelMilliseconds != nullptr) {
@@ -486,7 +579,7 @@ bool CudaMatmul::launchCublasLtMatmul(const float* deviceLeft, const float* devi
         }
     }
 
-    const cublasStatus_t matmulStatus = cublasLtMatmul(state.handle, matmulDesc, &alpha, deviceLeft, layoutLeft, deviceRight, layoutRight, &beta, deviceOut, layoutOut, deviceOut, layoutOut, nullptr, workspacePointer, workspaceSize, nullptr);
+    const cublasStatus_t matmulStatus = cublasLtMatmul(state.handle, matmulDesc, &alpha, deviceLeft, layoutLeft, deviceRight, layoutRight, &beta, deviceOut, layoutOut, deviceOut, layoutOut, algoPointer, workspacePointer, workspaceSize, nullptr);
 
     if (matmulStatus != CUBLAS_STATUS_SUCCESS) {
         if (kernelStartEvent != nullptr) cudaEventDestroy(kernelStartEvent);

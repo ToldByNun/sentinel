@@ -867,9 +867,8 @@ void CudaLanguageModel::accumulateChunkedProjection(size_t tokenCount, int segme
         this->logits.ensureSize(static_cast<size_t>(vocabularySize), tokenCount);
         const bool previousAmp = CudaAmp::preferMixedPrecision;
         CudaAmp::preferMixedPrecision = false;
-        CudaMatrix::multiplyInto(headWeight, this->normalized, this->logits);
+        CudaMatrix::multiplyBiasInto(headWeight, this->normalized, this->projectionBias, this->logits);
         CudaAmp::preferMixedPrecision = previousAmp;
-        CudaOps::broadcastBiasAddInPlace(this->logits, this->projectionBias);
 
         const int chunkCap = (std::min)(this->logitChunkRows, vocabularySize);
         for (int rowStart = 0; rowStart < vocabularySize; rowStart += chunkCap) {
@@ -2054,8 +2053,7 @@ void CudaLanguageModel::forwardInto(const std::vector<int>& tokenIds, CudaMatrix
     }
 
     this->finalNorm.forward(this->hidden, this->normalized);
-    CudaMatrix::multiplyInto(this->lmHeadWeight(), this->normalized, outLogits);
-    CudaOps::broadcastBiasAddInPlace(outLogits, this->projectionBias);
+    CudaMatrix::multiplyBiasInto(this->lmHeadWeight(), this->normalized, this->projectionBias, outLogits);
 }
 
 Matrix CudaLanguageModel::forward(const std::vector<int>& tokenIds) {
@@ -2093,8 +2091,7 @@ void CudaLanguageModel::prefillInto(const std::vector<int>& tokenIds, CudaMatrix
     }
 
     this->finalNorm.forward(this->hidden, this->normalized);
-    CudaMatrix::multiplyInto(this->lmHeadWeight(), this->normalized, outLogits);
-    CudaOps::broadcastBiasAddInPlace(outLogits, this->projectionBias);
+    CudaMatrix::multiplyBiasInto(this->lmHeadWeight(), this->normalized, this->projectionBias, outLogits);
 }
 
 void CudaLanguageModel::decodeInto(int tokenId, CudaMatrix& outLogits) {
@@ -2117,8 +2114,7 @@ void CudaLanguageModel::decodeInto(int tokenId, CudaMatrix& outLogits) {
     }
 
     this->finalNorm.forward(this->hidden, this->normalized);
-    CudaMatrix::multiplyInto(this->lmHeadWeight(), this->normalized, outLogits);
-    CudaOps::broadcastBiasAddInPlace(outLogits, this->projectionBias);
+    CudaMatrix::multiplyBiasInto(this->lmHeadWeight(), this->normalized, this->projectionBias, outLogits);
 }
 
 void CudaLanguageModel::runConsumerVramDemo(

@@ -29,6 +29,17 @@ public:
         CudaMatrix& hidden);
 
     /// <summary>
+    /// from stacked preactivations that already include bias: write gatePre/up caches,
+    /// gateActivated=silu(gate), hidden=silu(gate)*up
+    /// </summary>
+    static void swigluFromStacked(
+        const CudaMatrix& stackedPreActivation,
+        CudaMatrix& gatePreActivation,
+        CudaMatrix& up,
+        CudaMatrix& gateActivated,
+        CudaMatrix& hidden);
+
+    /// <summary>
     /// SwiGLU bwd elementwise: write stacked [dGate; dUp] (2H x T) from dHidden
     /// also fills gateGradient/upGradient caches
     /// </summary>

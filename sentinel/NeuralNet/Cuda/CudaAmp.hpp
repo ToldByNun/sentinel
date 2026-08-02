@@ -85,11 +85,11 @@ public:
     /// <summary>true if any gradient tensor is non finite</summary>
     static bool gradientsHaveNonFinite(const CudaLanguageModelGradients& gradients);
 
-    /// <summary>cuBLASLt FP16xFP16 GEMM with FP32 accumulate into float out</summary>
-    static bool launchCublasLtMatmulFp16(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds);
+    /// <summary>cuBLASLt FP16xFP16 GEMM with FP32 accumulate into float out; optional bias epilogue (length=rowCount)</summary>
+    static bool launchCublasLtMatmulFp16(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds, const float* deviceBiasOrNull = nullptr);
 
     /// <summary>FP16 GEMM using a pre-cast right operand (avoids re-casting shared activations)</summary>
-    static bool launchCublasLtMatmulFp16PreCastRight(const float* deviceLeft, const void* rightHalf, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds);
+    static bool launchCublasLtMatmulFp16PreCastRight(const float* deviceLeft, const void* rightHalf, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds, const float* deviceBiasOrNull = nullptr);
 
     /// <summary>cast activations to half into reusable scratch; returns device half pointer</summary>
     static const void* castActivationToHalfScratch(const float* source, size_t elementCount);

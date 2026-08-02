@@ -129,6 +129,13 @@ public:
     /// <summary>C = op(A) * op(B) entirely on device no host copies</summary>
     static void multiplyInto(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& out, bool transposeLeft = false, bool transposeRight = false);
 
+    /// <summary>
+    /// C = op(A) * op(B) + bias (bias column broadcast across columns).
+    /// Prefers cuBLASLt EPILOGUE_BIAS; falls back to GEMM + broadcastBiasAdd.
+    /// Returns true when the fused epilogue path ran.
+    /// </summary>
+    static bool multiplyBiasInto(const CudaMatrix& left, const CudaMatrix& right, const CudaMatrix& bias, CudaMatrix& out, bool transposeLeft = false, bool transposeRight = false);
+
     /// <summary>C = op(A) * op(B) from raw device pointers row major shapes are physical before transpose flags</summary>
     static void multiplyPointersInto(const float* left, size_t leftRows, size_t leftCols, const float* right, size_t rightRows, size_t rightCols, float* out, bool transposeLeft = false, bool transposeRight = false);
 
@@ -210,8 +217,8 @@ private:
     /// <summary>maximum absolute difference between same shape matrices</summary>
     static float maximumAbsoluteDifference(const Matrix& left, const Matrix& right);
 
-    /// <summary>launch cuBLASLt TF32 row major matmul returning false on any failure</summary>
-    static bool launchCublasLtMatmul(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds);
+    /// <summary>launch cuBLASLt TF32 row major matmul; optional bias epilogue (length=rowCount)</summary>
+    static bool launchCublasLtMatmul(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds, const float* deviceBiasOrNull = nullptr);
 
     /// <summary>launch shared memory matmul kernel optionally filling kernelMilliseconds</summary>
     static void launchSharedMemoryMatmulKernel(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds);
