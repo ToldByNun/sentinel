@@ -475,6 +475,52 @@ __global__ void CudaOpsSwigluFromStackedEntry(
     hidden[index] = silu * upValue;
 }
 
+__global__ void CudaOpsSwigluBackwardStackedEntry(
+    const float* hiddenGradient,
+    const float* gatePreActivation,
+    const float* up,
+    const float* gateActivated,
+    float* gateGradient,
+    float* upGradient,
+    float* stackedGateUpGradient,
+    int elementCount
+) {
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+
+    const float dHidden = hiddenGradient[index];
+    const float gatePre = gatePreActivation[index];
+    const float sigmoid = 1.0f / (1.0f + expf(-gatePre));
+    const float siluDerivative = sigmoid * (1.0f + gatePre * (1.0f - sigmoid));
+
+    const float dUp = dHidden * gateActivated[index];
+    const float dGate = dHidden * up[index] * siluDerivative;
+
+    gateGradient[index] = dGate;
+    upGradient[index] = dUp;
+    stackedGateUpGradient[index] = dGate;
+    stackedGateUpGradient[index + elementCount] = dUp;
+}
+
+__global__ void CudaOpsSumColumnsStackedHalvesEntry(
+    const float* stacked,
+    float* firstBiasGradient,
+    float* secondBiasGradient,
+    int halfRows,
+    int columnCount
+) {
+    const int row = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (row >= halfRows) return;
+    float firstSum = 0.0f;
+    float secondSum = 0.0f;
+    for (int column = 0; column < columnCount; ++column) {
+        firstSum += stacked[row * columnCount + column];
+        secondSum += stacked[(row + halfRows) * columnCount + column];
+    }
+    firstBiasGradient[row] = firstSum;
+    secondBiasGradient[row] = secondSum;
+}
+
 __global__ void CudaOpsSiluDerivativeEntry(const float* input, float* out, int elementCount) {
     CudaOps::runSiluDerivativeInto(input, out, elementCount);
 }
@@ -643,6 +689,63 @@ void CudaOps::swigluFromStackedPreBias(
         hiddenRows,
         columnCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSwigluFromStackedEntry launch");
+}
+
+void CudaOps::swigluBackwardIntoStacked(
+    const CudaMatrix& hiddenGradient,
+    const CudaMatrix& gatePreActivation,
+    const CudaMatrix& up,
+    const CudaMatrix& gateActivated,
+    CudaMatrix& gateGradient,
+    CudaMatrix& upGradient,
+    CudaMatrix& stackedGateUpGradient
+) {
+    if (hiddenGradient.empty()) throw std::invalid_argument("CudaOps::swigluBackwardIntoStacked empty hiddenGradient");
+    if (gatePreActivation.rows != hiddenGradient.rows || gatePreActivation.cols != hiddenGradient.cols
+        || up.rows != hiddenGradient.rows || up.cols != hiddenGradient.cols
+        || gateActivated.rows != hiddenGradient.rows || gateActivated.cols != hiddenGradient.cols)
+        throw std::invalid_argument("CudaOps::swigluBackwardIntoStacked shape mismatch");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::swigluBackwardIntoStacked no CUDA device");
+
+    const size_t hiddenRows = hiddenGradient.rows;
+    const size_t columnCount = hiddenGradient.cols;
+    gateGradient.ensureSize(hiddenRows, columnCount);
+    upGradient.ensureSize(hiddenRows, columnCount);
+    stackedGateUpGradient.ensureSize(hiddenRows * 2ull, columnCount);
+
+    const int elementCount = static_cast<int>(hiddenGradient.elementCount());
+    const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsSwigluBackwardStackedEntry<<<blockCount, CudaOps::threadCount>>>(
+        hiddenGradient.buffer.deviceData,
+        gatePreActivation.buffer.deviceData,
+        up.buffer.deviceData,
+        gateActivated.buffer.deviceData,
+        gateGradient.buffer.deviceData,
+        upGradient.buffer.deviceData,
+        stackedGateUpGradient.buffer.deviceData,
+        elementCount);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSwigluBackwardStackedEntry launch");
+}
+
+void CudaOps::sumColumnsStackedHalvesInto(const CudaMatrix& stacked, CudaMatrix& firstBiasGradient, CudaMatrix& secondBiasGradient) {
+    if (stacked.empty()) throw std::invalid_argument("CudaOps::sumColumnsStackedHalvesInto empty stacked");
+    if (stacked.rows % 2ull != 0)
+        throw std::invalid_argument("CudaOps::sumColumnsStackedHalvesInto stacked rows must be even");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::sumColumnsStackedHalvesInto no CUDA device");
+
+    const int halfRows = static_cast<int>(stacked.rows / 2ull);
+    const int columnCount = static_cast<int>(stacked.cols);
+    firstBiasGradient.ensureSize(static_cast<size_t>(halfRows), 1);
+    secondBiasGradient.ensureSize(static_cast<size_t>(halfRows), 1);
+
+    const int blockCount = (halfRows + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsSumColumnsStackedHalvesEntry<<<blockCount, CudaOps::threadCount>>>(
+        stacked.buffer.deviceData,
+        firstBiasGradient.buffer.deviceData,
+        secondBiasGradient.buffer.deviceData,
+        halfRows,
+        columnCount);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsSumColumnsStackedHalvesEntry launch");
 }
 
 void CudaOps::siluDerivativeInto(const CudaMatrix& input, CudaMatrix& out) {

@@ -20,6 +20,8 @@ public:
     /// <summary>stacked [gateWeight; upWeight] for one forward GEMM</summary>
     CudaMatrix gateUpWeight;
     CudaMatrix gateUpPreActivation;
+    CudaMatrix gateUpHiddenGradient;
+    CudaMatrix gateUpWeightGradient;
 
     CudaMatrix gatePreActivation;
     CudaMatrix gateActivated;
