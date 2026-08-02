@@ -155,6 +155,9 @@ public:
 
     int maxPackedColumns;
 
+    /// <summary>true when setCudaMaxPackedColumns / explicit assign should skip auto VRAM budget</summary>
+    bool maxPackedColumnsManual;
+
     /// <summary>vocab rows per CE chunk for low VRAM LM head default 2048</summary>
 
     int logitChunkRows;
@@ -317,6 +320,15 @@ public:
     /// <summary>pre-allocate train activation workspaces to maxPackedColumns</summary>
 
     void ensureTrainWorkspaces();
+
+    /// <summary>estimated device bytes of train workspaces that scale with one packed column</summary>
+    size_t bytesPerPackedColumn() const;
+
+    /// <summary>
+    /// set maxPackedColumns from cudaMemGetInfo free memory (no-op if maxPackedColumnsManual)
+    /// freeFraction of currently free VRAM is the pack-workspace budget; does not allocate
+    /// </summary>
+    void applyVramPackBudget(float freeFraction = 0.55f);
 
 
 

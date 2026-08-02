@@ -16,7 +16,7 @@
 #include "../Optimizers/Adam.hpp"
 
 CudaLanguageModel::CudaLanguageModel()
-    : maximumPositionCount(0), maxPackedColumns(8192), logitChunkRows(2048), gradientAccumulationSteps(4), activationCheckpointing(true), adam(0.001f), trainStateReady(false) {}
+    : maximumPositionCount(0), maxPackedColumns(8192), maxPackedColumnsManual(false), logitChunkRows(2048), gradientAccumulationSteps(4), activationCheckpointing(true), adam(0.001f), trainStateReady(false) {}
 
 void CudaTransformerBlockAdamStates::ensureFrom(const CudaTransformerBlock& block) {
     // moments stay empty until first Adam update (lazy allocation for low VRAM before train)
@@ -134,6 +134,73 @@ void CudaLanguageModel::ensureTrainWorkspaces() {
         for (CudaMatrix& checkpoint : this->blockInputCheckpoints)
             checkpoint.ensureSize(embeddingDim, maxColumns);
     }
+}
+
+size_t CudaLanguageModel::bytesPerPackedColumn() const {
+    if (this->tokenEmbeddingWeight.empty())
+        throw std::logic_error("CudaLanguageModel::bytesPerPackedColumn weights not uploaded");
+    if (this->logitChunkRows <= 0)
+        throw std::invalid_argument("CudaLanguageModel::bytesPerPackedColumn logitChunkRows must be > 0");
+
+    const size_t embeddingDim = this->tokenEmbeddingWeight.cols;
+    const size_t vocabularySize = this->tokenEmbeddingWeight.rows;
+    const size_t chunkRows = static_cast<size_t>((std::min)(this->logitChunkRows, static_cast<int>(vocabularySize)));
+    const size_t floatBytes = sizeof(float);
+    const size_t intBytes = sizeof(int);
+
+    // Mirrors ensureTrainWorkspaces column-scaling tensors.
+    size_t bytes = 0;
+    bytes += 5 * embeddingDim * floatBytes; // hidden, normalized, hiddenGradient, blockInputGrad, normInputGrad
+    bytes += 2 * chunkRows * floatBytes;    // logitChunk, logitGradientChunk
+    bytes += embeddingDim * floatBytes;     // hiddenGradientChunk
+    bytes += 3 * floatBytes;                // onlineSoftmaxMax, onlineSoftmaxSumExp, targetLogits
+    bytes += 3 * intBytes;                  // tokenIds, targets, meanDivisors
+    bytes += 3 * intBytes;                  // packH2d fused staging
+    bytes += intBytes;                      // adamWindowTokenIdsBuffer capacity unit
+
+    if (this->activationCheckpointing)
+        bytes += this->blocks.size() * embeddingDim * floatBytes;
+
+    // Transient block/flash peak not preallocated in ensureTrainWorkspaces.
+    bytes += 32 * embeddingDim * floatBytes;
+    return bytes;
+}
+
+void CudaLanguageModel::applyVramPackBudget(float freeFraction) {
+    if (this->maxPackedColumnsManual) return;
+    if (this->tokenEmbeddingWeight.empty())
+        throw std::logic_error("CudaLanguageModel::applyVramPackBudget weights not uploaded");
+    if (!(freeFraction > 0.0f && freeFraction <= 1.0f))
+        throw std::invalid_argument("CudaLanguageModel::applyVramPackBudget freeFraction must be in (0, 1]");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaLanguageModel::applyVramPackBudget no CUDA device");
+
+    size_t freeBytes = 0;
+    size_t totalBytes = 0;
+    CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeBytes, &totalBytes), "CudaLanguageModel::applyVramPackBudget memGetInfo");
+
+    const size_t perColumn = this->bytesPerPackedColumn();
+    if (perColumn == 0) throw std::logic_error("CudaLanguageModel::applyVramPackBudget zero bytesPerPackedColumn");
+
+    const size_t budgetBytes = static_cast<size_t>(static_cast<double>(freeBytes) * static_cast<double>(freeFraction));
+    size_t cols = budgetBytes / perColumn;
+
+    int minCols = CudaLanguageModel::lengthBucketStep;
+    if (this->maximumPositionCount > minCols) minCols = this->maximumPositionCount;
+    constexpr int maxCols = 16384;
+    if (cols < static_cast<size_t>(minCols)) cols = static_cast<size_t>(minCols);
+    if (cols > static_cast<size_t>(maxCols)) cols = static_cast<size_t>(maxCols);
+
+    cols = (cols / 64u) * 64u;
+    if (cols < static_cast<size_t>(minCols)) cols = static_cast<size_t>(minCols);
+
+    this->maxPackedColumns = static_cast<int>(cols);
+
+    const double freeMiB = static_cast<double>(freeBytes) / (1024.0 * 1024.0);
+    const double totalMiB = static_cast<double>(totalBytes) / (1024.0 * 1024.0);
+    const double workspaceMiB = static_cast<double>(perColumn) * static_cast<double>(this->maxPackedColumns) / (1024.0 * 1024.0);
+    std::printf(
+        "CudaLanguageModel::applyVramPackBudget: free=%.0f/%.0f MiB  fraction=%.2f  maxPackCols=%d  ~workspace=%.0f MiB\n",
+        freeMiB, totalMiB, freeFraction, this->maxPackedColumns, workspaceMiB);
 }
 
 void CudaLanguageModel::releaseActivationCheckpoints() {
