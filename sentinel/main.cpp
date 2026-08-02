@@ -5,6 +5,7 @@
 #include "NeuralNet/Cuda/CudaRMSNorm.hpp"
 #include "NeuralNet/Cuda/CudaCausalSelfAttention.hpp"
 #include "NeuralNet/Cuda/CudaAdam.hpp"
+#include "NeuralNet/Cuda/CudaMuon.hpp"
 #include "NeuralNet/Cuda/CudaAmp.hpp"
 #include "NeuralNet/Cuda/CudaTransformerBlock.hpp"
 #include "NeuralNet/Layers/CausalSelfAttention.hpp"
@@ -51,6 +52,7 @@ int main() {
     const bool runArrowCorpusSmoke = false;
     const bool runBpeBench = false;
     const bool runCkptParity = false;
+    const bool runMuonSmoke = false;
 
     // Arrow HF disk layout (sera_best_subset) via from-scratch ArrowChunkReader; JSONL still works
     const bool useArrowCorpus = true;
@@ -73,6 +75,17 @@ int main() {
     const int testReservoirCap = 512;
     const bool preferCpuAdamOffload = false;
     const bool useCheckpointing = false;
+
+    if (runMuonSmoke) {
+        SmokeLog::section("muon");
+        if (!CudaMatmul::isAvailable()) {
+            SmokeLog::skip("Muon NS");
+            return 1;
+        }
+        CudaMuon::runSmokeDemo(64, 48);
+        CudaMuon::runSmokeDemo(48, 64);
+        return 0;
+    }
 
     if (runCkptParity) {
         SmokeLog::section("ckpt parity");
@@ -126,7 +139,7 @@ int main() {
         std::vector<CorpusRow> rows;
         reader.nextRows(rows, 3);
         if (rows.empty()) {
-            SmokeLog::note("no rows decoded");
+            SmokeLog::note("no rows decoded.");
             return 1;
         }
 
@@ -1028,6 +1041,7 @@ int main() {
         CudaRMSNorm::runSmokeDemo(128, 64);
         CudaRMSNorm::runBackwardSmokeDemo(64, 32);
         CudaAdam::runSmokeDemo(128, 64);
+        CudaMuon::runSmokeDemo(64, 48);
 
         SmokeLog::section("attention");
         CausalSelfAttention::runSparseMaskSmokeDemo(32, 2, 16, 32, 4, 2);
