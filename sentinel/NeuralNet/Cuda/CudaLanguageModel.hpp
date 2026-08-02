@@ -29,41 +29,43 @@
 
 
 /// <summary>device resident Adam states for one transformer block</summary>
-
 class CudaTransformerBlockAdamStates {
-
 public:
-
     CudaAdamState queryWeight;
-
     CudaAdamState keyWeight;
-
     CudaAdamState valueWeight;
-
     CudaAdamState attentionOutputWeight;
-
     CudaAdamState attentionNormGamma;
-
     CudaAdamState feedForwardNormGamma;
-
     CudaAdamState feedForwardGateWeight;
-
     CudaAdamState feedForwardGateBias;
-
     CudaAdamState feedForwardUpWeight;
-
     CudaAdamState feedForwardUpBias;
-
     CudaAdamState feedForwardDownWeight;
-
     CudaAdamState feedForwardDownBias;
 
-
-
     /// <summary>allocate zero moments matching block parameter shapes</summary>
-
     void ensureFrom(const CudaTransformerBlock& block);
 
+    /// <summary>release all device moment buffers</summary>
+    void free();
+};
+
+/// <summary>host Adam moments for one transformer block (CPU offload path)</summary>
+class CudaTransformerBlockHostAdamStates {
+public:
+    AdamState queryWeight;
+    AdamState keyWeight;
+    AdamState valueWeight;
+    AdamState attentionOutputWeight;
+    AdamState attentionNormGamma;
+    AdamState feedForwardNormGamma;
+    AdamState feedForwardGateWeight;
+    AdamState feedForwardGateBias;
+    AdamState feedForwardUpWeight;
+    AdamState feedForwardUpBias;
+    AdamState feedForwardDownWeight;
+    AdamState feedForwardDownBias;
 };
 
 
@@ -180,14 +182,17 @@ public:
     CudaLanguageModelGradients trainGradients;
 
     CudaAdamState tokenEmbeddingState;
-
     CudaAdamState finalNormGammaState;
-
     CudaAdamState projectionWeightState;
-
     CudaAdamState projectionBiasState;
-
     std::vector<CudaTransformerBlockAdamStates> blockAdamStates;
+
+    /// <summary>host Adam moments used when CudaAdam::preferCpuOffload (device states stay empty)</summary>
+    AdamState hostTokenEmbeddingState;
+    AdamState hostFinalNormGammaState;
+    AdamState hostProjectionWeightState;
+    AdamState hostProjectionBiasState;
+    std::vector<CudaTransformerBlockHostAdamStates> hostBlockAdamStates;
 
 
 

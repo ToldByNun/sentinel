@@ -23,6 +23,21 @@ void CudaTransformerBlockAdamStates::ensureFrom(const CudaTransformerBlock& bloc
     (void)block;
 }
 
+void CudaTransformerBlockAdamStates::free() {
+    this->queryWeight.free();
+    this->keyWeight.free();
+    this->valueWeight.free();
+    this->attentionOutputWeight.free();
+    this->attentionNormGamma.free();
+    this->feedForwardNormGamma.free();
+    this->feedForwardGateWeight.free();
+    this->feedForwardGateBias.free();
+    this->feedForwardUpWeight.free();
+    this->feedForwardUpBias.free();
+    this->feedForwardDownWeight.free();
+    this->feedForwardDownBias.free();
+}
+
 void CudaLanguageModelGradients::ensureFrom(const CudaLanguageModel& model) {
     this->tokenEmbedding.ensureSize(model.tokenEmbeddingWeight.rows, model.tokenEmbeddingWeight.cols);
     this->blocks.resize(model.blocks.size());
@@ -94,10 +109,27 @@ void CudaLanguageModel::ensureTrainState() {
     this->trainGradients.ensureFrom(*this);
     this->trainGradients.zeroInPlace();
 
-    // Adam moments allocated lazily on first applyGradients
-    this->blockAdamStates.resize(this->blocks.size());
-    for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex)
-        this->blockAdamStates[blockIndex].ensureFrom(this->blocks[blockIndex]);
+    if (CudaAdam::preferCpuOffload) {
+        // moments live on host; free any leftover device Adam buffers
+        this->tokenEmbeddingState.free();
+        this->finalNormGammaState.free();
+        this->projectionWeightState.free();
+        this->projectionBiasState.free();
+        for (CudaTransformerBlockAdamStates& blockStates : this->blockAdamStates)
+            blockStates.free();
+        this->blockAdamStates.clear();
+        this->hostBlockAdamStates.resize(this->blocks.size());
+    } else {
+        this->hostBlockAdamStates.clear();
+        this->hostTokenEmbeddingState = AdamState{};
+        this->hostFinalNormGammaState = AdamState{};
+        this->hostProjectionWeightState = AdamState{};
+        this->hostProjectionBiasState = AdamState{};
+        // Adam moments allocated lazily on first applyGradients
+        this->blockAdamStates.resize(this->blocks.size());
+        for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex)
+            this->blockAdamStates[blockIndex].ensureFrom(this->blocks[blockIndex]);
+    }
 
     this->finalNormGammaGradient.ensureSize(this->finalNorm.gamma.rows, this->finalNorm.gamma.cols);
 
@@ -291,6 +323,37 @@ void CudaLanguageModel::downloadOptimizerTo(LanguageModel& host) {
     host.optimizer.epsilon = this->adam.epsilon;
     host.optimizer.timeStep = this->adam.timeStep;
 
+    if (CudaAdam::preferCpuOffload) {
+        host.tokenEmbeddingState = this->hostTokenEmbeddingState;
+        host.finalNormGammaState = this->hostFinalNormGammaState;
+        if (this->tieEmbeddingProjection)
+            host.projectionWeightState = AdamState{};
+        else
+            host.projectionWeightState = this->hostProjectionWeightState;
+        host.projectionBiasState = this->hostProjectionBiasState;
+
+        if (this->hostBlockAdamStates.size() != this->blocks.size())
+            this->hostBlockAdamStates.resize(this->blocks.size());
+
+        for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+            TransformerBlock& hostBlock = host.blocks[blockIndex];
+            const CudaTransformerBlockHostAdamStates& states = this->hostBlockAdamStates[blockIndex];
+            hostBlock.queryWeightState = states.queryWeight;
+            hostBlock.keyWeightState = states.keyWeight;
+            hostBlock.valueWeightState = states.valueWeight;
+            hostBlock.attentionOutputWeightState = states.attentionOutputWeight;
+            hostBlock.attentionNormGammaState = states.attentionNormGamma;
+            hostBlock.feedForwardNormGammaState = states.feedForwardNormGamma;
+            hostBlock.feedForwardGateWeightState = states.feedForwardGateWeight;
+            hostBlock.feedForwardGateBiasState = states.feedForwardGateBias;
+            hostBlock.feedForwardUpWeightState = states.feedForwardUpWeight;
+            hostBlock.feedForwardUpBiasState = states.feedForwardUpBias;
+            hostBlock.feedForwardDownWeightState = states.feedForwardDownWeight;
+            hostBlock.feedForwardDownBiasState = states.feedForwardDownBias;
+        }
+        return;
+    }
+
     auto downloadOrZero = [](const CudaAdamState& state, AdamState& hostState, size_t rows, size_t cols) {
         if (state.empty()) {
             hostState = AdamState::zerosLike(Matrix(rows, cols, 0.0f));
@@ -341,6 +404,37 @@ void CudaLanguageModel::uploadOptimizerFrom(const LanguageModel& host) {
     this->adam.beta2 = host.optimizer.beta2;
     this->adam.epsilon = host.optimizer.epsilon;
     this->adam.timeStep = host.optimizer.timeStep;
+
+    if (CudaAdam::preferCpuOffload) {
+        this->hostTokenEmbeddingState = host.tokenEmbeddingState;
+        this->hostFinalNormGammaState = host.finalNormGammaState;
+        if (this->tieEmbeddingProjection)
+            this->hostProjectionWeightState = AdamState{};
+        else
+            this->hostProjectionWeightState = host.projectionWeightState;
+        this->hostProjectionBiasState = host.projectionBiasState;
+
+        if (this->hostBlockAdamStates.size() != this->blocks.size())
+            this->hostBlockAdamStates.resize(this->blocks.size());
+
+        for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+            const TransformerBlock& hostBlock = host.blocks[blockIndex];
+            CudaTransformerBlockHostAdamStates& states = this->hostBlockAdamStates[blockIndex];
+            states.queryWeight = hostBlock.queryWeightState;
+            states.keyWeight = hostBlock.keyWeightState;
+            states.valueWeight = hostBlock.valueWeightState;
+            states.attentionOutputWeight = hostBlock.attentionOutputWeightState;
+            states.attentionNormGamma = hostBlock.attentionNormGammaState;
+            states.feedForwardNormGamma = hostBlock.feedForwardNormGammaState;
+            states.feedForwardGateWeight = hostBlock.feedForwardGateWeightState;
+            states.feedForwardGateBias = hostBlock.feedForwardGateBiasState;
+            states.feedForwardUpWeight = hostBlock.feedForwardUpWeightState;
+            states.feedForwardUpBias = hostBlock.feedForwardUpBiasState;
+            states.feedForwardDownWeight = hostBlock.feedForwardDownWeightState;
+            states.feedForwardDownBias = hostBlock.feedForwardDownBiasState;
+        }
+        return;
+    }
 
     this->tokenEmbeddingState.uploadFrom(host.tokenEmbeddingState);
     this->finalNormGammaState.uploadFrom(host.finalNormGammaState);
@@ -727,6 +821,48 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
     }
 
     this->adam.step();
+
+    if (CudaAdam::preferCpuOffload) {
+        if (this->hostBlockAdamStates.size() != this->blocks.size())
+            this->hostBlockAdamStates.resize(this->blocks.size());
+
+        auto updateHost = [this, effectiveGradientScale](CudaMatrix& parameter, AdamState& state, const CudaMatrix& gradient) {
+            if (parameter.elementCount() == 0) throw std::invalid_argument("CudaLanguageModel::applyGradients empty parameter");
+            if (gradient.elementCount() != parameter.elementCount())
+                throw std::invalid_argument("CudaLanguageModel::applyGradients gradient/parameter size mismatch");
+            this->adam.updateCpuOffloaded(parameter, state, gradient, effectiveGradientScale);
+        };
+
+        if (!this->tieEmbeddingProjection)
+            updateHost(this->projectionWeight, this->hostProjectionWeightState, gradients.projectionWeight);
+        updateHost(this->projectionBias, this->hostProjectionBiasState, gradients.projectionBias);
+        updateHost(this->finalNorm.gamma, this->hostFinalNormGammaState, gradients.finalNormGamma);
+
+        for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+            CudaTransformerBlock& block = this->blocks[blockIndex];
+            CudaTransformerBlockGradients& blockGradients = gradients.blocks[blockIndex];
+            CudaTransformerBlockHostAdamStates& blockStates = this->hostBlockAdamStates[blockIndex];
+
+            updateHost(block.attention.queryWeight, blockStates.queryWeight, blockGradients.queryWeight);
+            updateHost(block.attention.keyWeight, blockStates.keyWeight, blockGradients.keyWeight);
+            updateHost(block.attention.valueWeight, blockStates.valueWeight, blockGradients.valueWeight);
+            updateHost(block.attention.outputWeight, blockStates.attentionOutputWeight, blockGradients.attentionOutputWeight);
+            updateHost(block.attentionNorm.gamma, blockStates.attentionNormGamma, blockGradients.attentionNormGamma);
+            updateHost(block.feedForwardNorm.gamma, blockStates.feedForwardNormGamma, blockGradients.feedForwardNormGamma);
+            updateHost(block.feedForward.gateWeight, blockStates.feedForwardGateWeight, blockGradients.feedForwardGateWeight);
+            updateHost(block.feedForward.gateBias, blockStates.feedForwardGateBias, blockGradients.feedForwardGateBias);
+            updateHost(block.feedForward.upWeight, blockStates.feedForwardUpWeight, blockGradients.feedForwardUpWeight);
+            updateHost(block.feedForward.upBias, blockStates.feedForwardUpBias, blockGradients.feedForwardUpBias);
+            updateHost(block.feedForward.downWeight, blockStates.feedForwardDownWeight, blockGradients.feedForwardDownWeight);
+            updateHost(block.feedForward.downBias, blockStates.feedForwardDownBias, blockGradients.feedForwardDownBias);
+        }
+
+        updateHost(this->tokenEmbeddingWeight, this->hostTokenEmbeddingState, gradients.tokenEmbedding);
+
+        if (CudaAmp::lossScalingActive())
+            CudaAmp::lossScaler.updateOnSuccess();
+        return;
+    }
 
     auto ensureMoments = [](CudaAdamState& state, const CudaMatrix& parameter) {
         if (!state.empty()) return;

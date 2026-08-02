@@ -36,6 +36,9 @@ public:
 
     /// <summary>allocate zero moments matching parameter shape FP32</summary>
     static CudaAdamState zerosLike(const CudaMatrix& parameter);
+
+    /// <summary>release all device moment storage</summary>
+    void free();
 };
 
 /// <summary>one parameter tensor for a packed multi-tensor Adam launch</summary>
@@ -67,6 +70,11 @@ public:
     /// <summary>store Adam moments as int8 + scales — default on for consumer VRAM</summary>
     static bool preferInt8Moments;
 
+    /// <summary>
+    /// ZeRO-Offload Stage-1 style: keep Adam m/v on host RAM (mutually exclusive with preferInt8Moments for train wiring)
+    /// </summary>
+    static bool preferCpuOffload;
+
     /// <summary>absmax quantization block size for int8 moments</summary>
     static int int8BlockSize;
 
@@ -80,6 +88,12 @@ public:
 
     /// <summary>one launch updating many parameter tensors; gradientScale multiplies grads in-kernel</summary>
     void updateMany(const CudaAdamUpdateItem* items, int itemCount, float gradientScale = 1.0f) const;
+
+    /// <summary>
+    /// CPU-offloaded Adam: D2H param+grad (pinned), host Adam::update into hostState, H2D param
+    /// device CudaAdamState is unused; call step() first like update()
+    /// </summary>
+    void updateCpuOffloaded(CudaMatrix& parameter, AdamState& hostState, const CudaMatrix& gradient, float gradientScale = 1.0f) const;
 
     /// <summary>compare host Adam vs device Adam one update step</summary>
     static void runSmokeDemo(int parameterRows = 128, int parameterCols = 64);
