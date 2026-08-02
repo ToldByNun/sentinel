@@ -307,7 +307,7 @@ int main() {
             LanguageModel host(vocab, embeddingDim, maximumPositionCount, Adam(0.001f), blockCount, headCount);
             CudaLanguageModel device = CudaLanguageModel::createFrom(host);
             device.adam = CudaAdam(0.001f);
-            device.activationCheckpointing = false;
+            device.setActivationCheckpointMode(ActivationCheckpointMode::Off);
             device.preferTrainGraph = true;
             device.maxPackedColumnsManual = false;
             device.applyVramPackBudget(0.58f, 1024ull * 1024ull * 1024ull);
@@ -399,7 +399,7 @@ int main() {
             LanguageModel host(vocab, embeddingDim, maximumPositionCount, Adam(0.001f), blockCount, headCount);
             CudaLanguageModel device = CudaLanguageModel::createFrom(host);
             device.adam = CudaAdam(0.001f);
-            device.activationCheckpointing = false;
+            device.setActivationCheckpointMode(ActivationCheckpointMode::Off);
             device.preferTrainGraph = true;
             device.maxPackedColumnsManual = false;
             device.applyVramPackBudget();
@@ -521,7 +521,7 @@ int main() {
             LanguageModel host(vocab, embeddingDim, maximumPositionCount, Adam(0.001f), blockCount, headCount);
             CudaLanguageModel device = CudaLanguageModel::createFrom(host);
             device.adam = CudaAdam(0.001f);
-            device.activationCheckpointing = false;
+            device.setActivationCheckpointMode(ActivationCheckpointMode::Off);
             device.maxPackedColumnsManual = false;
             device.applyVramPackBudget();
             for (CudaTransformerBlock& block : device.blocks)
@@ -608,7 +608,7 @@ int main() {
             LanguageModel host(vocab, embeddingDim, maximumPositionCount, Adam(0.001f), blockCount, headCount);
             CudaLanguageModel device = CudaLanguageModel::createFrom(host);
             device.adam = CudaAdam(0.001f);
-            device.activationCheckpointing = false;
+            device.setActivationCheckpointMode(ActivationCheckpointMode::Off);
             device.maxPackedColumnsManual = false;
             device.applyVramPackBudget();
             for (CudaTransformerBlock& block : device.blocks)
@@ -695,7 +695,7 @@ int main() {
             LanguageModel host(vocab, embeddingDim, maximumPositionCount, Adam(0.001f), blockCount, headCount);
             CudaLanguageModel device = CudaLanguageModel::createFrom(host);
             device.adam = CudaAdam(0.001f);
-            device.activationCheckpointing = false;
+            device.setActivationCheckpointMode(ActivationCheckpointMode::Off);
             device.maxPackedColumnsManual = false;
             device.applyVramPackBudget();
             for (CudaTransformerBlock& block : device.blocks)
@@ -788,7 +788,7 @@ int main() {
 
             CudaLanguageModel device = CudaLanguageModel::createFrom(host);
             device.adam = CudaAdam(0.001f);
-            device.activationCheckpointing = false;
+            device.setActivationCheckpointMode(ActivationCheckpointMode::Off);
             device.maxPackedColumnsManual = false;
             const size_t pendingStatic = device.estimatePendingTrainStaticBytes();
             device.applyVramPackBudget();
@@ -917,7 +917,8 @@ int main() {
 
             CudaLanguageModel device = CudaLanguageModel::createFrom(host);
             device.adam = CudaAdam(0.001f);
-            device.activationCheckpointing = checkpointing;
+            device.setActivationCheckpointMode(
+                checkpointing ? ActivationCheckpointMode::Selective : ActivationCheckpointMode::Off);
             device.maxPackedColumnsManual = false;
             device.applyVramPackBudget();
             for (CudaTransformerBlock& block : device.blocks)

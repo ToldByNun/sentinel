@@ -171,12 +171,21 @@ public:
 
     int gradientAccumulationSteps;
 
-    /// <summary>recompute block activations during backward default on for train</summary>
-
-    bool activationCheckpointing;
+    /// <summary>Off / Full (recompute whole block) / Selective (attn recompute, FFN keep)</summary>
+    ActivationCheckpointMode activationCheckpointMode;
 
     /// <summary>capture fixed-shape packed microsteps into a CUDA Graph after warmup</summary>
     bool preferTrainGraph;
+
+    /// <summary>true when mode is Full or Selective</summary>
+    bool activationCheckpointingActive() const;
+
+    /// <summary>set checkpoint mode; Off releases saved block inputs</summary>
+    void setActivationCheckpointMode(ActivationCheckpointMode mode);
+
+    /// <summary>log label for mode</summary>
+    static const char* activationCheckpointModeName(ActivationCheckpointMode mode);
+
 
 
 

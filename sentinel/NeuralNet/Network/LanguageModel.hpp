@@ -17,6 +17,13 @@
 class CudaLanguageModel;
 class LanguageModel;
 
+/// <summary>device train activation checkpoint policy</summary>
+enum class ActivationCheckpointMode {
+    Off = 0,
+    Full = 1,
+    Selective = 2
+};
+
 /// <summary>thread local caches for one LM forward/backward</summary>
 class LanguageModelCache {
 public:
@@ -87,8 +94,11 @@ public:
     /// <summary>opt in to sequential device training instead of OpenMP host training</summary>
     void enableCudaTrain();
 
-    /// <summary>recompute transformer block activations on device backward</summary>
+    /// <summary>recompute transformer block activations on device backward (true → Selective, false → Off)</summary>
     void enableActivationCheckpointing(bool enabled = true);
+
+    /// <summary>Off / Full / Selective activation checkpointing on the device train mirror</summary>
+    void setActivationCheckpointMode(ActivationCheckpointMode mode);
 
     /// <summary>FP16 GEMMs with dynamic loss scaling for consumer GPU train</summary>
     void setCudaPreferMixedPrecision(bool enabled);
