@@ -1616,7 +1616,7 @@ void CudaLanguageModel::runTrainCpuAdamOffloadSmokeDemo(int vocabularySize, int 
     CudaAdam::preferCpuOffload = previousCpuOffload;
 }
 
-void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim, int sequenceLength, int blockCount, int headCount, bool preferFlash, int maxPackedColumns) {
+void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim, int sequenceLength, int blockCount, int headCount, bool preferFlash, int maxPackedColumns, int packBatchSize, bool activationCheckpointing) {
     if (!CudaMatmul::isAvailable()) {
         SmokeLog::skip("LanguageModel profile");
         return;
@@ -1624,11 +1624,21 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
     if (vocabularySize <= 0 || embeddingDim <= 0 || sequenceLength <= 0 || blockCount <= 0 || headCount <= 0)
         throw std::invalid_argument("CudaLanguageModel::runTrainProfileDemo invalid dims");
 
+    const bool previousAmp = CudaAmp::preferMixedPrecision;
+    const bool previousLossScaling = CudaAmp::useLossScaling;
+    const bool previousInt8 = CudaAdam::preferInt8Moments;
+    const bool previousCpu = CudaAdam::preferCpuOffload;
+
     LanguageModel host(vocabularySize, embeddingDim, sequenceLength, Adam(0.001f), blockCount, headCount);
     CudaLanguageModel device = CudaLanguageModel::createFrom(host);
     device.adam = CudaAdam(host.optimizer.learningRate, host.optimizer.beta1, host.optimizer.beta2, host.optimizer.epsilon);
-    if (maxPackedColumns > 0)
+    if (maxPackedColumns > 0) {
         device.maxPackedColumns = maxPackedColumns;
+        device.maxPackedColumnsManual = true;
+    } else {
+        device.maxPackedColumnsManual = false;
+        device.applyVramPackBudget();
+    }
     for (CudaTransformerBlock& block : device.blocks) {
         block.attention.preferFlashAttention = preferFlash;
         if (preferFlash)
@@ -1636,18 +1646,23 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
         else
             block.attention.releaseFlashAttentionScratch();
     }
-    const bool previousAmp = CudaAmp::preferMixedPrecision;
-    const bool previousLossScaling = CudaAmp::useLossScaling;
+
     CudaAmp::preferMixedPrecision = true;
     CudaAmp::useLossScaling = embeddingDim >= 256;
     if (CudaAmp::useLossScaling)
         CudaAmp::resetLossScaler();
-    device.activationCheckpointing = true;
+    CudaAdam::preferCpuOffload = false;
+    CudaAdam::preferInt8Moments = true;
+    device.activationCheckpointing = activationCheckpointing;
     device.ensureTrainState();
     device.ensureTrainWorkspaces();
     device.epochLossSum.ensureSize(1, 1);
 
-    const int packBatchSize = (std::max)(1, (std::min)(16, device.maxPackedColumns / sequenceLength));
+    const int maxPackByCols = (std::max)(1, device.maxPackedColumns / sequenceLength);
+    int resolvedPack = packBatchSize > 0 ? packBatchSize : 32;
+    resolvedPack = (std::max)(1, (std::min)(resolvedPack, maxPackByCols));
+    packBatchSize = resolvedPack;
+
     std::vector<LanguageModelExample> examples(static_cast<size_t>(packBatchSize));
     unsigned state = 211u;
     for (int exampleIndex = 0; exampleIndex < packBatchSize; ++exampleIndex) {
@@ -1665,13 +1680,7 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
     for (int exampleIndex = 0; exampleIndex < packBatchSize; ++exampleIndex)
         packPointers[static_cast<size_t>(exampleIndex)] = &examples[static_cast<size_t>(exampleIndex)];
 
-    device.packedInputTokenIds.clear();
-    device.packedTargetTokenIds.clear();
-    for (int exampleIndex = 0; exampleIndex < packBatchSize; ++exampleIndex) {
-        device.packedInputTokenIds.insert(device.packedInputTokenIds.end(), examples[static_cast<size_t>(exampleIndex)].inputTokenIds.begin(), examples[static_cast<size_t>(exampleIndex)].inputTokenIds.end());
-        device.packedTargetTokenIds.insert(device.packedTargetTokenIds.end(), examples[static_cast<size_t>(exampleIndex)].targetTokenIds.begin(), examples[static_cast<size_t>(exampleIndex)].targetTokenIds.end());
-    }
-    const size_t tokenCount = device.packedInputTokenIds.size();
+    const size_t tokenCount = static_cast<size_t>(sequenceLength) * static_cast<size_t>(packBatchSize);
     const int meanDivisor = sequenceLength;
 
     cudaEvent_t startEvent = nullptr;
@@ -1689,15 +1698,15 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
         return milliseconds;
     };
 
-    auto runTimedStep = [&](float& hostPackMs, float& h2dMs, float& embedMs, float& attnMs, float& ffnMs, float& headFwdMs, float& ceMs, float& headBwdMs, float& attnBwdMs, float& ffnBwdMs, float& scatterMs, float& adamMs) {
+    auto runTimedStep = [&](float& hostPackMs, float& h2dMs, float& embedMs, float& attnMs, float& ffnMs, float& finalNormMs, float& chunkedHeadCeMs, float& finalNormBwdMs, float& attnBwdMs, float& ffnBwdMs, float& scatterMs, float& adamMs) {
         hostPackMs = 0.0f;
         h2dMs = 0.0f;
         embedMs = 0.0f;
         attnMs = 0.0f;
         ffnMs = 0.0f;
-        headFwdMs = 0.0f;
-        ceMs = 0.0f;
-        headBwdMs = 0.0f;
+        finalNormMs = 0.0f;
+        chunkedHeadCeMs = 0.0f;
+        finalNormBwdMs = 0.0f;
         attnBwdMs = 0.0f;
         ffnBwdMs = 0.0f;
         scatterMs = 0.0f;
@@ -1706,9 +1715,15 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
         const auto hostPackStart = std::chrono::steady_clock::now();
         device.packedInputTokenIds.clear();
         device.packedTargetTokenIds.clear();
+        device.packedMeanDivisors.clear();
+        device.packedInputTokenIds.reserve(tokenCount);
+        device.packedTargetTokenIds.reserve(tokenCount);
+        device.packedMeanDivisors.reserve(tokenCount);
         for (int exampleIndex = 0; exampleIndex < packBatchSize; ++exampleIndex) {
             device.packedInputTokenIds.insert(device.packedInputTokenIds.end(), examples[static_cast<size_t>(exampleIndex)].inputTokenIds.begin(), examples[static_cast<size_t>(exampleIndex)].inputTokenIds.end());
             device.packedTargetTokenIds.insert(device.packedTargetTokenIds.end(), examples[static_cast<size_t>(exampleIndex)].targetTokenIds.begin(), examples[static_cast<size_t>(exampleIndex)].targetTokenIds.end());
+            for (int position = 0; position < sequenceLength; ++position)
+                device.packedMeanDivisors.push_back(meanDivisor);
         }
         hostPackMs = static_cast<float>(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - hostPackStart).count());
 
@@ -1716,7 +1731,11 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
 
         h2dMs += gpuMs([&]() {
             device.tokenIdsBuffer.ensureCapacity(tokenCount);
+            device.targetTokenIdsBuffer.ensureCapacity(tokenCount);
+            device.meanDivisorBuffer.ensureCapacity(tokenCount);
             device.tokenIdsBuffer.copyFromHost(device.packedInputTokenIds.data(), tokenCount);
+            device.targetTokenIdsBuffer.copyFromHost(device.packedTargetTokenIds.data(), tokenCount);
+            device.meanDivisorBuffer.copyFromHost(device.packedMeanDivisors.data(), tokenCount);
         });
 
         embedMs += gpuMs([&]() {
@@ -1727,7 +1746,7 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
             CudaTransformerBlock& block = device.blocks[blockIndex];
             attnMs += gpuMs([&]() {
                 block.attentionNorm.forward(device.hidden, block.attentionInput);
-                block.attention.forward(block.attentionInput, block.attended, meanDivisor);
+                block.attention.forward(block.attentionInput, block.attended, sequenceLength);
                 CudaOps::addInto(device.hidden, block.attended, block.afterAttention);
             });
             ffnMs += gpuMs([&]() {
@@ -1740,30 +1759,16 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
             device.normalized = std::move(swapBuffer);
         }
 
-        headFwdMs += gpuMs([&]() {
+        finalNormMs += gpuMs([&]() {
             device.finalNorm.forward(device.hidden, device.normalized);
-            CudaMatrix::multiplyInto(device.lmHeadWeight(), device.normalized, device.logits);
-            CudaOps::broadcastBiasAddInPlace(device.logits, device.projectionBias);
         });
 
-        h2dMs += gpuMs([&]() {
-            device.targetTokenIdsBuffer.ensureCapacity(tokenCount);
-            device.targetTokenIdsBuffer.copyFromHost(device.packedTargetTokenIds.data(), tokenCount);
+        // Production CE path: single-pass / chunked LM head + grads into hiddenGradient
+        chunkedHeadCeMs += gpuMs([&]() {
+            device.accumulateChunkedProjection(tokenCount, sequenceLength, packBatchSize, device.trainGradients);
         });
 
-        ceMs += gpuMs([&]() {
-            CudaOps::softmaxCrossEntropyFromLogitsInto(device.logits, device.targetTokenIdsBuffer, tokenCount, device.probabilities, device.logitGradient, device.epochLossSum, 1.0f, meanDivisor);
-        });
-
-        headBwdMs += gpuMs([&]() {
-            CudaMatrix::multiplyInto(device.logitGradient, device.normalized, device.projectionWeightGradient, false, true);
-            if (device.tieEmbeddingProjection)
-                CudaOps::addInPlace(device.trainGradients.tokenEmbedding, device.projectionWeightGradient);
-            else
-                CudaOps::addInPlace(device.trainGradients.projectionWeight, device.projectionWeightGradient);
-            CudaOps::sumColumnsInto(device.logitGradient, device.projectionBiasGradient);
-            CudaOps::addInPlace(device.trainGradients.projectionBias, device.projectionBiasGradient);
-            CudaMatrix::multiplyInto(device.lmHeadWeight(), device.logitGradient, device.hiddenGradient, true, false);
+        finalNormBwdMs += gpuMs([&]() {
             device.finalNorm.backward(device.hiddenGradient, device.normInputGradientScratch, device.finalNormGammaGradient);
             CudaOps::addInPlace(device.trainGradients.finalNormGamma, device.finalNormGammaGradient);
             std::swap(device.hiddenGradient, device.normInputGradientScratch);
@@ -1812,21 +1817,21 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
     for (int warm = 0; warm < 3; ++warm)
         runTimedStep(discard[0], discard[1], discard[2], discard[3], discard[4], discard[5], discard[6], discard[7], discard[8], discard[9], discard[10], discard[11]);
 
-    float sumHostPack = 0.0f, sumH2d = 0.0f, sumEmbed = 0.0f, sumAttn = 0.0f, sumFfn = 0.0f, sumHeadFwd = 0.0f;
-    float sumCe = 0.0f, sumHeadBwd = 0.0f, sumAttnBwd = 0.0f, sumFfnBwd = 0.0f, sumScatter = 0.0f, sumAdam = 0.0f;
+    float sumHostPack = 0.0f, sumH2d = 0.0f, sumEmbed = 0.0f, sumAttn = 0.0f, sumFfn = 0.0f, sumFinalNorm = 0.0f;
+    float sumChunkedHeadCe = 0.0f, sumFinalNormBwd = 0.0f, sumAttnBwd = 0.0f, sumFfnBwd = 0.0f, sumScatter = 0.0f, sumAdam = 0.0f;
     const int timedStepCount = 20;
     for (int step = 0; step < timedStepCount; ++step) {
-        float hostPackMs, h2dMs, embedMs, attnMs, ffnMs, headFwdMs, ceMs, headBwdMs, attnBwdMs, ffnBwdMs, scatterMs, adamMs;
+        float hostPackMs, h2dMs, embedMs, attnMs, ffnMs, finalNormMs, chunkedHeadCeMs, finalNormBwdMs, attnBwdMs, ffnBwdMs, scatterMs, adamMs;
         CudaOps::zeroInPlace(device.epochLossSum);
-        runTimedStep(hostPackMs, h2dMs, embedMs, attnMs, ffnMs, headFwdMs, ceMs, headBwdMs, attnBwdMs, ffnBwdMs, scatterMs, adamMs);
+        runTimedStep(hostPackMs, h2dMs, embedMs, attnMs, ffnMs, finalNormMs, chunkedHeadCeMs, finalNormBwdMs, attnBwdMs, ffnBwdMs, scatterMs, adamMs);
         sumHostPack += hostPackMs;
         sumH2d += h2dMs;
         sumEmbed += embedMs;
         sumAttn += attnMs;
         sumFfn += ffnMs;
-        sumHeadFwd += headFwdMs;
-        sumCe += ceMs;
-        sumHeadBwd += headBwdMs;
+        sumFinalNorm += finalNormMs;
+        sumChunkedHeadCe += chunkedHeadCeMs;
+        sumFinalNormBwd += finalNormBwdMs;
         sumAttnBwd += attnBwdMs;
         sumFfnBwd += ffnBwdMs;
         sumScatter += scatterMs;
@@ -1837,12 +1842,12 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
     cudaEventDestroy(stopEvent);
 
     const float inv = 1.0f / static_cast<float>(timedStepCount);
-    sumHostPack *= inv; sumH2d *= inv; sumEmbed *= inv; sumAttn *= inv; sumFfn *= inv; sumHeadFwd *= inv;
-    sumCe *= inv; sumHeadBwd *= inv; sumAttnBwd *= inv; sumFfnBwd *= inv; sumScatter *= inv; sumAdam *= inv;
+    sumHostPack *= inv; sumH2d *= inv; sumEmbed *= inv; sumAttn *= inv; sumFfn *= inv; sumFinalNorm *= inv;
+    sumChunkedHeadCe *= inv; sumFinalNormBwd *= inv; sumAttnBwd *= inv; sumFfnBwd *= inv; sumScatter *= inv; sumAdam *= inv;
 
     const float attnTotal = sumAttn + sumAttnBwd;
     const float ffnTotal = sumFfn + sumFfnBwd;
-    const float headTotal = sumHeadFwd + sumHeadBwd + sumCe;
+    const float headTotal = sumFinalNorm + sumChunkedHeadCe + sumFinalNormBwd;
     const float otherTotal = sumHostPack + sumH2d + sumEmbed + sumScatter + sumAdam;
     const float stepTotal = attnTotal + ffnTotal + headTotal + otherTotal;
     const float percent = stepTotal > 0.0f ? (100.0f / stepTotal) : 0.0f;
@@ -1850,18 +1855,26 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
     const float tokensPerSecond = stepTotal > 0.0f ? (1000.0f * static_cast<float>(tokensPerStep) / stepTotal) : 0.0f;
 
     SmokeLog::section("train profile");
-    SmokeLog::result("profile config", "vocab=%d embed=%d seq=%d blocks=%d pack=%d tokens/step=%d flash=%s amp=%s maxPackCols=%d lossScale=%.0f",
-        vocabularySize, embeddingDim, sequenceLength, blockCount, packBatchSize, tokensPerStep, preferFlash ? "on" : "off",
-        CudaAmp::preferMixedPrecision ? "on" : "off", device.maxPackedColumns, CudaAmp::lossScaler.scale);
+    SmokeLog::result("profile config", "vocab=%d embed=%d seq=%d blocks=%d heads=%d pack=%d tokens/step=%d flash=%s amp=%s int8Adam=%s ckpt=%s ce=chunked maxPackCols=%d lossScale=%.0f",
+        vocabularySize, embeddingDim, sequenceLength, blockCount, headCount, packBatchSize, tokensPerStep,
+        preferFlash ? "on" : "off",
+        CudaAmp::preferMixedPrecision ? "on" : "off",
+        CudaAdam::preferInt8Moments ? "on" : "off",
+        activationCheckpointing ? "on" : "off",
+        device.maxPackedColumns, CudaAmp::lossScaler.scale);
     SmokeLog::result("profile step", "avg=%.2fms  ~tokens/s=%.0f", stepTotal, tokensPerSecond);
     SmokeLog::result("  attention", "fwd=%.2fms bwd=%.2fms  total=%.2fms (%.0f%%)", sumAttn, sumAttnBwd, attnTotal, attnTotal * percent);
     SmokeLog::result("  ffn", "fwd=%.2fms bwd=%.2fms  total=%.2fms (%.0f%%)", sumFfn, sumFfnBwd, ffnTotal, ffnTotal * percent);
-    SmokeLog::result("  head+ce", "fwd=%.2fms ce=%.2fms bwd=%.2fms  total=%.2fms (%.0f%%)", sumHeadFwd, sumCe, sumHeadBwd, headTotal, headTotal * percent);
+    SmokeLog::result("  head+ce", "finalNorm=%.2fms chunkedHeadCe=%.2fms finalNormBwd=%.2fms  total=%.2fms (%.0f%%)",
+        sumFinalNorm, sumChunkedHeadCe, sumFinalNormBwd, headTotal, headTotal * percent);
     SmokeLog::result("  embed+h2d", "embed=%.2fms scatter=%.2fms h2d=%.2fms hostPack=%.2fms", sumEmbed, sumScatter, sumH2d, sumHostPack);
     SmokeLog::result("  adam", "%.2fms (%.0f%%)", sumAdam, sumAdam * percent);
     SmokeLog::result("  other sum", "%.2fms (%.0f%%)", otherTotal, otherTotal * percent);
+
     CudaAmp::preferMixedPrecision = previousAmp;
     CudaAmp::useLossScaling = previousLossScaling;
+    CudaAdam::preferInt8Moments = previousInt8;
+    CudaAdam::preferCpuOffload = previousCpu;
 }
 
 void CudaLanguageModel::uploadFrom(const LanguageModel& host) {
