@@ -125,14 +125,14 @@ int main() {
 
     model.enableCuda();
     model.enableCudaTrain();
-    model.setCudaMaxPackedColumns(8192);
     model.setCudaPreferFlashAttention(true);
-    SmokeLog::result("model", "blocks=%zu  heads=%d  cuda=%s  train=%s  maxTok=%zu maxPackCols=8192 flash=on stream=on",
+    SmokeLog::result("model", "blocks=%zu  heads=%d  cuda=%s  train=%s  maxTok=%zu maxPackCols=%d flash=on stream=on",
         model.blocks.size(),
         model.blocks[0].attention.headCount,
         model.cudaEnabled() ? "on" : "off",
         model.cudaTrainEnabled() ? "cuda" : "cpu-openmp",
-        maximumTokenCount);
+        maximumTokenCount,
+        model.cudaMaxPackedColumns());
 
     if (model.cudaEnabled()) {
         Matrix deviceLogits = model.forward(parityTokenIds);

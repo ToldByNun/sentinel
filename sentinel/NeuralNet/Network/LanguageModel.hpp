@@ -90,8 +90,11 @@ public:
     /// <summary>FP16 GEMMs with dynamic loss scaling for consumer GPU train</summary>
     void setCudaPreferMixedPrecision(bool enabled);
 
-    /// <summary>cap packed token columns on device train</summary>
+    /// <summary>cap packed token columns on device train (marks manual; skips auto VRAM budget)</summary>
     void setCudaMaxPackedColumns(int columns);
+
+    /// <summary>current device maxPackedColumns (0 if no device)</summary>
+    int cudaMaxPackedColumns() const;
 
     /// <summary>vocab rows per chunked CE/LM-head pass</summary>
     void setCudaLogitChunkRows(int rows);

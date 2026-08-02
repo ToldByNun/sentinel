@@ -69,11 +69,11 @@ JSONL is read once and tokenized into compact examples (peak text RAM only durin
 ```cpp
 LanguageModel model(vocab, embedDim, maxPos, Adam(0.001f), blocks, heads);
 model.enableCuda();
-model.enableCudaTrain();          // packed batches, checkpointing, AMP
-model.setCudaMaxPackedColumns(8192);
+model.enableCudaTrain();          // packed batches, checkpointing, AMP, auto VRAM pack budget
 model.setCudaPreferFlashAttention(true);
 model.train(trainSet, testSet, epochs, logEvery, batchSize, gradAccum);
 ```
 
+- `enableCudaTrain` sets `maxPackedColumns` from free GPU memory (`applyVramPackBudget`). Override with `setCudaMaxPackedColumns(n)` (marks manual; auto will not overwrite).
 - AMP loss scaling only kicks in for larger embed dims (when FP16 GEMMs can run).
 - 8-bit Adam moments default on: `setCudaPreferInt8AdamMoments(false)` to disable.

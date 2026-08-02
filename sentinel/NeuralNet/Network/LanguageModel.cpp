@@ -116,11 +116,13 @@ void LanguageModel::enableCudaTrain() {
     CudaAmp::resetLossScaler();
     // int8 moments default-on for consumer VRAM; opt-out via setCudaPreferInt8AdamMoments(false)
     CudaAdam::preferInt8Moments = true;
+    this->device->applyVramPackBudget();
     this->device->ensureTrainState();
     std::cout << "LanguageModel::enableCudaTrain: device training enabled (packed batches, checkpointing on, FP16 amp "
               << (CudaAmp::preferMixedPrecision ? "on" : "off")
               << ", lossScale=" << (CudaAmp::useLossScaling ? "on" : "off")
-              << ", int8 adam " << (CudaAdam::preferInt8Moments ? "on" : "off") << ")\n";
+              << ", int8 adam " << (CudaAdam::preferInt8Moments ? "on" : "off")
+              << ", maxPackCols=" << this->device->maxPackedColumns << ")\n";
 }
 
 void LanguageModel::enableActivationCheckpointing(bool enabled) {
@@ -153,6 +155,7 @@ void LanguageModel::setCudaMaxPackedColumns(int columns) {
     if (this->device == nullptr) return;
     if (columns <= 0) throw std::invalid_argument("LanguageModel::setCudaMaxPackedColumns columns must be > 0");
     this->device->maxPackedColumns = columns;
+    this->device->maxPackedColumnsManual = true;
     if (this->deviceTrainEnabled)
         this->device->ensureTrainWorkspaces();
 }
@@ -193,6 +196,11 @@ bool LanguageModel::cudaEnabled() const {
 
 bool LanguageModel::cudaTrainEnabled() const {
     return this->device != nullptr && this->deviceTrainEnabled;
+}
+
+int LanguageModel::cudaMaxPackedColumns() const {
+    if (this->device == nullptr) return 0;
+    return this->device->maxPackedColumns;
 }
 
 void LanguageModel::syncDevice() {
