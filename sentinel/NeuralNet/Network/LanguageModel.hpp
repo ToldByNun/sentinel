@@ -100,6 +100,9 @@ public:
     /// <summary>Off / Full / Selective activation checkpointing on the device train mirror</summary>
     void setActivationCheckpointMode(ActivationCheckpointMode mode);
 
+    /// <summary>current device checkpoint mode (Off if no device)</summary>
+    ActivationCheckpointMode cudaActivationCheckpointMode() const;
+
     /// <summary>FP16 GEMMs with dynamic loss scaling for consumer GPU train</summary>
     void setCudaPreferMixedPrecision(bool enabled);
 

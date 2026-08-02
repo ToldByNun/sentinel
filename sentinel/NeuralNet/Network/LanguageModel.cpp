@@ -278,6 +278,11 @@ void LanguageModel::setActivationCheckpointMode(ActivationCheckpointMode mode) {
               << CudaLanguageModel::activationCheckpointModeName(mode) << '\n';
 }
 
+ActivationCheckpointMode LanguageModel::cudaActivationCheckpointMode() const {
+    if (this->device == nullptr) return ActivationCheckpointMode::Off;
+    return this->device->activationCheckpointMode;
+}
+
 void LanguageModel::setCudaPreferMixedPrecision(bool enabled) {
     if (this->device == nullptr) this->enableCuda();
     if (this->device == nullptr) return;

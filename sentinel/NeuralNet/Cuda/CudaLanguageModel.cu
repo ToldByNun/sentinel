@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cuda_runtime.h>
+#include <memory>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -340,8 +341,8 @@ void CudaLanguageModel::ensureTrainWorkspaces() {
         this->projectionBiasGradient.free();
     }
 
-    // FP16 activation checkpoints when AMP is on (saturated cast); else FP32.
-    // Restore scratch holds one block input in FP32 during backward recompute.
+    // Block-input checkpoints: Full and Selective both save every block input.
+    // Restore scratch is one FP32 buffer used during backward.
     if (!this->activationCheckpointingActive()) {
         this->releaseActivationCheckpoints();
     } else if (this->useHalfActivationCheckpoints()) {
@@ -363,6 +364,8 @@ void CudaLanguageModel::ensureTrainWorkspaces() {
         for (CudaMatrix& checkpoint : this->blockInputCheckpoints)
             checkpoint.ensureSize(embeddingDim, maxColumns);
     }
+    // Attn/FFN column scratch is allocated lazily in block forward; Selective releases
+    // Attn QKV/Flash after each block fwd while keeping FFN acts until bwd.
 }
 
 size_t CudaLanguageModel::bytesPerPackedColumn() const {
@@ -394,19 +397,28 @@ size_t CudaLanguageModel::bytesPerPackedColumn() const {
     if (vocabularySize * floatBytes * 8192ull <= maxCachedLogitsBytes)
         bytes += vocabularySize * floatBytes;
 
+    const size_t blockCount = this->blocks.size();
+    const size_t attnScratchPerBlock = 15ull * embeddingDim * floatBytes;
+    const size_t ffnScratchPerBlock = (8ull * ffnHidden + 4ull * embeddingDim) * floatBytes;
+
     if (this->activationCheckpointingActive()) {
+        // Full + Selective: one saved block input per layer (+ FP32 restore scratch).
         if (this->useHalfActivationCheckpoints())
-            bytes += this->blocks.size() * embeddingDim * 2u
-                + embeddingDim * floatBytes; // restore scratch
+            bytes += blockCount * embeddingDim * 2u + embeddingDim * floatBytes;
         else
-            bytes += this->blocks.size() * embeddingDim * floatBytes;
+            bytes += blockCount * embeddingDim * floatBytes;
     }
 
-    // Each block keeps its own attn/FFN scratch sized to maxPackedColumns (not peak-of-one).
-    // Attn ~ QKV+out+caches+flash+qkvProjected (~15 d); FFN ~ gateUp(2h)+bwd stacked(2h)+gate/up/hidden/act/cache (~8 h + 4 d).
-    const size_t perBlockScratch =
-        (15ull * embeddingDim + 8ull * ffnHidden + 4ull * embeddingDim) * floatBytes;
-    bytes += this->blocks.size() * perBlockScratch;
+    // Column scratch footprint depends on checkpoint mode:
+    // Off/Full: every block may hold Attn+FFN acts after forward (L * (attn+ffn)).
+    // Selective: FFN kept for all blocks; Attn QKV/Flash released after each block
+    //   (peak ~1 Attn workspace during fwd/recompute).
+    if (this->activationCheckpointMode == ActivationCheckpointMode::Selective) {
+        bytes += blockCount * ffnScratchPerBlock;
+        bytes += attnScratchPerBlock;
+    } else {
+        bytes += blockCount * (attnScratchPerBlock + ffnScratchPerBlock);
+    }
 
     // AMP activation half cast scratch (shared, one active gemm).
     bytes += embeddingDim * 2ull;
@@ -521,7 +533,8 @@ void CudaLanguageModel::applyVramPackBudget(float freeFraction, size_t safetyRes
     const double safetyMiB = static_cast<double>(safetyReserveBytes) / (1024.0 * 1024.0);
     const double workspaceMiB = static_cast<double>(perColumn) * static_cast<double>(this->maxPackedColumns) / (1024.0 * 1024.0);
     std::printf(
-        "CudaLanguageModel::applyVramPackBudget: free=%.0f/%.0f MiB  pendingStatic=%.0f safety=%.0f fraction=%.2f  maxPackCols=%d  ~workspace=%.0f MiB\n",
+        "CudaLanguageModel::applyVramPackBudget: ckpt=%s  free=%.0f/%.0f MiB  pendingStatic=%.0f safety=%.0f fraction=%.2f  maxPackCols=%d  ~workspace=%.0f MiB\n",
+        CudaLanguageModel::activationCheckpointModeName(this->activationCheckpointMode),
         freeMiB, totalMiB, pendingMiB, safetyMiB, freeFraction, this->maxPackedColumns, workspaceMiB);
 }
 
@@ -1683,6 +1696,120 @@ void CudaLanguageModel::runTrainSmokeDemo(int vocabularySize, int embeddingDim, 
     CudaAdam::preferInt8Moments = previousInt8;
 }
 
+void CudaLanguageModel::runSelectiveCheckpointParitySmokeDemo(
+    int vocabularySize,
+    int embeddingDim,
+    int sequenceLength,
+    int blockCount,
+    int headCount
+) {
+    if (!CudaMatmul::isAvailable()) {
+        SmokeLog::skip("ckpt Full vs Selective");
+        return;
+    }
+    if (vocabularySize <= 0 || embeddingDim <= 0 || sequenceLength <= 0 || blockCount <= 0 || headCount <= 0)
+        throw std::invalid_argument("CudaLanguageModel::runSelectiveCheckpointParitySmokeDemo invalid dims");
+    if (embeddingDim % headCount != 0)
+        throw std::invalid_argument("CudaLanguageModel::runSelectiveCheckpointParitySmokeDemo embed must divide heads");
+
+    const bool previousAmp = CudaAmp::preferMixedPrecision;
+    const bool previousLossScale = CudaAmp::useLossScaling;
+    const bool previousInt8 = CudaAdam::preferInt8Moments;
+    CudaAmp::preferMixedPrecision = false;
+    CudaAmp::useLossScaling = false;
+    CudaAdam::preferInt8Moments = false;
+
+    // Heap-allocate twin LMs (object too large for two stack locals + grads).
+    auto host = std::make_unique<LanguageModel>(vocabularySize, embeddingDim, sequenceLength, Adam(0.001f), blockCount, headCount);
+    auto fullDevice = std::make_unique<CudaLanguageModel>();
+    fullDevice->uploadFrom(*host);
+    auto selectiveDevice = std::make_unique<CudaLanguageModel>();
+    selectiveDevice->uploadFrom(*host);
+    fullDevice->adam = CudaAdam(0.001f);
+    selectiveDevice->adam = CudaAdam(0.001f);
+    fullDevice->preferTrainGraph = false;
+    selectiveDevice->preferTrainGraph = false;
+    fullDevice->setActivationCheckpointMode(ActivationCheckpointMode::Full);
+    selectiveDevice->setActivationCheckpointMode(ActivationCheckpointMode::Selective);
+    // Dense attn: isolates ckpt math from Flash packed-path issues on some shapes.
+    for (CudaTransformerBlock& block : fullDevice->blocks)
+        block.attention.preferFlashAttention = false;
+    for (CudaTransformerBlock& block : selectiveDevice->blocks)
+        block.attention.preferFlashAttention = false;
+
+    fullDevice->maxPackedColumns = (std::max)(sequenceLength * 8, sequenceLength);
+    selectiveDevice->maxPackedColumns = fullDevice->maxPackedColumns;
+    fullDevice->ensureTrainState();
+    selectiveDevice->ensureTrainState();
+
+    const int packBatchSize = (std::max)(1, (std::min)(4, fullDevice->maxPackedColumns / sequenceLength));
+    std::vector<LanguageModelExample> examples(static_cast<size_t>(packBatchSize));
+    unsigned state = 409u;
+    for (int exampleIndex = 0; exampleIndex < packBatchSize; ++exampleIndex) {
+        examples[static_cast<size_t>(exampleIndex)].inputTokenIds.resize(static_cast<size_t>(sequenceLength));
+        examples[static_cast<size_t>(exampleIndex)].targetTokenIds.resize(static_cast<size_t>(sequenceLength));
+        for (size_t index = 0; index < static_cast<size_t>(sequenceLength); ++index) {
+            state = state * 1664525u + 1013904223u;
+            examples[static_cast<size_t>(exampleIndex)].inputTokenIds[index] = static_cast<int>(state % static_cast<unsigned>(vocabularySize));
+            state = state * 1664525u + 1013904223u;
+            examples[static_cast<size_t>(exampleIndex)].targetTokenIds[index] = static_cast<int>(state % static_cast<unsigned>(vocabularySize));
+        }
+    }
+
+    std::vector<const LanguageModelExample*> packPointers(static_cast<size_t>(packBatchSize));
+    for (int exampleIndex = 0; exampleIndex < packBatchSize; ++exampleIndex)
+        packPointers[static_cast<size_t>(exampleIndex)] = &examples[static_cast<size_t>(exampleIndex)];
+
+    auto fullGradients = std::make_unique<CudaLanguageModelGradients>();
+    fullGradients->ensureFrom(*fullDevice);
+    fullGradients->zeroInPlace();
+    fullDevice->epochLossSum.ensureSize(1, 1);
+    CudaOps::zeroInPlace(fullDevice->epochLossSum);
+    fullDevice->accumulatePackedExamples(packPointers.data(), packBatchSize, *fullGradients);
+
+    auto selectiveGradients = std::make_unique<CudaLanguageModelGradients>();
+    selectiveGradients->ensureFrom(*selectiveDevice);
+    selectiveGradients->zeroInPlace();
+    selectiveDevice->epochLossSum.ensureSize(1, 1);
+    CudaOps::zeroInPlace(selectiveDevice->epochLossSum);
+    selectiveDevice->accumulatePackedExamples(packPointers.data(), packBatchSize, *selectiveGradients);
+    CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "ckpt parity synchronize");
+
+    const float fullLoss = fullDevice->epochLossSum.download().at(0, 0);
+    const float selectiveLoss = selectiveDevice->epochLossSum.download().at(0, 0);
+    Matrix fullEmbedGrad = fullGradients->tokenEmbedding.download();
+    Matrix selectiveEmbedGrad = selectiveGradients->tokenEmbedding.download();
+    float maxGradDiff = 0.0f;
+    for (size_t index = 0; index < fullEmbedGrad.data.size(); ++index)
+        maxGradDiff = (std::max)(maxGradDiff, std::fabs(fullEmbedGrad.data[index] - selectiveEmbedGrad.data[index]));
+
+    float maxFfnGradDiff = 0.0f;
+    if (!fullGradients->blocks.empty() && !selectiveGradients->blocks.empty()) {
+        Matrix fullDownGrad = fullGradients->blocks[0].feedForwardDownWeight.download();
+        Matrix selectiveDownGrad = selectiveGradients->blocks[0].feedForwardDownWeight.download();
+        for (size_t index = 0; index < fullDownGrad.data.size(); ++index)
+            maxFfnGradDiff = (std::max)(maxFfnGradDiff, std::fabs(fullDownGrad.data[index] - selectiveDownGrad.data[index]));
+    }
+
+    SmokeLog::result(
+        "ckpt Full vs Selective",
+        "vocab=%d embed=%d seq=%d blocks=%d pack=%d  lossFull=%.6f lossSel=%.6f lossDiff=%.2e  embedGradDiff=%.2e ffnDownGradDiff=%.2e",
+        vocabularySize,
+        embeddingDim,
+        sequenceLength,
+        blockCount,
+        packBatchSize,
+        fullLoss,
+        selectiveLoss,
+        std::fabs(fullLoss - selectiveLoss),
+        maxGradDiff,
+        maxFfnGradDiff);
+
+    CudaAmp::preferMixedPrecision = previousAmp;
+    CudaAmp::useLossScaling = previousLossScale;
+    CudaAdam::preferInt8Moments = previousInt8;
+}
+
 void CudaLanguageModel::runTrainInt8AdamSmokeDemo(int vocabularySize, int embeddingDim, int sequenceLength, int blockCount, int headCount) {
     if (!CudaMatmul::isAvailable()) {
         SmokeLog::skip("LanguageModel train int8 Adam");
@@ -2143,8 +2270,7 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
         preferFlash ? "on" : "off",
         CudaAmp::preferMixedPrecision ? "on" : "off",
         CudaAdam::preferInt8Moments ? "on" : "off",
-        CudaLanguageModel::activationCheckpointModeName(
-            activationCheckpointing ? ActivationCheckpointMode::Selective : ActivationCheckpointMode::Off),
+        CudaLanguageModel::activationCheckpointModeName(device.activationCheckpointMode),
         device.maxPackedColumns, CudaAmp::lossScaler.scale);
     SmokeLog::result("profile step", "avg=%.2fms  ~tokens/s=%.0f", stepTotal, tokensPerSecond);
     SmokeLog::result("  attention", "fwd=%.2fms bwd=%.2fms  total=%.2fms (%.0f%%)", sumAttn, sumAttnBwd, attnTotal, attnTotal * percent);
