@@ -78,6 +78,7 @@ model.train(trainSet, testSet, epochs, logEvery, batchSize, gradAccum);
 - AMP on stores **saturated FP16** block-input checkpoints (half VRAM vs FP32; restore scratch is one FP32 buffer). Non-finite activations are zeroed on cast.
 - AMP loss scaling only kicks in for larger embed dims (when FP16 GEMMs can run).
 - 8-bit Adam moments default on: `setCudaPreferInt8AdamMoments(false)` to disable.
+- CPU Adam offload (ZeRO-Offload Stage-1): `setCudaPreferCpuAdamOffload(true)` keeps `m`/`v` in host RAM (disables int8 device moments). Call before or after `enableCudaTrain`; re-inits train state.
 - **Weight tying** default on (`tieEmbeddingProjection`): LM head shares the token embedding matrix (saves ~vocab×embed params + Adam moments). Toggle with `setTieEmbeddingProjection(false)`.
 
 ### Consumer VRAM proof (RTX 5070 Ti 16 GB)
