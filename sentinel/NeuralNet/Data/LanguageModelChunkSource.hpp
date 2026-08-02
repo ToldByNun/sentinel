@@ -66,10 +66,14 @@ public:
     bool isTrainRow(size_t rowIndex) const;
 
 private:
-    bool refillPendingRows();
     bool tryMakeExample(const JsonlRow& row, LanguageModelExample& out) const;
+    bool tryMakeExampleFromText(const std::string& text, LanguageModelExample& out) const;
     std::string truncateText(const std::string& text) const;
     void resetJsonlCursor();
+
+    bool refillPendingRows();
+    /// <summary>encode a batch of truncated texts in parallel, then append train/test examples in order</summary>
+    void encodeBatchIntoDatasets(const std::vector<size_t>& rowIndices, const std::vector<std::string>& texts);
 
     JsonlChunkReader reader;
     std::string path;
@@ -92,7 +96,8 @@ private:
     size_t pendingCursor = 0;
     bool streamExhausted = false;
 
-    static constexpr int rowReadBatch = 256;
+    static constexpr int rowReadBatch = 1024;
+    static constexpr int encodeParallelBatch = 2048;
 };
 
 #endif // LANGUAGEMODELCHUNKSOURCE_HPP

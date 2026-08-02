@@ -3,8 +3,15 @@
 #include "../Utils/TextUtil.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <stdexcept>
 #include <utility>
+#include <vector>
+
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 
 LanguageModelChunkSource::LanguageModelChunkSource(
     std::string path,
@@ -54,16 +61,20 @@ std::string LanguageModelChunkSource::truncateText(const std::string& text) cons
     return TextUtil::truncate(text, this->maximumTextCharacters);
 }
 
-bool LanguageModelChunkSource::tryMakeExample(const JsonlRow& row, LanguageModelExample& out) const {
+bool LanguageModelChunkSource::tryMakeExampleFromText(const std::string& text, LanguageModelExample& out) const {
     if (this->tokenizer == nullptr) throw std::logic_error("LanguageModelChunkSource tokenizer not set");
 
-    std::vector<int> tokenIds = this->tokenizer->encode(this->truncateText(row.text));
+    std::vector<int> tokenIds = this->tokenizer->encode(text);
     if (this->maximumTokenCount > 0 && tokenIds.size() > this->maximumTokenCount)
         tokenIds.resize(this->maximumTokenCount);
     if (tokenIds.size() < 2) return false;
 
     out = LanguageModelDataset::fromTokenIds(tokenIds, this->tokenizer->vocabSize(), false);
     return true;
+}
+
+bool LanguageModelChunkSource::tryMakeExample(const JsonlRow& row, LanguageModelExample& out) const {
+    return this->tryMakeExampleFromText(this->truncateText(row.text), out);
 }
 
 void LanguageModelChunkSource::resetJsonlCursor() {
@@ -116,8 +127,45 @@ std::vector<std::string> LanguageModelChunkSource::prepareTokenizerSample(int ma
     return texts;
 }
 
+void LanguageModelChunkSource::encodeBatchIntoDatasets(const std::vector<size_t>& rowIndices, const std::vector<std::string>& texts) {
+    if (rowIndices.size() != texts.size())
+        throw std::invalid_argument("LanguageModelChunkSource::encodeBatchIntoDatasets size mismatch");
+    if (texts.empty()) return;
+
+    const int batchCount = static_cast<int>(texts.size());
+    std::vector<LanguageModelExample> encoded(static_cast<size_t>(batchCount));
+    std::vector<char> valid(static_cast<size_t>(batchCount), 0);
+
+#if defined(_OPENMP)
+    #pragma omp parallel for schedule(dynamic, 16)
+#endif
+    for (int index = 0; index < batchCount; ++index) {
+        LanguageModelExample example;
+        if (!this->tryMakeExampleFromText(texts[static_cast<size_t>(index)], example))
+            continue;
+        encoded[static_cast<size_t>(index)] = std::move(example);
+        valid[static_cast<size_t>(index)] = 1;
+    }
+
+    for (int index = 0; index < batchCount; ++index) {
+        if (!valid[static_cast<size_t>(index)]) continue;
+
+        LanguageModelExample& example = encoded[static_cast<size_t>(index)];
+        if (this->isTrainRow(rowIndices[static_cast<size_t>(index)])) {
+            this->trainPredictions += static_cast<int>(example.targetTokenIds.size());
+            this->trainExamples.push_back(std::move(example));
+            continue;
+        }
+
+        if (this->testCap > 0 && static_cast<int>(this->testReservoir.examples.size()) < this->testCap)
+            this->testReservoir.examples.push_back(std::move(example));
+    }
+}
+
 void LanguageModelChunkSource::materialize() {
     if (this->tokenizer == nullptr) throw std::logic_error("LanguageModelChunkSource::materialize tokenizer not set");
+
+    const auto start = std::chrono::steady_clock::now();
 
     this->trainExamples.clear();
     this->trainPredictions = 0;
@@ -128,26 +176,45 @@ void LanguageModelChunkSource::materialize() {
 
     this->resetJsonlCursor();
 
-    LanguageModelExample example;
+    std::vector<size_t> batchIndices;
+    std::vector<std::string> batchTexts;
+    batchIndices.reserve(static_cast<size_t>(LanguageModelChunkSource::encodeParallelBatch));
+    batchTexts.reserve(static_cast<size_t>(LanguageModelChunkSource::encodeParallelBatch));
+    size_t rowsSeen = 0;
+
     while (this->refillPendingRows()) {
         const size_t rowIndex = this->pendingBaseIndex + this->pendingCursor;
         const JsonlRow& row = this->pendingRows[this->pendingCursor];
         ++this->pendingCursor;
+        ++rowsSeen;
 
-        if (!this->tryMakeExample(row, example)) continue;
+        batchIndices.push_back(rowIndex);
+        batchTexts.push_back(this->truncateText(row.text));
 
-        if (this->isTrainRow(rowIndex)) {
-            this->trainPredictions += static_cast<int>(example.targetTokenIds.size());
-            this->trainExamples.push_back(std::move(example));
-            continue;
+        if (static_cast<int>(batchTexts.size()) >= LanguageModelChunkSource::encodeParallelBatch) {
+            this->encodeBatchIntoDatasets(batchIndices, batchTexts);
+            batchIndices.clear();
+            batchTexts.clear();
         }
-
-        if (this->testCap > 0 && static_cast<int>(this->testReservoir.examples.size()) < this->testCap)
-            this->testReservoir.examples.push_back(std::move(example));
     }
 
+    this->encodeBatchIntoDatasets(batchIndices, batchTexts);
     this->resetJsonlCursor();
     this->materialized = true;
+
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+#if defined(_OPENMP)
+    const int threads = omp_get_max_threads();
+#else
+    const int threads = 1;
+#endif
+    std::printf(
+        "LanguageModelChunkSource::materialize: rows=%zu train=%d test=%d threads=%d sec=%.2f\n",
+        rowsSeen,
+        this->trainExampleCount(),
+        static_cast<int>(this->testReservoir.examples.size()),
+        threads,
+        seconds);
 }
 
 void LanguageModelChunkSource::prepareTestReservoir() {
