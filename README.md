@@ -54,4 +54,4 @@ model.train(trainSet, testSet, epochs, logEvery, batchSize, gradAccum);
 ```
 
 - AMP loss scaling only kicks in for larger embed dims (when FP16 GEMMs can run).
-- 8-bit Adam moments are opt-in: `setCudaPreferInt8AdamMoments(true)`.
+- 8-bit Adam moments default on: `setCudaPreferInt8AdamMoments(false)` to disable.

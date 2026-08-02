@@ -108,8 +108,8 @@ void LanguageModel::enableCudaTrain() {
     // loss scaling only helps when FP16 GEMMs can run (shared dim gate is 256)
     CudaAmp::useLossScaling = this->tokenEmbedding.embeddingDim() >= 256;
     CudaAmp::resetLossScaler();
-    // int8 moments stay opt-in until multi-step parity is solid on full models
-    CudaAdam::preferInt8Moments = false;
+    // int8 moments default-on for consumer VRAM; opt-out via setCudaPreferInt8AdamMoments(false)
+    CudaAdam::preferInt8Moments = true;
     this->device->ensureTrainState();
     std::cout << "LanguageModel::enableCudaTrain: device training enabled (packed batches, checkpointing on, FP16 amp "
               << (CudaAmp::preferMixedPrecision ? "on" : "off")

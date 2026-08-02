@@ -351,13 +351,12 @@ public:
 
 
     /// <summary>compare CPU vs CUDA training step and report tokens per second</summary>
-
     static void runTrainSmokeDemo(int vocabularySize = 64, int embeddingDim = 32, int sequenceLength = 16, int blockCount = 1, int headCount = 2);
 
-
+    /// <summary>compare FP32 vs int8 Adam after several packed train steps</summary>
+    static void runTrainInt8AdamSmokeDemo(int vocabularySize = 1000, int embeddingDim = 64, int sequenceLength = 48, int blockCount = 2, int headCount = 4);
 
     /// <summary>breakdown of one packed train step embed attn ffn ce adam</summary>
-
     static void runTrainProfileDemo(int vocabularySize = 1000, int embeddingDim = 64, int sequenceLength = 48, int blockCount = 2, int headCount = 4, bool preferFlash = true, int maxPackedColumns = 0);
 
 

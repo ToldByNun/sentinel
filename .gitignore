@@ -19,3 +19,6 @@ sentinel/_train_out4.txt
 sentinel/_train_out5.txt
 sentinel/_train_out6.txt
 sentinel/_train_out7.txt
+sentinel/_train_int8.txt
+sentinel/_train_int8b.txt
+sentinel/msbuild_release_x64_int8b.log

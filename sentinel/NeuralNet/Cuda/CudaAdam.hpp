@@ -56,7 +56,7 @@ public:
     int timeStep;
     CudaDeviceBuffer itemBuffer;
 
-    /// <summary>store Adam moments as int8 + scales — opt-in; default FP32 until full-model parity is solid</summary>
+    /// <summary>store Adam moments as int8 + scales — default on for consumer VRAM</summary>
     static bool preferInt8Moments;
 
     /// <summary>absmax quantization block size for int8 moments</summary>

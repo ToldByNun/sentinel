@@ -73,6 +73,7 @@ int main() {
     CudaLanguageModel::runKvCacheSmokeDemo(128, 64, 32, 2, 4);
     CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);
     CudaLanguageModel::runTrainSmokeDemo(1000, 64, 48, 2, 4);
+    CudaLanguageModel::runTrainInt8AdamSmokeDemo(1000, 64, 48, 2, 4);
     CudaLanguageModel::runTrainProfileDemo(1000, 64, 48, 2, 4, true, 256);
     CudaLanguageModel::runTrainProfileDemo(1000, 64, 48, 2, 4, false, 256);
     CudaLanguageModel::runTrainProfileDemo(1000, 64, 256, 2, 4, true, 2048);

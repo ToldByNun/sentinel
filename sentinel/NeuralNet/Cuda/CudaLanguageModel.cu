@@ -361,6 +361,9 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
     items.reserve(16 + this->blocks.size() * 12);
 
     auto pushItem = [&items, &ensureMoments](CudaMatrix& parameter, CudaAdamState& state, const CudaMatrix& gradient) {
+        if (parameter.elementCount() == 0) throw std::invalid_argument("CudaLanguageModel::applyGradients empty parameter");
+        if (gradient.elementCount() != parameter.elementCount())
+            throw std::invalid_argument("CudaLanguageModel::applyGradients gradient/parameter size mismatch");
         ensureMoments(state, parameter);
         CudaAdamUpdateItem item;
         item.parameter = parameter.buffer.deviceData;
@@ -625,6 +628,89 @@ void CudaLanguageModel::runTrainSmokeDemo(int vocabularySize, int embeddingDim, 
 
     SmokeLog::result("LanguageModel train", "vocab=%d embed=%d seq=%d pack=%d  loss cpu=%.4f gpu=%.4f  gradDiff=%.2e  packLossDiff=%.2e packGradDiff=%.2e  tokens/s=%.0f",
         vocabularySize, embeddingDim, sequenceLength, packBatchSize, hostLoss, deviceLoss, maximumDifference, std::fabs(packedLoss - sequentialLoss), packedDifference, tokensPerSecond);
+    CudaAmp::preferMixedPrecision = previousAmp;
+    CudaAdam::preferInt8Moments = previousInt8;
+}
+
+void CudaLanguageModel::runTrainInt8AdamSmokeDemo(int vocabularySize, int embeddingDim, int sequenceLength, int blockCount, int headCount) {
+    if (!CudaMatmul::isAvailable()) {
+        SmokeLog::skip("LanguageModel train int8 Adam");
+        return;
+    }
+    if (vocabularySize <= 0 || embeddingDim <= 0 || sequenceLength <= 0 || blockCount <= 0 || headCount <= 0)
+        throw std::invalid_argument("CudaLanguageModel::runTrainInt8AdamSmokeDemo invalid dims");
+
+    LanguageModel host(vocabularySize, embeddingDim, sequenceLength, Adam(0.001f), blockCount, headCount);
+    CudaLanguageModel fp32Device = CudaLanguageModel::createFrom(host);
+    CudaLanguageModel int8Device = CudaLanguageModel::createFrom(host);
+    fp32Device.adam = CudaAdam(host.optimizer.learningRate, host.optimizer.beta1, host.optimizer.beta2, host.optimizer.epsilon);
+    int8Device.adam = CudaAdam(host.optimizer.learningRate, host.optimizer.beta1, host.optimizer.beta2, host.optimizer.epsilon);
+
+    const bool previousAmp = CudaAmp::preferMixedPrecision;
+    const bool previousInt8 = CudaAdam::preferInt8Moments;
+    CudaAmp::preferMixedPrecision = false;
+
+    const int packBatchSize = (std::max)(1, (std::min)(8, fp32Device.maxPackedColumns / sequenceLength));
+    std::vector<LanguageModelExample> examples(static_cast<size_t>(packBatchSize));
+    unsigned state = 211u;
+    for (int exampleIndex = 0; exampleIndex < packBatchSize; ++exampleIndex) {
+        examples[static_cast<size_t>(exampleIndex)].inputTokenIds.resize(static_cast<size_t>(sequenceLength));
+        examples[static_cast<size_t>(exampleIndex)].targetTokenIds.resize(static_cast<size_t>(sequenceLength));
+        for (size_t index = 0; index < static_cast<size_t>(sequenceLength); ++index) {
+            state = state * 1664525u + 1013904223u;
+            examples[static_cast<size_t>(exampleIndex)].inputTokenIds[index] = static_cast<int>(state % static_cast<unsigned>(vocabularySize));
+            state = state * 1664525u + 1013904223u;
+            examples[static_cast<size_t>(exampleIndex)].targetTokenIds[index] = static_cast<int>(state % static_cast<unsigned>(vocabularySize));
+        }
+    }
+    std::vector<const LanguageModelExample*> packPointers(static_cast<size_t>(packBatchSize));
+    for (int exampleIndex = 0; exampleIndex < packBatchSize; ++exampleIndex)
+        packPointers[static_cast<size_t>(exampleIndex)] = &examples[static_cast<size_t>(exampleIndex)];
+
+    CudaAdam::preferInt8Moments = false;
+    fp32Device.ensureTrainState();
+    CudaAdam::preferInt8Moments = true;
+    int8Device.ensureTrainState();
+
+    const int stepCount = 24;
+    for (int step = 0; step < stepCount; ++step) {
+        CudaAdam::preferInt8Moments = false;
+        fp32Device.trainGradients.zeroInPlace();
+        fp32Device.accumulatePackedExamples(packPointers.data(), packBatchSize, fp32Device.trainGradients);
+        fp32Device.applyGradients(fp32Device.trainGradients, 1.0f / static_cast<float>(packBatchSize));
+
+        CudaAdam::preferInt8Moments = true;
+        int8Device.trainGradients.zeroInPlace();
+        int8Device.accumulatePackedExamples(packPointers.data(), packBatchSize, int8Device.trainGradients);
+        int8Device.applyGradients(int8Device.trainGradients, 1.0f / static_cast<float>(packBatchSize));
+    }
+    CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaLanguageModel train int8 Adam synchronize");
+
+    CudaAdam::preferInt8Moments = false;
+    fp32Device.epochLossSum.ensureSize(1, 1);
+    CudaOps::zeroInPlace(fp32Device.epochLossSum);
+    fp32Device.accumulatePackedExamples(packPointers.data(), packBatchSize, fp32Device.trainGradients);
+    const float fp32Loss = fp32Device.epochLossSum.download().at(0, 0) / static_cast<float>(packBatchSize);
+
+    CudaAdam::preferInt8Moments = true;
+    int8Device.epochLossSum.ensureSize(1, 1);
+    CudaOps::zeroInPlace(int8Device.epochLossSum);
+    int8Device.accumulatePackedExamples(packPointers.data(), packBatchSize, int8Device.trainGradients);
+    const float int8Loss = int8Device.epochLossSum.download().at(0, 0) / static_cast<float>(packBatchSize);
+
+    Matrix fp32Weight = fp32Device.projectionWeight.download();
+    Matrix int8Weight = int8Device.projectionWeight.download();
+    float weightDifference = 0.0f;
+    bool anyNonFinite = false;
+    for (size_t index = 0; index < fp32Weight.data.size(); ++index) {
+        if (!std::isfinite(fp32Weight.data[index]) || !std::isfinite(int8Weight.data[index]))
+            anyNonFinite = true;
+        weightDifference = (std::max)(weightDifference, std::fabs(fp32Weight.data[index] - int8Weight.data[index]));
+    }
+
+    SmokeLog::result("LanguageModel train int8 Adam", "vocab=%d embed=%d seq=%d steps=%d  loss fp32=%.4f int8=%.4f  weightDiff=%.2e  nonFinite=%s",
+        vocabularySize, embeddingDim, sequenceLength, stepCount, fp32Loss, int8Loss, weightDifference, anyNonFinite ? "yes" : "no");
+
     CudaAmp::preferMixedPrecision = previousAmp;
     CudaAdam::preferInt8Moments = previousInt8;
 }

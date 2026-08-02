@@ -12,7 +12,7 @@
 #include <stdexcept>
 #include <vector>
 
-bool CudaAdam::preferInt8Moments = false;
+bool CudaAdam::preferInt8Moments = true;
 int CudaAdam::int8BlockSize = 256;
 
 CudaAdamState::CudaAdamState() : elementCount(0), scaleCount(0) {}
@@ -149,7 +149,7 @@ __global__ void CudaAdamUpdateInt8TensorEntry(
     const int count = (start + blockSize <= elementCount) ? blockSize : (elementCount - start);
     const int threadCount = static_cast<int>(blockDim.x);
 
-    // all scratch in dynamic shared: first[blockSize] second[blockSize] reduceFirst[threads] reduceSecond[threads]
+    // dynamic shared only: first[blockSize] second[blockSize] reduceFirst[threads] reduceSecond[threads]
     extern __shared__ float shared[];
     float* firstFp = shared;
     float* secondFp = shared + blockSize;
@@ -164,11 +164,14 @@ __global__ void CudaAdamUpdateInt8TensorEntry(
         float first = (oldFirstScale == 0.0f) ? 0.0f : static_cast<float>(firstMomentQ[index]) * oldFirstScale;
         float second = (oldSecondScale == 0.0f) ? 0.0f : static_cast<float>(secondMomentQ[index]) * oldSecondScale;
         const float gradientValue = gradient[index] * gradientScale;
-        if (!isfinite(gradientValue) || !isfinite(first) || !isfinite(second)) {
+        if (!isfinite(gradientValue)) {
             firstFp[local] = isfinite(first) ? first : 0.0f;
-            secondFp[local] = isfinite(second) ? second : 0.0f;
+            secondFp[local] = (isfinite(second) && second > 0.0f) ? second : 0.0f;
             continue;
         }
+        if (!isfinite(first)) first = 0.0f;
+        if (!isfinite(second) || second < 0.0f) second = 0.0f;
+
         first = beta1 * first + (1.0f - beta1) * gradientValue;
         second = beta2 * second + (1.0f - beta2) * gradientValue * gradientValue;
         if (!isfinite(first)) first = 0.0f;
@@ -177,11 +180,15 @@ __global__ void CudaAdamUpdateInt8TensorEntry(
         secondFp[local] = second;
 
         const float correctedFirst = first * inverseFirstCorrection;
-        const float correctedSecond = second * inverseSecondCorrection;
-        const float denom = sqrtf(correctedSecond) + epsilon;
-        const float delta = learningRate * correctedFirst / denom;
-        if (isfinite(delta))
-            parameter[index] -= delta;
+        // floor v-hat so int8 underflow cannot explode updates via 1/sqrt(v)
+        const float correctedSecond = fmaxf(second * inverseSecondCorrection, epsilon * epsilon);
+        float delta = learningRate * correctedFirst / (sqrtf(correctedSecond) + epsilon);
+        if (!isfinite(delta)) continue;
+        // keep bad blocks from taking SGD-sized leaps (lr=1e-3 → max |delta|=1e-2)
+        const float maxDelta = learningRate * 10.0f;
+        if (delta > maxDelta) delta = maxDelta;
+        if (delta < -maxDelta) delta = -maxDelta;
+        parameter[index] -= delta;
     }
     __syncthreads();
 
@@ -206,8 +213,12 @@ __global__ void CudaAdamUpdateInt8TensorEntry(
     if (threadIdx.x == 0) {
         float maxFirst = reduceFirst[0];
         float maxSecond = reduceSecond[0];
-        if (!isfinite(maxFirst) || maxFirst < 1e-12f) maxFirst = 1e-12f;
-        if (!isfinite(maxSecond) || maxSecond < 1e-12f) maxSecond = 1e-12f;
+        if (!isfinite(maxFirst) || maxFirst < 0.0f) maxFirst = 0.0f;
+        if (!isfinite(maxSecond) || maxSecond < 0.0f) maxSecond = 0.0f;
+        // keep a usable quantum so tiny EMA moments (common in LM grads) do not flush to zero
+        const float minAbsMax = 1e-8f;
+        maxFirst = fmaxf(maxFirst, minAbsMax);
+        maxSecond = fmaxf(maxSecond, minAbsMax);
         if (maxFirst > 1e8f) maxFirst = 1e8f;
         if (maxSecond > 1e8f) maxSecond = 1e8f;
         firstMomentScales[quantBlock] = maxFirst / 127.0f;
@@ -224,7 +235,7 @@ __global__ void CudaAdamUpdateInt8TensorEntry(
         firstMomentQ[start + local] = static_cast<signed char>(quantizedFirst);
 
         float quantizedSecond = rintf(secondFp[local] / newSecondScale);
-        quantizedSecond = fminf(127.0f, fmaxf(-127.0f, quantizedSecond));
+        quantizedSecond = fminf(127.0f, fmaxf(0.0f, quantizedSecond));
         if (!isfinite(quantizedSecond)) quantizedSecond = 0.0f;
         secondMomentQ[start + local] = static_cast<signed char>(quantizedSecond);
     }
@@ -320,6 +331,7 @@ void CudaAdam::updateMany(const CudaAdamUpdateItem* items, int itemCount, float 
                 gradientScale);
             CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaAdamUpdateInt8TensorEntry launch");
         }
+        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaAdamUpdateInt8TensorEntry synchronize");
         return;
     }
 
@@ -416,6 +428,111 @@ void CudaAdam::runSmokeDemo(int parameterRows, int parameterCols) {
     for (size_t index = 0; index < fp32RefHost.data.size(); ++index)
         int8Difference = (std::max)(int8Difference, std::fabs(fp32RefHost.data[index] - int8HostParameter.data[index]));
     SmokeLog::result("Adam int8", "rows=%d cols=%d  steps=32  diff=%.2e  block=%d", parameterRows, parameterCols, int8Difference, CudaAdam::int8BlockSize);
+
+    // multi-tensor + tiny grads (LM-like) — catches bias-correction / quant flush bugs
+    struct TensorPair {
+        int rows;
+        int cols;
+        CudaMatrix fp32Parameter;
+        CudaMatrix int8Parameter;
+        CudaMatrix gradient;
+        CudaAdamState fp32State;
+        CudaAdamState int8State;
+    };
+
+    const int shapes[][2] = {
+        {64, 1},
+        {1000, 1},
+        {64, 64},
+        {256, 64},
+        {1000, 64},
+        {32, 32},
+    };
+    const int tensorCount = static_cast<int>(sizeof(shapes) / sizeof(shapes[0]));
+    std::vector<TensorPair> tensors(static_cast<size_t>(tensorCount));
+    unsigned multiState = 991u;
+    for (int tensorIndex = 0; tensorIndex < tensorCount; ++tensorIndex) {
+        TensorPair& tensor = tensors[static_cast<size_t>(tensorIndex)];
+        tensor.rows = shapes[tensorIndex][0];
+        tensor.cols = shapes[tensorIndex][1];
+        Matrix hostParameter(static_cast<size_t>(tensor.rows), static_cast<size_t>(tensor.cols), 0.0f);
+        Matrix hostGradient(static_cast<size_t>(tensor.rows), static_cast<size_t>(tensor.cols), 0.0f);
+        for (size_t index = 0; index < hostParameter.data.size(); ++index) {
+            multiState = multiState * 1664525u + 1013904223u;
+            hostParameter.data[index] = (static_cast<float>(multiState >> 8) / 16777216.0f) * 0.02f - 0.01f;
+            multiState = multiState * 1664525u + 1013904223u;
+            // small grads like mean-CE / long segments
+            hostGradient.data[index] = (static_cast<float>(multiState >> 8) / 16777216.0f) * 2.0e-4f - 1.0e-4f;
+        }
+        tensor.fp32Parameter.upload(hostParameter);
+        tensor.int8Parameter.upload(hostParameter);
+        tensor.gradient.upload(hostGradient);
+        tensor.fp32State.ensureFp32(tensor.fp32Parameter);
+        tensor.int8State.ensureInt8(tensor.int8Parameter, CudaAdam::int8BlockSize);
+    }
+
+    CudaAdam multiFp32(0.001f);
+    CudaAdam multiInt8(0.001f);
+    const float gradientScale = 1.0f / 32.0f;
+    for (int step = 0; step < 64; ++step) {
+        multiFp32.step();
+        multiInt8.step();
+
+        std::vector<CudaAdamUpdateItem> fp32Items;
+        std::vector<CudaAdamUpdateItem> int8Items;
+        fp32Items.reserve(static_cast<size_t>(tensorCount));
+        int8Items.reserve(static_cast<size_t>(tensorCount));
+        for (int tensorIndex = 0; tensorIndex < tensorCount; ++tensorIndex) {
+            TensorPair& tensor = tensors[static_cast<size_t>(tensorIndex)];
+            CudaAdamUpdateItem fp32Item;
+            fp32Item.parameter = tensor.fp32Parameter.buffer.deviceData;
+            fp32Item.gradient = tensor.gradient.buffer.deviceData;
+            fp32Item.elementCount = static_cast<int>(tensor.fp32Parameter.elementCount());
+            fp32Item.useInt8 = false;
+            fp32Item.firstMoment = tensor.fp32State.firstMoment.buffer.deviceData;
+            fp32Item.secondMoment = tensor.fp32State.secondMoment.buffer.deviceData;
+            fp32Item.firstMomentQ = nullptr;
+            fp32Item.secondMomentQ = nullptr;
+            fp32Item.firstMomentScales = nullptr;
+            fp32Item.secondMomentScales = nullptr;
+            fp32Item.scaleCount = 0;
+            fp32Items.push_back(fp32Item);
+
+            CudaAdamUpdateItem int8Item;
+            int8Item.parameter = tensor.int8Parameter.buffer.deviceData;
+            int8Item.gradient = tensor.gradient.buffer.deviceData;
+            int8Item.elementCount = static_cast<int>(tensor.int8Parameter.elementCount());
+            int8Item.useInt8 = true;
+            int8Item.firstMoment = nullptr;
+            int8Item.secondMoment = nullptr;
+            int8Item.firstMomentQ = tensor.int8State.firstMomentQ.deviceData;
+            int8Item.secondMomentQ = tensor.int8State.secondMomentQ.deviceData;
+            int8Item.firstMomentScales = tensor.int8State.firstMomentScales.deviceData;
+            int8Item.secondMomentScales = tensor.int8State.secondMomentScales.deviceData;
+            int8Item.scaleCount = tensor.int8State.scaleCount;
+            int8Items.push_back(int8Item);
+        }
+
+        CudaAdam::preferInt8Moments = false;
+        multiFp32.updateMany(fp32Items.data(), tensorCount, gradientScale);
+        CudaAdam::preferInt8Moments = true;
+        multiInt8.updateMany(int8Items.data(), tensorCount, gradientScale);
+    }
+    CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaAdam multi-tensor int8 synchronize");
+
+    float multiDifference = 0.0f;
+    bool anyNonFinite = false;
+    for (int tensorIndex = 0; tensorIndex < tensorCount; ++tensorIndex) {
+        Matrix fp32Host = tensors[static_cast<size_t>(tensorIndex)].fp32Parameter.download();
+        Matrix int8Host = tensors[static_cast<size_t>(tensorIndex)].int8Parameter.download();
+        for (size_t index = 0; index < fp32Host.data.size(); ++index) {
+            if (!std::isfinite(fp32Host.data[index]) || !std::isfinite(int8Host.data[index]))
+                anyNonFinite = true;
+            multiDifference = (std::max)(multiDifference, std::fabs(fp32Host.data[index] - int8Host.data[index]));
+        }
+    }
+    SmokeLog::result("Adam int8 multi", "tensors=%d steps=64  diff=%.2e  nonFinite=%s  block=%d",
+        tensorCount, multiDifference, anyNonFinite ? "yes" : "no", CudaAdam::int8BlockSize);
 
     CudaAdam::preferInt8Moments = previousInt8;
 }
