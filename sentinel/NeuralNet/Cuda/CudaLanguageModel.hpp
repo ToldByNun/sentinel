@@ -175,6 +175,9 @@ public:
 
     bool activationCheckpointing;
 
+    /// <summary>capture fixed-shape packed microsteps into a CUDA Graph after warmup</summary>
+    bool preferTrainGraph;
+
 
 
     CudaAdam adam;
@@ -253,6 +256,17 @@ public:
     std::vector<int> adamWindowTokenIds;
 
     CudaIntBuffer adamWindowTokenIdsBuffer;
+
+    /// <summary>non-default stream for optional CUDA Graph packed microsteps</summary>
+    cudaStream_t trainStream;
+    cudaGraph_t trainGraph;
+    cudaGraphExec_t trainGraphExec;
+    int trainGraphSegmentLength;
+    int trainGraphExampleCount;
+    int trainGraphWarmups;
+    int trainGraphSeenSegmentLength;
+    int trainGraphSeenExampleCount;
+    static constexpr int trainGraphWarmupNeeded = 2;
 
     static constexpr int padTargetId = -1;
     static constexpr int padInputId = 0;
@@ -399,6 +413,21 @@ public:
 
     /// <summary>run packed train step from packedInput/Target/MeanDivisor host buffers</summary>
     float flushPackedHostBuffers(int segmentLength, int exampleCount, CudaLanguageModelGradients& gradients);
+
+    /// <summary>release captured train microstep graph</summary>
+    void releaseTrainGraph();
+
+    /// <summary>device work for one packed microstep (tokens already on device)</summary>
+    void runPackedTrainDevice(size_t tokenCount, int segmentLength, int exampleCount, CudaLanguageModelGradients& gradients);
+
+    /// <summary>replay captured graph when shape matches; returns true if launched</summary>
+    bool tryLaunchTrainGraph(int segmentLength, int exampleCount);
+
+    /// <summary>capture current fixed-shape microstep into trainGraphExec (executes once during capture)</summary>
+    bool captureTrainGraph(size_t tokenCount, int segmentLength, int exampleCount, CudaLanguageModelGradients& gradients);
+
+    /// <summary>create non-blocking trainStream once</summary>
+    void ensureTrainStream();
 
 
 

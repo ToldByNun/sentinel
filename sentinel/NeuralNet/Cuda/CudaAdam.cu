@@ -595,7 +595,7 @@ void CudaAdam::updateMany(const CudaAdamUpdateItem* items, int itemCount, float 
             const CudaAdamUpdateItem& item = items[itemIndex];
             if (item.scaleCount != (item.elementCount + blockSize - 1) / blockSize)
                 throw std::invalid_argument("CudaAdam::updateMany int8 scaleCount mismatch with int8BlockSize");
-            CudaAdamUpdateInt8TensorEntry<<<item.scaleCount, threadCount, sharedBytes>>>(
+            CudaAdamUpdateInt8TensorEntry<<<item.scaleCount, threadCount, sharedBytes, CudaMatmul::activeStream()>>>(
                 item.parameter,
                 item.firstMomentQ,
                 item.secondMomentQ,
@@ -622,7 +622,7 @@ void CudaAdam::updateMany(const CudaAdamUpdateItem* items, int itemCount, float 
     buffer.copyBytesFromHost(items, byteCount);
 
     constexpr int threadCount = 256;
-    CudaAdamUpdateManyEntry<<<itemCount, threadCount>>>(
+    CudaAdamUpdateManyEntry<<<itemCount, threadCount, 0, CudaMatmul::activeStream()>>>(
         reinterpret_cast<const CudaAdamUpdateItem*>(buffer.deviceData),
         itemCount,
         this->learningRate,

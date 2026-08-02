@@ -91,15 +91,9 @@ void CudaCausalSelfAttention::syncFusedQkvWeight() {
 
     this->qkvWeight.ensureSize(this->queryWeight.rows * 3ull, this->queryWeight.cols);
     const size_t sliceBytes = this->queryWeight.byteCount();
-    CudaMatmul::throwIfCudaFailed(
-        cudaMemcpy(this->qkvWeight.buffer.deviceData, this->queryWeight.buffer.deviceData, sliceBytes, cudaMemcpyDeviceToDevice),
-        "CudaCausalSelfAttention::syncFusedQkvWeight copy query");
-    CudaMatmul::throwIfCudaFailed(
-        cudaMemcpy(this->qkvWeight.buffer.deviceData + this->queryWeight.elementCount(), this->keyWeight.buffer.deviceData, sliceBytes, cudaMemcpyDeviceToDevice),
-        "CudaCausalSelfAttention::syncFusedQkvWeight copy key");
-    CudaMatmul::throwIfCudaFailed(
-        cudaMemcpy(this->qkvWeight.buffer.deviceData + 2ull * this->queryWeight.elementCount(), this->valueWeight.buffer.deviceData, sliceBytes, cudaMemcpyDeviceToDevice),
-        "CudaCausalSelfAttention::syncFusedQkvWeight copy value");
+    CudaMatmul::memcpyDevice(this->qkvWeight.buffer.deviceData, this->queryWeight.buffer.deviceData, sliceBytes);
+    CudaMatmul::memcpyDevice(this->qkvWeight.buffer.deviceData + this->queryWeight.elementCount(), this->keyWeight.buffer.deviceData, sliceBytes);
+    CudaMatmul::memcpyDevice(this->qkvWeight.buffer.deviceData + 2ull * this->queryWeight.elementCount(), this->valueWeight.buffer.deviceData, sliceBytes);
     CudaAmp::registerMasterWeight(this->qkvWeight.buffer.deviceData, this->qkvWeight.elementCount());
 }
 
@@ -122,15 +116,9 @@ void CudaCausalSelfAttention::projectAndRotate(const CudaMatrix& input, int posi
     this->value.ensureSize(this->valueWeight.rows, input.cols);
     const size_t sliceElements = this->queryWeight.rows * input.cols;
     const size_t sliceBytes = sliceElements * sizeof(float);
-    CudaMatmul::throwIfCudaFailed(
-        cudaMemcpy(this->query.buffer.deviceData, this->qkvProjected.buffer.deviceData, sliceBytes, cudaMemcpyDeviceToDevice),
-        "CudaCausalSelfAttention::projectAndRotate split query");
-    CudaMatmul::throwIfCudaFailed(
-        cudaMemcpy(this->key.buffer.deviceData, this->qkvProjected.buffer.deviceData + sliceElements, sliceBytes, cudaMemcpyDeviceToDevice),
-        "CudaCausalSelfAttention::projectAndRotate split key");
-    CudaMatmul::throwIfCudaFailed(
-        cudaMemcpy(this->value.buffer.deviceData, this->qkvProjected.buffer.deviceData + 2ull * sliceElements, sliceBytes, cudaMemcpyDeviceToDevice),
-        "CudaCausalSelfAttention::projectAndRotate split value");
+    CudaMatmul::memcpyDevice(this->query.buffer.deviceData, this->qkvProjected.buffer.deviceData, sliceBytes);
+    CudaMatmul::memcpyDevice(this->key.buffer.deviceData, this->qkvProjected.buffer.deviceData + sliceElements, sliceBytes);
+    CudaMatmul::memcpyDevice(this->value.buffer.deviceData, this->qkvProjected.buffer.deviceData + 2ull * sliceElements, sliceBytes);
 
     CudaOps::rotaryRotateInPlace(this->query, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, positionOffset, segmentLength);
     CudaOps::rotaryRotateInPlace(this->key, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, positionOffset, segmentLength);

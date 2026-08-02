@@ -38,22 +38,14 @@ void CudaFeedForward::syncFusedGateUpWeight() {
 
     this->gateUpWeight.ensureSize(this->gateWeight.rows + this->upWeight.rows, this->gateWeight.cols);
     const size_t gateBytes = this->gateWeight.byteCount();
-    CudaMatmul::throwIfCudaFailed(
-        cudaMemcpy(this->gateUpWeight.buffer.deviceData, this->gateWeight.buffer.deviceData, gateBytes, cudaMemcpyDeviceToDevice),
-        "CudaFeedForward::syncFusedGateUpWeight copy gate");
-    CudaMatmul::throwIfCudaFailed(
-        cudaMemcpy(this->gateUpWeight.buffer.deviceData + this->gateWeight.elementCount(), this->upWeight.buffer.deviceData, this->upWeight.byteCount(), cudaMemcpyDeviceToDevice),
-        "CudaFeedForward::syncFusedGateUpWeight copy up");
+    CudaMatmul::memcpyDevice(this->gateUpWeight.buffer.deviceData, this->gateWeight.buffer.deviceData, gateBytes);
+    CudaMatmul::memcpyDevice(this->gateUpWeight.buffer.deviceData + this->gateWeight.elementCount(), this->upWeight.buffer.deviceData, this->upWeight.byteCount());
     CudaAmp::registerMasterWeight(this->gateUpWeight.buffer.deviceData, this->gateUpWeight.elementCount());
 
     if (!this->gateBias.empty() && !this->upBias.empty()) {
         this->gateUpBias.ensureSize(this->gateBias.rows + this->upBias.rows, 1);
-        CudaMatmul::throwIfCudaFailed(
-            cudaMemcpy(this->gateUpBias.buffer.deviceData, this->gateBias.buffer.deviceData, this->gateBias.byteCount(), cudaMemcpyDeviceToDevice),
-            "CudaFeedForward::syncFusedGateUpWeight copy gate bias");
-        CudaMatmul::throwIfCudaFailed(
-            cudaMemcpy(this->gateUpBias.buffer.deviceData + this->gateBias.elementCount(), this->upBias.buffer.deviceData, this->upBias.byteCount(), cudaMemcpyDeviceToDevice),
-            "CudaFeedForward::syncFusedGateUpWeight copy up bias");
+        CudaMatmul::memcpyDevice(this->gateUpBias.buffer.deviceData, this->gateBias.buffer.deviceData, this->gateBias.byteCount());
+        CudaMatmul::memcpyDevice(this->gateUpBias.buffer.deviceData + this->gateBias.elementCount(), this->upBias.buffer.deviceData, this->upBias.byteCount());
     }
 }
 
@@ -133,12 +125,8 @@ void CudaFeedForward::backward(const CudaMatrix& outputGradient, CudaMatrix& inp
     gateWeightGradient.ensureSize(this->gateWeight.rows, this->gateWeight.cols);
     upWeightGradient.ensureSize(this->upWeight.rows, this->upWeight.cols);
     const size_t sliceBytes = this->gateWeight.byteCount();
-    CudaMatmul::throwIfCudaFailed(
-        cudaMemcpy(gateWeightGradient.buffer.deviceData, this->gateUpWeightGradient.buffer.deviceData, sliceBytes, cudaMemcpyDeviceToDevice),
-        "CudaFeedForward::backward split gate weight grad");
-    CudaMatmul::throwIfCudaFailed(
-        cudaMemcpy(upWeightGradient.buffer.deviceData, this->gateUpWeightGradient.buffer.deviceData + this->gateWeight.elementCount(), sliceBytes, cudaMemcpyDeviceToDevice),
-        "CudaFeedForward::backward split up weight grad");
+    CudaMatmul::memcpyDevice(gateWeightGradient.buffer.deviceData, this->gateUpWeightGradient.buffer.deviceData, sliceBytes);
+    CudaMatmul::memcpyDevice(upWeightGradient.buffer.deviceData, this->gateUpWeightGradient.buffer.deviceData + this->gateWeight.elementCount(), sliceBytes);
     CudaOps::sumColumnsStackedHalvesInto(this->gateUpHiddenGradient, gateBiasGradient, upBiasGradient);
 
     // One GEMM for dX = gateUpWeight^T @ stackedGrad

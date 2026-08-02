@@ -4,6 +4,7 @@
 #include "../Math/Matrix.hpp"
 
 #include <cstddef>
+#include <cuda_runtime_api.h>
 
 /// <summary>reusable device float buffer grows only when capacity is too small</summary>
 class CudaDeviceBuffer {
@@ -186,6 +187,18 @@ public:
 
     /// <summary>compare CPU gemm vs CUDA host path and device resident path</summary>
     static void runSmokeDemo(size_t matrixSize = 512);
+
+    /// <summary>stream used by kernel/GEMM launches; nullptr = legacy default</summary>
+    static cudaStream_t activeStream();
+
+    /// <summary>set launch stream (train graph capture/replay); returns previous</summary>
+    static cudaStream_t setActiveStream(cudaStream_t stream);
+
+    /// <summary>D2D copy on activeStream when set, else sync memcpy</summary>
+    static void memcpyDevice(void* destination, const void* source, size_t byteCount);
+
+    /// <summary>device memset on activeStream when set, else sync memset</summary>
+    static void memsetDevice(void* destination, int value, size_t byteCount);
 
 private:
     friend class CudaDeviceBuffer;

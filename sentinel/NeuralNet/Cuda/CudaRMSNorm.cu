@@ -96,12 +96,12 @@ void CudaRMSNorm::forward(const CudaMatrix& input, CudaMatrix& out) const {
 
     constexpr int threadCount = 256;
     const int inverseBlockCount = (sequenceLength + threadCount - 1) / threadCount;
-    CudaRMSNormComputeInverseRmsEntry<<<inverseBlockCount, threadCount>>>(input.buffer.deviceData, this->inverseRms.buffer.deviceData, embeddingDim, sequenceLength, this->epsilon);
+    CudaRMSNormComputeInverseRmsEntry<<<inverseBlockCount, threadCount, 0, CudaMatmul::activeStream()>>>(input.buffer.deviceData, this->inverseRms.buffer.deviceData, embeddingDim, sequenceLength, this->epsilon);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaRMSNormComputeInverseRmsEntry launch");
 
     const int elementCount = embeddingDim * sequenceLength;
     const int applyBlockCount = (elementCount + threadCount - 1) / threadCount;
-    CudaRMSNormApplyEntry<<<applyBlockCount, threadCount>>>(input.buffer.deviceData, out.buffer.deviceData, this->lastNormalized.buffer.deviceData, this->gamma.buffer.deviceData, this->inverseRms.buffer.deviceData, embeddingDim, sequenceLength);
+    CudaRMSNormApplyEntry<<<applyBlockCount, threadCount, 0, CudaMatmul::activeStream()>>>(input.buffer.deviceData, out.buffer.deviceData, this->lastNormalized.buffer.deviceData, this->gamma.buffer.deviceData, this->inverseRms.buffer.deviceData, embeddingDim, sequenceLength);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaRMSNormApplyEntry launch");
 }
 
@@ -124,7 +124,7 @@ void CudaRMSNorm::backward(const CudaMatrix& outputGradient, CudaMatrix& inputGr
 
     constexpr int threadCount = 256;
     const int backwardBlockCount = (sequenceLength + threadCount - 1) / threadCount;
-    CudaRMSNormBackwardInputGradEntry<<<backwardBlockCount, threadCount>>>(outputGradient.buffer.deviceData, this->lastNormalized.buffer.deviceData, this->gamma.buffer.deviceData, inputGradient.buffer.deviceData, this->inverseRms.buffer.deviceData, embeddingDim, sequenceLength, dimension);
+    CudaRMSNormBackwardInputGradEntry<<<backwardBlockCount, threadCount, 0, CudaMatmul::activeStream()>>>(outputGradient.buffer.deviceData, this->lastNormalized.buffer.deviceData, this->gamma.buffer.deviceData, inputGradient.buffer.deviceData, this->inverseRms.buffer.deviceData, embeddingDim, sequenceLength, dimension);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaRMSNormBackwardInputGradEntry launch");
 }
 

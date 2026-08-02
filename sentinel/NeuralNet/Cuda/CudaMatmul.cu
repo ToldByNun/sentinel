@@ -372,6 +372,43 @@ double CudaMatmulTiming::totalMilliseconds() const {
 
 CudaMatmul::CudaMatmul() {}
 
+static cudaStream_t& cudaActiveStreamSlot() {
+    static cudaStream_t stream = nullptr;
+    return stream;
+}
+
+cudaStream_t CudaMatmul::activeStream() {
+    return cudaActiveStreamSlot();
+}
+
+cudaStream_t CudaMatmul::setActiveStream(cudaStream_t stream) {
+    cudaStream_t previous = cudaActiveStreamSlot();
+    cudaActiveStreamSlot() = stream;
+    return previous;
+}
+
+void CudaMatmul::memcpyDevice(void* destination, const void* source, size_t byteCount) {
+    if (destination == nullptr || source == nullptr) throw std::invalid_argument("CudaMatmul::memcpyDevice null pointer");
+    if (byteCount == 0) return;
+    cudaStream_t stream = CudaMatmul::activeStream();
+    if (stream != nullptr) {
+        CudaMatmul::throwIfCudaFailed(cudaMemcpyAsync(destination, source, byteCount, cudaMemcpyDeviceToDevice, stream), "CudaMatmul::memcpyDevice async");
+        return;
+    }
+    CudaMatmul::throwIfCudaFailed(cudaMemcpy(destination, source, byteCount, cudaMemcpyDeviceToDevice), "CudaMatmul::memcpyDevice");
+}
+
+void CudaMatmul::memsetDevice(void* destination, int value, size_t byteCount) {
+    if (destination == nullptr) throw std::invalid_argument("CudaMatmul::memsetDevice null pointer");
+    if (byteCount == 0) return;
+    cudaStream_t stream = CudaMatmul::activeStream();
+    if (stream != nullptr) {
+        CudaMatmul::throwIfCudaFailed(cudaMemsetAsync(destination, value, byteCount, stream), "CudaMatmul::memsetDevice async");
+        return;
+    }
+    CudaMatmul::throwIfCudaFailed(cudaMemset(destination, value, byteCount), "CudaMatmul::memsetDevice");
+}
+
 void CudaMatmul::throwIfCudaFailed(int status, const char* operationName) {
     if (status == cudaSuccess) return;
     throw std::runtime_error(std::string(operationName) + ": " + cudaGetErrorString(static_cast<cudaError_t>(status)));
@@ -579,7 +616,7 @@ bool CudaMatmul::launchCublasLtMatmul(const float* deviceLeft, const float* devi
         }
     }
 
-    const cublasStatus_t matmulStatus = cublasLtMatmul(state.handle, matmulDesc, &alpha, deviceLeft, layoutLeft, deviceRight, layoutRight, &beta, deviceOut, layoutOut, deviceOut, layoutOut, algoPointer, workspacePointer, workspaceSize, nullptr);
+    const cublasStatus_t matmulStatus = cublasLtMatmul(state.handle, matmulDesc, &alpha, deviceLeft, layoutLeft, deviceRight, layoutRight, &beta, deviceOut, layoutOut, deviceOut, layoutOut, algoPointer, workspacePointer, workspaceSize, CudaMatmul::activeStream());
 
     if (matmulStatus != CUBLAS_STATUS_SUCCESS) {
         if (kernelStartEvent != nullptr) cudaEventDestroy(kernelStartEvent);
@@ -618,7 +655,7 @@ void CudaMatmul::launchSharedMemoryMatmulKernel(const float* deviceLeft, const f
     const dim3 gridDimension((columnCount + CudaMatmul::tileSize - 1) / CudaMatmul::tileSize, (rowCount + CudaMatmul::tileSize - 1) / CudaMatmul::tileSize);
 
     if (kernelMilliseconds == nullptr) {
-        CudaMatmulSharedMemoryEntry<<<gridDimension, blockDimension>>>(deviceLeft, deviceRight, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight);
+        CudaMatmulSharedMemoryEntry<<<gridDimension, blockDimension, 0, CudaMatmul::activeStream()>>>(deviceLeft, deviceRight, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight);
         CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaMatmulSharedMemoryEntry launch");
         return;
     }
@@ -629,7 +666,7 @@ void CudaMatmul::launchSharedMemoryMatmulKernel(const float* deviceLeft, const f
     CudaMatmul::throwIfCudaFailed(cudaEventCreate(&kernelStopEvent), "cudaEventCreate stop");
     CudaMatmul::throwIfCudaFailed(cudaEventRecord(kernelStartEvent), "cudaEventRecord start");
 
-    CudaMatmulSharedMemoryEntry<<<gridDimension, blockDimension>>>(deviceLeft, deviceRight, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight);
+    CudaMatmulSharedMemoryEntry<<<gridDimension, blockDimension, 0, CudaMatmul::activeStream()>>>(deviceLeft, deviceRight, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaMatmulSharedMemoryEntry launch");
     CudaMatmul::throwIfCudaFailed(cudaEventRecord(kernelStopEvent), "cudaEventRecord stop");
     CudaMatmul::throwIfCudaFailed(cudaEventSynchronize(kernelStopEvent), "cudaEventSynchronize stop");

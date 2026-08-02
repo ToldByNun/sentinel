@@ -16,7 +16,118 @@
 #include "../Optimizers/Adam.hpp"
 
 CudaLanguageModel::CudaLanguageModel()
-    : maximumPositionCount(0), tieEmbeddingProjection(true), maxPackedColumns(8192), maxPackedColumnsManual(false), logitChunkRows(2048), gradientAccumulationSteps(4), activationCheckpointing(true), adam(0.001f), trainStateReady(false) {}
+    : maximumPositionCount(0),
+      tieEmbeddingProjection(true),
+      maxPackedColumns(8192),
+      maxPackedColumnsManual(false),
+      logitChunkRows(2048),
+      gradientAccumulationSteps(4),
+      activationCheckpointing(true),
+      preferTrainGraph(true),
+      adam(0.001f),
+      trainStateReady(false),
+      trainStream(nullptr),
+      trainGraph(nullptr),
+      trainGraphExec(nullptr),
+      trainGraphSegmentLength(0),
+      trainGraphExampleCount(0),
+      trainGraphWarmups(0),
+      trainGraphSeenSegmentLength(0),
+      trainGraphSeenExampleCount(0) {}
+
+void CudaLanguageModel::releaseTrainGraph() {
+    if (this->trainGraphExec != nullptr) {
+        cudaGraphExecDestroy(this->trainGraphExec);
+        this->trainGraphExec = nullptr;
+    }
+    if (this->trainGraph != nullptr) {
+        cudaGraphDestroy(this->trainGraph);
+        this->trainGraph = nullptr;
+    }
+    this->trainGraphSegmentLength = 0;
+    this->trainGraphExampleCount = 0;
+}
+
+void CudaLanguageModel::ensureTrainStream() {
+    if (this->trainStream != nullptr) return;
+    CudaMatmul::throwIfCudaFailed(cudaStreamCreateWithFlags(&this->trainStream, cudaStreamNonBlocking), "cudaStreamCreate trainStream");
+}
+
+void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLength, int exampleCount, CudaLanguageModelGradients& gradients) {
+    this->forwardTrunkFromDevice(tokenCount, segmentLength);
+
+    if (this->epochLossSum.rows != 1 || this->epochLossSum.cols != 1)
+        this->epochLossSum.ensureSize(1, 1);
+    this->accumulateChunkedProjection(tokenCount, segmentLength, exampleCount, gradients);
+
+    this->finalNorm.backward(this->hiddenGradient, this->normInputGradientScratch, this->finalNormGammaGradient);
+    CudaOps::addInPlace(gradients.finalNormGamma, this->finalNormGammaGradient);
+    std::swap(this->hiddenGradient, this->normInputGradientScratch);
+
+    for (int blockIndex = static_cast<int>(this->blocks.size()) - 1; blockIndex >= 0; --blockIndex) {
+        if (this->activationCheckpointing) {
+            if (this->useHalfActivationCheckpoints()) {
+                CudaAmp::castToFloat(
+                    this->blockInputCheckpointsHalf[static_cast<size_t>(blockIndex)],
+                    this->checkpointRestoreScratch);
+                this->checkpointRestoreScratch.cols = this->hiddenGradient.cols;
+                this->blocks[static_cast<size_t>(blockIndex)].forward(
+                    this->checkpointRestoreScratch,
+                    this->normalized,
+                    segmentLength);
+            } else {
+                this->blocks[static_cast<size_t>(blockIndex)].forward(
+                    this->blockInputCheckpoints[static_cast<size_t>(blockIndex)],
+                    this->normalized,
+                    segmentLength);
+            }
+        }
+        this->blocks[static_cast<size_t>(blockIndex)].backward(this->hiddenGradient, this->blockInputGradientScratch, gradients.blocks[static_cast<size_t>(blockIndex)]);
+        std::swap(this->hiddenGradient, this->blockInputGradientScratch);
+    }
+
+    CudaOps::embeddingScatterAddInto(gradients.tokenEmbedding, this->tokenIdsBuffer, tokenCount, this->hiddenGradient);
+}
+
+bool CudaLanguageModel::tryLaunchTrainGraph(int segmentLength, int exampleCount) {
+    if (!this->preferTrainGraph || this->activationCheckpointing) return false;
+    if (this->trainGraphExec == nullptr) return false;
+    if (segmentLength != this->trainGraphSegmentLength || exampleCount != this->trainGraphExampleCount) return false;
+
+    CudaMatmul::throwIfCudaFailed(cudaGraphLaunch(this->trainGraphExec, this->trainStream), "cudaGraphLaunch train microstep");
+    CudaMatmul::throwIfCudaFailed(cudaStreamSynchronize(this->trainStream), "cudaStreamSynchronize train graph");
+    return true;
+}
+
+bool CudaLanguageModel::captureTrainGraph(size_t tokenCount, int segmentLength, int exampleCount, CudaLanguageModelGradients& gradients) {
+    this->ensureTrainStream();
+    this->releaseTrainGraph();
+
+    CudaMatmul::throwIfCudaFailed(
+        cudaStreamBeginCapture(this->trainStream, cudaStreamCaptureModeGlobal),
+        "cudaStreamBeginCapture train microstep");
+
+    const cudaStream_t previous = CudaMatmul::setActiveStream(this->trainStream);
+    bool captureOk = false;
+    try {
+        this->runPackedTrainDevice(tokenCount, segmentLength, exampleCount, gradients);
+        CudaMatmul::throwIfCudaFailed(cudaStreamEndCapture(this->trainStream, &this->trainGraph), "cudaStreamEndCapture train microstep");
+        CudaMatmul::throwIfCudaFailed(
+            cudaGraphInstantiate(&this->trainGraphExec, this->trainGraph, nullptr, nullptr, 0),
+            "cudaGraphInstantiate train microstep");
+        this->trainGraphSegmentLength = segmentLength;
+        this->trainGraphExampleCount = exampleCount;
+        captureOk = true;
+    } catch (...) {
+        CudaMatmul::setActiveStream(previous);
+        // Capture may be invalidated; drain error and fall back.
+        cudaGetLastError();
+        this->releaseTrainGraph();
+        throw;
+    }
+    CudaMatmul::setActiveStream(previous);
+    return captureOk;
+}
 
 void CudaTransformerBlockAdamStates::ensureFrom(const CudaTransformerBlock& block) {
     // moments stay empty until first Adam update (lazy allocation for low VRAM before train)
@@ -580,6 +691,13 @@ float CudaLanguageModel::flushPackedHostBuffers(int segmentLength, int exampleCo
     if (static_cast<size_t>(segmentLength) * static_cast<size_t>(exampleCount) != tokenCount)
         throw std::invalid_argument("CudaLanguageModel::flushPackedHostBuffers tokenCount mismatch");
 
+    if (segmentLength != this->trainGraphSeenSegmentLength || exampleCount != this->trainGraphSeenExampleCount) {
+        this->releaseTrainGraph();
+        this->trainGraphWarmups = 0;
+        this->trainGraphSeenSegmentLength = segmentLength;
+        this->trainGraphSeenExampleCount = exampleCount;
+    }
+
     // One H2D for [inputs | targets | meanDivisors], then cheap D2D splits.
     this->packH2dHost.resize(3 * tokenCount);
     std::copy(this->packedInputTokenIds.begin(), this->packedInputTokenIds.end(), this->packH2dHost.begin());
@@ -593,54 +711,72 @@ float CudaLanguageModel::flushPackedHostBuffers(int segmentLength, int exampleCo
     this->targetTokenIdsBuffer.ensureCapacity(tokenCount);
     this->meanDivisorBuffer.ensureCapacity(tokenCount);
     const size_t bytes = tokenCount * sizeof(int);
-    CudaMatmul::throwIfCudaFailed(
-        cudaMemcpy(this->tokenIdsBuffer.deviceData, this->packH2dDevice.deviceData, bytes, cudaMemcpyDeviceToDevice),
-        "CudaLanguageModel::flushPackedHostBuffers D2D inputs");
-    CudaMatmul::throwIfCudaFailed(
-        cudaMemcpy(this->targetTokenIdsBuffer.deviceData, this->packH2dDevice.deviceData + tokenCount, bytes, cudaMemcpyDeviceToDevice),
-        "CudaLanguageModel::flushPackedHostBuffers D2D targets");
-    CudaMatmul::throwIfCudaFailed(
-        cudaMemcpy(this->meanDivisorBuffer.deviceData, this->packH2dDevice.deviceData + 2 * tokenCount, bytes, cudaMemcpyDeviceToDevice),
-        "CudaLanguageModel::flushPackedHostBuffers D2D meanDivisors");
+
+    const bool useGraphPath = this->preferTrainGraph && !this->activationCheckpointing;
+    if (useGraphPath)
+        this->ensureTrainStream();
+
+    if (useGraphPath && this->trainStream != nullptr) {
+        CudaMatmul::throwIfCudaFailed(
+            cudaMemcpyAsync(this->tokenIdsBuffer.deviceData, this->packH2dDevice.deviceData, bytes, cudaMemcpyDeviceToDevice, this->trainStream),
+            "flushPackedHostBuffers D2D inputs");
+        CudaMatmul::throwIfCudaFailed(
+            cudaMemcpyAsync(this->targetTokenIdsBuffer.deviceData, this->packH2dDevice.deviceData + tokenCount, bytes, cudaMemcpyDeviceToDevice, this->trainStream),
+            "flushPackedHostBuffers D2D targets");
+        CudaMatmul::throwIfCudaFailed(
+            cudaMemcpyAsync(this->meanDivisorBuffer.deviceData, this->packH2dDevice.deviceData + 2 * tokenCount, bytes, cudaMemcpyDeviceToDevice, this->trainStream),
+            "flushPackedHostBuffers D2D meanDivisors");
+    } else {
+        CudaMatmul::throwIfCudaFailed(
+            cudaMemcpy(this->tokenIdsBuffer.deviceData, this->packH2dDevice.deviceData, bytes, cudaMemcpyDeviceToDevice),
+            "CudaLanguageModel::flushPackedHostBuffers D2D inputs");
+        CudaMatmul::throwIfCudaFailed(
+            cudaMemcpy(this->targetTokenIdsBuffer.deviceData, this->packH2dDevice.deviceData + tokenCount, bytes, cudaMemcpyDeviceToDevice),
+            "CudaLanguageModel::flushPackedHostBuffers D2D targets");
+        CudaMatmul::throwIfCudaFailed(
+            cudaMemcpy(this->meanDivisorBuffer.deviceData, this->packH2dDevice.deviceData + 2 * tokenCount, bytes, cudaMemcpyDeviceToDevice),
+            "CudaLanguageModel::flushPackedHostBuffers D2D meanDivisors");
+    }
 
     this->adamWindowTokenIds.insert(
         this->adamWindowTokenIds.end(),
         this->packedInputTokenIds.begin(),
         this->packedInputTokenIds.end());
 
-    this->forwardTrunkFromDevice(tokenCount, segmentLength);
+    if (useGraphPath && this->tryLaunchTrainGraph(segmentLength, exampleCount))
+        return 0.0f;
 
-    if (this->epochLossSum.rows != 1 || this->epochLossSum.cols != 1)
-        this->epochLossSum.ensureSize(1, 1);
-    this->accumulateChunkedProjection(tokenCount, segmentLength, exampleCount, gradients);
-
-    this->finalNorm.backward(this->hiddenGradient, this->normInputGradientScratch, this->finalNormGammaGradient);
-    CudaOps::addInPlace(gradients.finalNormGamma, this->finalNormGammaGradient);
-    std::swap(this->hiddenGradient, this->normInputGradientScratch);
-
-    for (int blockIndex = static_cast<int>(this->blocks.size()) - 1; blockIndex >= 0; --blockIndex) {
-        if (this->activationCheckpointing) {
-            if (this->useHalfActivationCheckpoints()) {
-                CudaAmp::castToFloat(
-                    this->blockInputCheckpointsHalf[static_cast<size_t>(blockIndex)],
-                    this->checkpointRestoreScratch);
-                this->checkpointRestoreScratch.cols = this->hiddenGradient.cols;
-                this->blocks[static_cast<size_t>(blockIndex)].forward(
-                    this->checkpointRestoreScratch,
-                    this->normalized,
-                    segmentLength);
-            } else {
-                this->blocks[static_cast<size_t>(blockIndex)].forward(
-                    this->blockInputCheckpoints[static_cast<size_t>(blockIndex)],
-                    this->normalized,
-                    segmentLength);
-            }
+    if (useGraphPath
+        && this->trainGraphWarmups >= CudaLanguageModel::trainGraphWarmupNeeded
+        && this->trainGraphExec == nullptr) {
+        try {
+            this->captureTrainGraph(tokenCount, segmentLength, exampleCount, gradients);
+            // Capture records only — launch once so this microstep still applies grads.
+            CudaMatmul::throwIfCudaFailed(cudaGraphLaunch(this->trainGraphExec, this->trainStream), "flushPackedHostBuffers post-capture launch");
+            CudaMatmul::throwIfCudaFailed(cudaStreamSynchronize(this->trainStream), "flushPackedHostBuffers capture sync");
+            return 0.0f;
+        } catch (const std::exception&) {
+            this->releaseTrainGraph();
+            this->preferTrainGraph = false;
+            // Fall through to eager path once; subsequent steps stay eager.
         }
-        this->blocks[static_cast<size_t>(blockIndex)].backward(this->hiddenGradient, this->blockInputGradientScratch, gradients.blocks[static_cast<size_t>(blockIndex)]);
-        std::swap(this->hiddenGradient, this->blockInputGradientScratch);
     }
 
-    CudaOps::embeddingScatterAddInto(gradients.tokenEmbedding, this->tokenIdsBuffer, tokenCount, this->hiddenGradient);
+    if (useGraphPath && this->trainStream != nullptr) {
+        const cudaStream_t previous = CudaMatmul::setActiveStream(this->trainStream);
+        try {
+            this->runPackedTrainDevice(tokenCount, segmentLength, exampleCount, gradients);
+            CudaMatmul::throwIfCudaFailed(cudaStreamSynchronize(this->trainStream), "flushPackedHostBuffers eager sync");
+        } catch (...) {
+            CudaMatmul::setActiveStream(previous);
+            throw;
+        }
+        CudaMatmul::setActiveStream(previous);
+        ++this->trainGraphWarmups;
+        return 0.0f;
+    }
+
+    this->runPackedTrainDevice(tokenCount, segmentLength, exampleCount, gradients);
     return 0.0f;
 }
 
