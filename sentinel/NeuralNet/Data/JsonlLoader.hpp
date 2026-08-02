@@ -1,36 +1,23 @@
 #ifndef JSONLLOADER_HPP
 #define JSONLLOADER_HPP
 
+#include "TextRowReader.hpp"
+
 #include <fstream>
 #include <string>
 #include <vector>
 
-/// <summary>one SERA sample row (only the fields we care about)</summary>
-class JsonlRow {
-public:
-    std::string text;   // problem_statement
-    std::string source; // e.g. Sera-4.6-Lite-T1 / T2
-};
+/// <summary>legacy alias; prefer CorpusRow</summary>
+using JsonlRow = CorpusRow;
 
 /// <summary>streams a .jsonl file one chunk of rows at a time</summary>
-class JsonlChunkReader {
+class JsonlChunkReader : public TextRowReader {
 public:
-    /// <summary>open path for reading; throws if the file cannot be opened</summary>
-    void open(const std::string& path);
-
-    /// <summary>seek back to the start of the file</summary>
-    void rewind();
-
-    /// <summary>
-    /// fill out with up to maxRows non-empty parsed rows
-    /// returns false when the file is exhausted (out may still hold a final partial chunk)
-    /// </summary>
-    bool nextRows(std::vector<JsonlRow>& out, int maxRows);
-
-    bool isOpen() const;
-
-    /// <summary>valid rows returned since open/rewind</summary>
-    size_t rowsRead() const;
+    void open(const std::string& path) override;
+    void rewind() override;
+    bool nextRows(std::vector<CorpusRow>& out, int maxRows) override;
+    bool isOpen() const override;
+    size_t rowsRead() const override;
 
 private:
     std::ifstream file;
@@ -42,13 +29,13 @@ private:
 class JsonlLoader {
 public:
     /// <summary>load up to maximumRows lines from a .jsonl file (maximumRows less than 1 means no limit)</summary>
-    static std::vector<JsonlRow> load(const std::string& path, int maximumRows = 50);
+    static std::vector<CorpusRow> load(const std::string& path, int maximumRows = 50);
 
     /// <summary>map source string to class id (T1=0, T2=1, else -1)</summary>
     static int sourceToLabel(const std::string& source);
 
     /// <summary>parse one JSONL line into a row; returns false if text is empty / unusable</summary>
-    static bool tryParseLine(const std::string& line, JsonlRow& out);
+    static bool tryParseLine(const std::string& line, CorpusRow& out);
 
 private:
     static std::string extractString(const std::string& line, const std::string& key);

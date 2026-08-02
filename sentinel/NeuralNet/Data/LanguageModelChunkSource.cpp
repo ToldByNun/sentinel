@@ -34,7 +34,7 @@ LanguageModelChunkSource::LanguageModelChunkSource(
     this->trainSplitRatio = trainRatio;
     this->splitSeed = seed;
     this->testCap = testReservoirCap;
-    this->reader.open(this->path);
+    this->reader = createTextRowReader(this->path);
 }
 
 void LanguageModelChunkSource::setTokenizer(const BPETokenizer* tokenizer) {
@@ -73,12 +73,12 @@ bool LanguageModelChunkSource::tryMakeExampleFromText(const std::string& text, L
     return true;
 }
 
-bool LanguageModelChunkSource::tryMakeExample(const JsonlRow& row, LanguageModelExample& out) const {
+bool LanguageModelChunkSource::tryMakeExample(const CorpusRow& row, LanguageModelExample& out) const {
     return this->tryMakeExampleFromText(this->truncateText(row.text), out);
 }
 
-void LanguageModelChunkSource::resetJsonlCursor() {
-    this->reader.rewind();
+void LanguageModelChunkSource::resetRowCursor() {
+    this->reader->rewind();
     this->pendingRows.clear();
     this->pendingBaseIndex = 0;
     this->pendingCursor = 0;
@@ -91,8 +91,8 @@ bool LanguageModelChunkSource::refillPendingRows() {
     if (this->pendingCursor < this->pendingRows.size()) return true;
     if (this->streamExhausted) return false;
 
-    const bool moreAvailable = this->reader.nextRows(this->pendingRows, LanguageModelChunkSource::rowReadBatch);
-    this->pendingBaseIndex = this->reader.rowsRead() - this->pendingRows.size();
+    const bool moreAvailable = this->reader->nextRows(this->pendingRows, LanguageModelChunkSource::rowReadBatch);
+    this->pendingBaseIndex = this->reader->rowsRead() - this->pendingRows.size();
     this->pendingCursor = 0;
 
     if (this->pendingRows.empty()) {
@@ -109,21 +109,21 @@ bool LanguageModelChunkSource::refillPendingRows() {
 std::vector<std::string> LanguageModelChunkSource::prepareTokenizerSample(int maxRows) {
     if (maxRows <= 0) throw std::invalid_argument("LanguageModelChunkSource::prepareTokenizerSample maxRows must be > 0");
 
-    this->resetJsonlCursor();
+    this->resetRowCursor();
 
     std::vector<std::string> texts;
     texts.reserve(static_cast<size_t>(maxRows));
 
     while (static_cast<int>(texts.size()) < maxRows && this->refillPendingRows()) {
         const size_t rowIndex = this->pendingBaseIndex + this->pendingCursor;
-        const JsonlRow& row = this->pendingRows[this->pendingCursor];
+        const CorpusRow& row = this->pendingRows[this->pendingCursor];
         ++this->pendingCursor;
 
         if (!this->isTrainRow(rowIndex)) continue;
         texts.push_back(this->truncateText(row.text));
     }
 
-    this->resetJsonlCursor();
+    this->resetRowCursor();
     return texts;
 }
 
@@ -174,7 +174,7 @@ void LanguageModelChunkSource::materialize() {
     this->testReservoir.vocabularySize = this->tokenizer->vocabSize();
     this->materialized = false;
 
-    this->resetJsonlCursor();
+    this->resetRowCursor();
 
     std::vector<size_t> batchIndices;
     std::vector<std::string> batchTexts;
@@ -184,7 +184,7 @@ void LanguageModelChunkSource::materialize() {
 
     while (this->refillPendingRows()) {
         const size_t rowIndex = this->pendingBaseIndex + this->pendingCursor;
-        const JsonlRow& row = this->pendingRows[this->pendingCursor];
+        const CorpusRow& row = this->pendingRows[this->pendingCursor];
         ++this->pendingCursor;
         ++rowsSeen;
 
@@ -199,7 +199,7 @@ void LanguageModelChunkSource::materialize() {
     }
 
     this->encodeBatchIntoDatasets(batchIndices, batchTexts);
-    this->resetJsonlCursor();
+    this->resetRowCursor();
     this->materialized = true;
 
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();

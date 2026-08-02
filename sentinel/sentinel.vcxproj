@@ -25,6 +25,7 @@
     <ClCompile Include="NeuralNet\Data\ClassificationDataset.cpp" />
     <ClCompile Include="NeuralNet\Data\DatasetSplit.cpp" />
     <ClCompile Include="NeuralNet\Data\JsonlLoader.cpp" />
+    <ClCompile Include="NeuralNet\Data\TextRowReader.cpp" />
     <ClCompile Include="NeuralNet\Data\LanguageModelChunkSource.cpp" />
     <ClCompile Include="NeuralNet\Data\LanguageModelDataset.cpp" />
     <ClCompile Include="NeuralNet\Initializers\UniformInit.cpp" />
@@ -66,6 +67,7 @@
     <ClInclude Include="NeuralNet\Data\ClassificationDataset.hpp" />
     <ClInclude Include="NeuralNet\Data\DatasetSplit.hpp" />
     <ClInclude Include="NeuralNet\Data\JsonlLoader.hpp" />
+    <ClInclude Include="NeuralNet\Data\TextRowReader.hpp" />
     <ClInclude Include="NeuralNet\Data\LanguageModelChunkSource.hpp" />
     <ClInclude Include="NeuralNet\Data\LanguageModelDataset.hpp" />
     <ClInclude Include="NeuralNet\Initializers\UniformInit.hpp" />

@@ -38,7 +38,7 @@ std::string JsonlLoader::extractString(const std::string& line, const std::strin
     return result;
 }
 
-bool JsonlLoader::tryParseLine(const std::string& line, JsonlRow& out) {
+bool JsonlLoader::tryParseLine(const std::string& line, CorpusRow& out) {
     if (line.empty()) return false;
 
     out.text = JsonlLoader::extractString(line, "problem_statement");
@@ -73,7 +73,7 @@ void JsonlChunkReader::rewind() {
     this->rowsConsumed = 0;
 }
 
-bool JsonlChunkReader::nextRows(std::vector<JsonlRow>& out, int maxRows) {
+bool JsonlChunkReader::nextRows(std::vector<CorpusRow>& out, int maxRows) {
     if (!this->file.is_open()) throw std::logic_error("JsonlChunkReader::nextRows not open");
     if (maxRows <= 0) throw std::invalid_argument("JsonlChunkReader::nextRows maxRows must be > 0");
 
@@ -82,7 +82,7 @@ bool JsonlChunkReader::nextRows(std::vector<JsonlRow>& out, int maxRows) {
 
     std::string line;
     while (static_cast<int>(out.size()) < maxRows && std::getline(this->file, line)) {
-        JsonlRow row;
+        CorpusRow row;
         if (!JsonlLoader::tryParseLine(line, row)) continue;
 
         out.push_back(std::move(row));
@@ -100,17 +100,17 @@ size_t JsonlChunkReader::rowsRead() const {
     return this->rowsConsumed;
 }
 
-std::vector<JsonlRow> JsonlLoader::load(const std::string& path, int maximumRows) {
+std::vector<CorpusRow> JsonlLoader::load(const std::string& path, int maximumRows) {
     JsonlChunkReader reader;
     reader.open(path);
 
-    std::vector<JsonlRow> rows;
+    std::vector<CorpusRow> rows;
     if (maximumRows > 0) {
         reader.nextRows(rows, maximumRows);
         return rows;
     }
 
-    std::vector<JsonlRow> chunk;
+    std::vector<CorpusRow> chunk;
     const int chunkSize = 1024;
     while (reader.nextRows(chunk, chunkSize) || !chunk.empty()) {
         rows.insert(rows.end(), std::make_move_iterator(chunk.begin()), std::make_move_iterator(chunk.end()));
