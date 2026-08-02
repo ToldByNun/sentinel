@@ -1,9 +1,13 @@
 #include "BPETokenizer.hpp"
 
+#include "../Utils/SmokeLog.hpp"
+
+#include <cctype>
 #include <chrono>
+#include <climits>
+#include <cstdint>
 #include <cstdio>
 #include <iterator>
-#include <sstream>
 #include <stdexcept>
 #include <utility>
 
@@ -11,10 +15,10 @@
 #include <omp.h>
 #endif
 
-size_t BPETokenizer::PairHash::operator()(const Pair& pair) const {
-    size_t hashFirst = std::hash<std::string>{}(pair.first);
-    size_t hashSecond = std::hash<std::string>{}(pair.second);
-    return hashFirst ^ (hashSecond << 1);
+size_t BPETokenizer::IntPairHash::operator()(const IntPair& pair) const {
+    const std::uint64_t packed = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(pair.left)) << 32)
+        | static_cast<std::uint32_t>(pair.right);
+    return std::hash<std::uint64_t>{}(packed);
 }
 
 void BPETokenizer::train(const std::string& text, int vocabSize) {
@@ -28,11 +32,14 @@ void BPETokenizer::train(const std::vector<std::string>& corpus, int vocabSize) 
 
     this->tokenToId_.clear();
     this->idToToken_.clear();
-    this->merges_.clear();
+    this->mergeRules_.clear();
+    this->mergeRank_.clear();
 
     this->addUnknownToken();
     this->buildBaseVocabulary(corpus);
+    this->rebuildByteToId();
     this->learnMerges(corpus, vocabSize);
+    this->rebuildMergeRank();
 
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 #if defined(_OPENMP)
@@ -40,11 +47,12 @@ void BPETokenizer::train(const std::vector<std::string>& corpus, int vocabSize) 
 #else
     const int threads = 1;
 #endif
-    std::printf(
-        "BPETokenizer::train: corpus=%zu vocab=%d merges=%zu threads=%d sec=%.2f\n",
+    SmokeLog::result(
+        "BPETokenizer::train",
+        "corpus=%zu vocab=%d merges=%zu threads=%d sec=%.2f",
         corpus.size(),
         this->vocabSize(),
-        this->merges_.size(),
+        this->mergeRules_.size(),
         threads,
         seconds);
 }
@@ -63,18 +71,17 @@ int BPETokenizer::lookupTokenId(const std::string& token) const {
 
 std::vector<int> BPETokenizer::encode(const std::string& text) const {
     std::vector<int> tokenIds;
-    std::vector<std::string> words = this->preTokenize(text);
+    const std::vector<std::string> words = this->preTokenize(text);
+    tokenIds.reserve(text.size());
 
     for (const std::string& word : words) {
-        std::vector<std::string> tokens;
-        tokens.reserve(word.size());
-        for (char character : word)
-            tokens.emplace_back(1, character);
+        std::vector<int> pieces;
+        pieces.reserve(word.size());
+        for (unsigned char character : word)
+            pieces.push_back(this->byteToId_[character]);
 
-        tokens = this->applyMerges(tokens);
-
-        for (const std::string& token : tokens)
-            tokenIds.push_back(this->lookupTokenId(token));
+        pieces = this->applyMergeRules(std::move(pieces));
+        tokenIds.insert(tokenIds.end(), pieces.begin(), pieces.end());
     }
 
     return tokenIds;
@@ -113,8 +120,9 @@ const std::string& BPETokenizer::idToToken(int tokenId) const {
 
 void BPETokenizer::buildBaseVocabulary(const std::vector<std::string>& corpus) {
     for (const std::string& text : corpus) {
-        for (char character : text) {
-            std::string token(1, character);
+        for (unsigned char character : text) {
+            const char bytes[1] = { static_cast<char>(character) };
+            const std::string token(bytes, 1);
             if (this->tokenToId_.find(token) != this->tokenToId_.end()) continue;
             this->tokenToId_[token] = static_cast<int>(this->idToToken_.size());
             this->idToToken_.push_back(token);
@@ -122,73 +130,62 @@ void BPETokenizer::buildBaseVocabulary(const std::vector<std::string>& corpus) {
     }
 }
 
-void BPETokenizer::learnMerges(const std::vector<std::string>& corpus, int vocabSize) {
-    std::vector<std::vector<std::string>> words;
-    const int corpusCount = static_cast<int>(corpus.size());
+void BPETokenizer::rebuildByteToId() {
+    for (int index = 0; index < 256; ++index)
+        this->byteToId_[index] = this->unknownTokenId_;
+    for (size_t tokenId = 0; tokenId < this->idToToken_.size(); ++tokenId) {
+        const std::string& token = this->idToToken_[tokenId];
+        if (token.size() == 1)
+            this->byteToId_[static_cast<unsigned char>(token[0])] = static_cast<int>(tokenId);
+    }
+}
 
-#if defined(_OPENMP)
-    #pragma omp parallel
-    {
-        std::vector<std::vector<std::string>> localWords;
-        #pragma omp for schedule(dynamic, 4) nowait
-        for (int textIndex = 0; textIndex < corpusCount; ++textIndex) {
-            for (const std::string& word : this->preTokenize(corpus[static_cast<size_t>(textIndex)])) {
-                std::vector<std::string> tokens;
-                tokens.reserve(word.size());
-                for (char character : word)
-                    tokens.emplace_back(1, character);
-                if (!tokens.empty())
-                    localWords.push_back(std::move(tokens));
-            }
-        }
-        #pragma omp critical(bpe_words)
-        {
-            words.insert(
-                words.end(),
-                std::make_move_iterator(localWords.begin()),
-                std::make_move_iterator(localWords.end()));
-        }
+void BPETokenizer::rebuildMergeRank() {
+    this->mergeRank_.clear();
+    this->mergeRank_.reserve(this->mergeRules_.size() * 2);
+    for (size_t index = 0; index < this->mergeRules_.size(); ++index) {
+        const MergeRule& rule = this->mergeRules_[index];
+        this->mergeRank_[{rule.leftId, rule.rightId}] = static_cast<int>(index);
     }
-#else
+}
+
+void BPETokenizer::learnMerges(const std::vector<std::string>& corpus, int vocabSize) {
+    std::unordered_map<std::string, int> wordFrequency;
     for (const std::string& text : corpus) {
-        for (const std::string& word : this->preTokenize(text)) {
-            std::vector<std::string> tokens;
-            tokens.reserve(word.size());
-            for (char character : word)
-                tokens.emplace_back(1, character);
-            if (!tokens.empty())
-                words.push_back(std::move(tokens));
-        }
+        for (const std::string& word : this->preTokenize(text))
+            wordFrequency[word]++;
     }
-#endif
+
+    struct WordForm {
+        std::vector<int> tokens;
+        int frequency = 0;
+    };
+
+    std::vector<WordForm> words;
+    words.reserve(wordFrequency.size());
+    for (const auto& entry : wordFrequency) {
+        WordForm form;
+        form.frequency = entry.second;
+        form.tokens.reserve(entry.first.size());
+        for (unsigned char character : entry.first)
+            form.tokens.push_back(this->byteToId_[character]);
+        if (!form.tokens.empty())
+            words.push_back(std::move(form));
+    }
 
     const int wordCount = static_cast<int>(words.size());
+    const int mergesTarget = vocabSize - this->vocabSize();
+    int mergesDone = 0;
 
-    while (static_cast<int>(this->idToToken_.size()) < vocabSize) {
-        std::unordered_map<Pair, int, PairHash> pairCounts;
+    while (this->vocabSize() < vocabSize) {
+        std::unordered_map<IntPair, int, IntPairHash> pairCounts;
+        pairCounts.reserve(static_cast<size_t>(wordCount) * 2u);
 
-#if defined(_OPENMP)
-        #pragma omp parallel
-        {
-            std::unordered_map<Pair, int, PairHash> localCounts;
-            #pragma omp for schedule(static) nowait
-            for (int wordIndex = 0; wordIndex < wordCount; ++wordIndex) {
-                const std::vector<std::string>& tokens = words[static_cast<size_t>(wordIndex)];
-                for (size_t tokenIndex = 0; tokenIndex + 1 < tokens.size(); ++tokenIndex)
-                    localCounts[{tokens[tokenIndex], tokens[tokenIndex + 1]}]++;
-            }
-            #pragma omp critical(bpe_pairs)
-            {
-                for (const auto& entry : localCounts)
-                    pairCounts[entry.first] += entry.second;
-            }
-        }
-#else
-        for (const auto& tokens : words) {
+        for (const WordForm& form : words) {
+            const std::vector<int>& tokens = form.tokens;
             for (size_t tokenIndex = 0; tokenIndex + 1 < tokens.size(); ++tokenIndex)
-                pairCounts[{tokens[tokenIndex], tokens[tokenIndex + 1]}]++;
+                pairCounts[{tokens[tokenIndex], tokens[tokenIndex + 1]}] += form.frequency;
         }
-#endif
 
         if (pairCounts.empty()) break;
 
@@ -197,26 +194,36 @@ void BPETokenizer::learnMerges(const std::vector<std::string>& corpus, int vocab
             if (entry->second > best->second) best = entry;
         }
 
-        const Pair bestPair = best->first;
-        const std::string merged = bestPair.first + bestPair.second;
+        const IntPair bestPair = best->first;
+        const std::string merged = this->idToToken_[bestPair.left] + this->idToToken_[bestPair.right];
+        const int mergedId = static_cast<int>(this->idToToken_.size());
 
-        this->merges_.push_back(bestPair);
-        this->tokenToId_[merged] = static_cast<int>(this->idToToken_.size());
+        this->tokenToId_[merged] = mergedId;
         this->idToToken_.push_back(merged);
+        this->mergeRules_.push_back({bestPair.left, bestPair.right, mergedId});
+        ++mergesDone;
 
 #if defined(_OPENMP)
         #pragma omp parallel for schedule(dynamic, 64)
 #endif
         for (int wordIndex = 0; wordIndex < wordCount; ++wordIndex) {
-            std::vector<std::string>& tokens = words[static_cast<size_t>(wordIndex)];
-            std::vector<std::string> updated;
-            updated.reserve(tokens.size());
+            std::vector<int>& tokens = words[static_cast<size_t>(wordIndex)].tokens;
+            bool changed = false;
+            for (size_t tokenIndex = 0; tokenIndex + 1 < tokens.size(); ++tokenIndex) {
+                if (tokens[tokenIndex] == bestPair.left && tokens[tokenIndex + 1] == bestPair.right) {
+                    changed = true;
+                    break;
+                }
+            }
+            if (!changed) continue;
 
+            std::vector<int> updated;
+            updated.reserve(tokens.size());
             for (size_t tokenIndex = 0; tokenIndex < tokens.size();) {
                 if (tokenIndex + 1 < tokens.size()
-                    && tokens[tokenIndex] == bestPair.first
-                    && tokens[tokenIndex + 1] == bestPair.second) {
-                    updated.push_back(merged);
+                    && tokens[tokenIndex] == bestPair.left
+                    && tokens[tokenIndex + 1] == bestPair.right) {
+                    updated.push_back(mergedId);
                     tokenIndex += 2;
                     continue;
                 }
@@ -224,55 +231,75 @@ void BPETokenizer::learnMerges(const std::vector<std::string>& corpus, int vocab
                 updated.push_back(tokens[tokenIndex]);
                 ++tokenIndex;
             }
-
             tokens = std::move(updated);
         }
+
+        if (mergesDone == 1 || mergesDone % 50 == 0 || this->vocabSize() >= vocabSize
+            || (mergesTarget > 0 && mergesDone >= mergesTarget)) {
+            SmokeLog::progress(
+                "BPETokenizer::train",
+                "merge %d/%d vocab=%d uniqueWords=%d",
+                mergesDone,
+                mergesTarget > 0 ? mergesTarget : mergesDone,
+                this->vocabSize(),
+                wordCount);
+        }
     }
+
+    SmokeLog::progressDone();
 }
 
 std::vector<std::string> BPETokenizer::preTokenize(const std::string& text) const {
     std::vector<std::string> words;
-    std::istringstream stream(text);
-    std::string word;
-    bool isFirstWord = true;
+    const size_t length = text.size();
+    size_t index = 0;
 
-    while (stream >> word) {
-        if (isFirstWord) {
-            words.push_back(word);
-            isFirstWord = false;
-            continue;
+    while (index < length) {
+        while (index < length && std::isspace(static_cast<unsigned char>(text[index])))
+            ++index;
+        if (index >= length) break;
+
+        const size_t start = index;
+        while (index < length && !std::isspace(static_cast<unsigned char>(text[index])))
+            ++index;
+
+        if (words.empty()) {
+            words.emplace_back(text, start, index - start);
+        } else {
+            std::string word;
+            word.reserve(1 + (index - start));
+            word.push_back(' ');
+            word.append(text, start, index - start);
+            words.push_back(std::move(word));
         }
-
-        // keep a leading space so decode can restore whitespace (GPT-2 style)
-        words.push_back(" " + word);
     }
 
     return words;
 }
 
-std::vector<std::string> BPETokenizer::applyMerges(const std::vector<std::string>& tokens) const {
-    std::vector<std::string> result = tokens;
+std::vector<int> BPETokenizer::applyMergeRules(std::vector<int> tokenIds) const {
+    if (this->mergeRules_.empty() || tokenIds.size() < 2)
+        return tokenIds;
 
-    for (const Pair& merge : this->merges_) {
-        const std::string merged = merge.first + merge.second;
-        std::vector<std::string> updated;
-        updated.reserve(result.size());
+    while (tokenIds.size() >= 2) {
+        int bestRank = INT_MAX;
+        int bestPos = -1;
 
-        for (size_t tokenIndex = 0; tokenIndex < result.size();) {
-            if (tokenIndex + 1 < result.size()
-                && result[tokenIndex] == merge.first
-                && result[tokenIndex + 1] == merge.second) {
-                updated.push_back(merged);
-                tokenIndex += 2;
-                continue;
+        for (size_t index = 0; index + 1 < tokenIds.size(); ++index) {
+            const auto found = this->mergeRank_.find({tokenIds[index], tokenIds[index + 1]});
+            if (found == this->mergeRank_.end()) continue;
+            if (found->second < bestRank) {
+                bestRank = found->second;
+                bestPos = static_cast<int>(index);
             }
-
-            updated.push_back(result[tokenIndex]);
-            ++tokenIndex;
         }
 
-        result = std::move(updated);
+        if (bestPos < 0) break;
+
+        const MergeRule& rule = this->mergeRules_[static_cast<size_t>(bestRank)];
+        tokenIds[static_cast<size_t>(bestPos)] = rule.resultId;
+        tokenIds.erase(tokenIds.begin() + bestPos + 1);
     }
 
-    return result;
+    return tokenIds;
 }

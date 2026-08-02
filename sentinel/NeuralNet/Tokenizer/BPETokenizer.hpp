@@ -3,7 +3,6 @@
 
 #include <string>
 #include <unordered_map>
-#include <utility>
 #include <vector>
 
 /// <summary>BPE tokenizer call train() before encode/decode unknown pieces map to unk</summary>
@@ -32,22 +31,39 @@ public:
     const std::string& idToToken(int tokenId) const;
 
 private:
-    using Pair = std::pair<std::string, std::string>;
+    struct IntPair {
+        int left = 0;
+        int right = 0;
 
-    struct PairHash {
-        std::size_t operator()(const Pair& pair) const;
+        bool operator==(const IntPair& other) const {
+            return this->left == other.left && this->right == other.right;
+        }
+    };
+
+    struct IntPairHash {
+        std::size_t operator()(const IntPair& pair) const;
+    };
+
+    struct MergeRule {
+        int leftId = 0;
+        int rightId = 0;
+        int resultId = 0;
     };
 
     std::unordered_map<std::string, int> tokenToId_;
     std::vector<std::string> idToToken_;
-    std::vector<Pair> merges_;
+    std::vector<MergeRule> mergeRules_;
+    std::unordered_map<IntPair, int, IntPairHash> mergeRank_;
+    int byteToId_[256] = {};
     int unknownTokenId_ = 0;
 
     void addUnknownToken();
     void buildBaseVocabulary(const std::vector<std::string>& corpus);
     void learnMerges(const std::vector<std::string>& corpus, int vocabSize);
+    void rebuildMergeRank();
+    void rebuildByteToId();
     std::vector<std::string> preTokenize(const std::string& text) const;
-    std::vector<std::string> applyMerges(const std::vector<std::string>& tokens) const;
+    std::vector<int> applyMergeRules(std::vector<int> tokenIds) const;
     int lookupTokenId(const std::string& token) const;
 };
 

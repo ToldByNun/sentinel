@@ -31,6 +31,22 @@ public:
         va_end(args);
         std::printf("\n");
     }
+
+    /// <summary>same-line progress (\\r); call progressDone() before the next normal log line</summary>
+    static void progress(const char* name, const char* format, ...) {
+        std::printf("\r  %-34s  ", name);
+        va_list args;
+        va_start(args, format);
+        std::vprintf(format, args);
+        va_end(args);
+        std::fflush(stdout);
+    }
+
+    /// <summary>end a progress line so the next printf starts clean</summary>
+    static void progressDone() {
+        std::printf("\n");
+        std::fflush(stdout);
+    }
 };
 
 #endif // SMOKELOG_HPP
