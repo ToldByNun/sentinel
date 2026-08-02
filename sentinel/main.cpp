@@ -4,6 +4,7 @@
 #include "NeuralNet/Cuda/CudaRMSNorm.hpp"
 #include "NeuralNet/Cuda/CudaCausalSelfAttention.hpp"
 #include "NeuralNet/Cuda/CudaAdam.hpp"
+#include "NeuralNet/Cuda/CudaAmp.hpp"
 #include "NeuralNet/Cuda/CudaTransformerBlock.hpp"
 #include "NeuralNet/Layers/CausalSelfAttention.hpp"
 #include "NeuralNet/Tokenizer/BPETokenizer.hpp"
@@ -14,9 +15,12 @@
 #include "NeuralNet/Utils/SmokeLog.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cuda_runtime.h>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -31,26 +35,139 @@
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
 
-    // Scale-to-VRAM run: larger LM + CPU Adam offload (ZeRO-Offload Stage-1)
-    // set false → skip smokes and go straight into SERA train
+    // Throughput defaults for 8x768 on 16GB: GPU int8 Adam + no activation checkpointing.
+    // Flip preferCpuAdamOffload / useCheckpointing when VRAM is the limiter, not tok/s.
     const bool runSmokes = false;
+    const bool runSpeedBench = false;
 
     const std::string samplePath = "../SERA-Data/sera_sample.jsonl";
     const size_t maximumTextCharacters = 1200;
     const size_t maximumTokenCount = 512;
     const float trainRatio = 0.8f;
-    const int embeddingDim = 512;
+    const int embeddingDim = 768;
     const int blockCount = 8;
-    const int headCount = 8;
+    const int headCount = 12;
     const int maximumPositionCount = static_cast<int>(maximumTokenCount);
     const int trainEpochs = 2;
-    const int trainBatchSize = 128;
+    const int trainBatchSize = 64;
     const int trainGradAccum = 2;
     const int chunkExampleCount = 2048;
     const int tokenizerVocabSize = 4000;
     const int tokenizerSampleRows = 2000;
     const int testReservoirCap = 512;
-    const bool preferCpuAdamOffload = true;
+    const bool preferCpuAdamOffload = false;
+    const bool useCheckpointing = false;
+
+    if (runSpeedBench) {
+        SmokeLog::section("speed bench");
+        if (!CudaMatmul::isAvailable()) {
+            SmokeLog::skip("speed bench (no CUDA)");
+            return 1;
+        }
+
+        const int vocab = 4000;
+        const int seq = 256;
+        const int warmupSteps = 2;
+        const int timedSteps = 8;
+
+        LanguageModel host(vocab, embeddingDim, maximumPositionCount, Adam(0.001f), blockCount, headCount);
+
+        auto timeMode = [&](bool cpuOffload, bool checkpointing, const char* label) {
+            const bool previousAmp = CudaAmp::preferMixedPrecision;
+            const bool previousInt8 = CudaAdam::preferInt8Moments;
+            const bool previousCpu = CudaAdam::preferCpuOffload;
+            CudaAmp::preferMixedPrecision = true;
+            CudaAmp::useLossScaling = embeddingDim >= 256;
+            CudaAmp::resetLossScaler();
+            CudaAdam::preferCpuOffload = cpuOffload;
+            CudaAdam::preferInt8Moments = !cpuOffload;
+
+            size_t freeBefore = 0;
+            size_t totalBytes = 0;
+            if (cudaMemGetInfo(&freeBefore, &totalBytes) != cudaSuccess)
+                throw std::runtime_error("speed bench memGetInfo before failed");
+
+            CudaLanguageModel device = CudaLanguageModel::createFrom(host);
+            device.adam = CudaAdam(0.001f);
+            device.activationCheckpointing = checkpointing;
+            device.maxPackedColumnsManual = false;
+            device.applyVramPackBudget();
+            for (CudaTransformerBlock& block : device.blocks)
+                block.attention.preferFlashAttention = true;
+            device.ensureTrainState();
+
+            const int packBatch = (std::max)(1, (std::min)(32, device.maxPackedColumns / seq));
+            std::vector<LanguageModelExample> examples(static_cast<size_t>(packBatch));
+            unsigned rng = 91u;
+            for (int exampleIndex = 0; exampleIndex < packBatch; ++exampleIndex) {
+                examples[static_cast<size_t>(exampleIndex)].inputTokenIds.resize(static_cast<size_t>(seq));
+                examples[static_cast<size_t>(exampleIndex)].targetTokenIds.resize(static_cast<size_t>(seq));
+                for (size_t index = 0; index < static_cast<size_t>(seq); ++index) {
+                    rng = rng * 1664525u + 1013904223u;
+                    examples[static_cast<size_t>(exampleIndex)].inputTokenIds[index] = static_cast<int>(rng % static_cast<unsigned>(vocab));
+                    rng = rng * 1664525u + 1013904223u;
+                    examples[static_cast<size_t>(exampleIndex)].targetTokenIds[index] = static_cast<int>(rng % static_cast<unsigned>(vocab));
+                }
+            }
+            std::vector<const LanguageModelExample*> packPointers(static_cast<size_t>(packBatch));
+            for (int exampleIndex = 0; exampleIndex < packBatch; ++exampleIndex)
+                packPointers[static_cast<size_t>(exampleIndex)] = &examples[static_cast<size_t>(exampleIndex)];
+            const int tokensPerStep = seq * packBatch;
+
+            size_t freeAfterSetup = 0;
+            if (cudaMemGetInfo(&freeAfterSetup, &totalBytes) != cudaSuccess)
+                throw std::runtime_error("speed bench memGetInfo after setup failed");
+
+            for (int step = 0; step < warmupSteps; ++step) {
+                device.trainGradients.zeroInPlace();
+                device.accumulatePackedExamples(packPointers.data(), packBatch, device.trainGradients);
+                device.applyGradients(device.trainGradients, 1.0f / static_cast<float>(packBatch));
+            }
+            if (cudaDeviceSynchronize() != cudaSuccess)
+                throw std::runtime_error("speed bench warmup sync failed");
+
+            const auto start = std::chrono::steady_clock::now();
+            for (int step = 0; step < timedSteps; ++step) {
+                device.trainGradients.zeroInPlace();
+                device.accumulatePackedExamples(packPointers.data(), packBatch, device.trainGradients);
+                device.applyGradients(device.trainGradients, 1.0f / static_cast<float>(packBatch));
+            }
+            if (cudaDeviceSynchronize() != cudaSuccess)
+                throw std::runtime_error("speed bench timed sync failed");
+            const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            const double tokensPerSecond = seconds > 0.0
+                ? static_cast<double>(tokensPerStep) * static_cast<double>(timedSteps) / seconds
+                : 0.0;
+
+            size_t freeAfterTrain = 0;
+            if (cudaMemGetInfo(&freeAfterTrain, &totalBytes) != cudaSuccess)
+                throw std::runtime_error("speed bench memGetInfo after train failed");
+
+            const double setupUsedMiB = static_cast<double>(freeBefore - freeAfterSetup) / (1024.0 * 1024.0);
+            const double trainUsedMiB = static_cast<double>(freeBefore - freeAfterTrain) / (1024.0 * 1024.0);
+            SmokeLog::result(
+                "speed",
+                "%s  embed=%d blocks=%d seq=%d pack=%d maxPackCols=%d ckpt=%s  tokens/s=%.0f  setupMiB=%.0f trainMiB=%.0f free=%.0f",
+                label, embeddingDim, blockCount, seq, packBatch, device.maxPackedColumns,
+                checkpointing ? "on" : "off",
+                tokensPerSecond, setupUsedMiB, trainUsedMiB,
+                static_cast<double>(freeAfterTrain) / (1024.0 * 1024.0));
+
+            CudaAmp::preferMixedPrecision = previousAmp;
+            CudaAdam::preferInt8Moments = previousInt8;
+            CudaAdam::preferCpuOffload = previousCpu;
+        };
+
+        try {
+            timeMode(true, true, "cpuAdam+ckpt");
+            timeMode(false, true, "int8+ckpt");
+            timeMode(false, false, "int8+noCkpt");
+        } catch (const std::exception& ex) {
+            SmokeLog::result("speed", "FAILED: %s", ex.what());
+            return 1;
+        }
+        return 0;
+    }
 
     if (runSmokes) {
         SmokeLog::section("runtime");
@@ -144,8 +261,9 @@ int main() {
     model.enableCuda();
     model.setCudaPreferCpuAdamOffload(preferCpuAdamOffload);
     model.enableCudaTrain();
+    model.enableActivationCheckpointing(useCheckpointing);
     model.setCudaPreferFlashAttention(true);
-    SmokeLog::result("model", "blocks=%zu  heads=%d  embed=%d  cuda=%s  train=%s  maxTok=%zu maxPackCols=%d flash=on stream=on batch=%d accum=%d cpuAdam=%s",
+    SmokeLog::result("model", "blocks=%zu  heads=%d  embed=%d  cuda=%s  train=%s  maxTok=%zu maxPackCols=%d flash=on stream=on batch=%d accum=%d cpuAdam=%s ckpt=%s",
         model.blocks.size(),
         model.blocks[0].attention.headCount,
         embeddingDim,
@@ -155,7 +273,8 @@ int main() {
         model.cudaMaxPackedColumns(),
         trainBatchSize,
         trainGradAccum,
-        preferCpuAdamOffload ? "on" : "off");
+        preferCpuAdamOffload ? "on" : "off",
+        useCheckpointing ? "on" : "off");
 
     if (model.cudaEnabled()) {
         Matrix deviceLogits = model.forward(parityTokenIds);

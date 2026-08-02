@@ -1,5 +1,6 @@
 #include "CudaFeedForward.hpp"
 
+#include "CudaAmp.hpp"
 #include "CudaOps.hpp"
 #include "../Utils/SmokeLog.hpp"
 
@@ -21,6 +22,29 @@ void CudaFeedForward::uploadFrom(const FeedForward& host) {
     this->upBias.upload(host.upBias);
     this->downWeight.upload(host.downWeight);
     this->downBias.upload(host.downBias);
+    this->syncFusedGateUpWeight();
+    CudaAmp::registerMasterWeight(this->gateWeight.buffer.deviceData, this->gateWeight.elementCount());
+    CudaAmp::registerMasterWeight(this->upWeight.buffer.deviceData, this->upWeight.elementCount());
+    CudaAmp::registerMasterWeight(this->downWeight.buffer.deviceData, this->downWeight.elementCount());
+    CudaAmp::registerMasterWeight(this->gateUpWeight.buffer.deviceData, this->gateUpWeight.elementCount());
+}
+
+void CudaFeedForward::syncFusedGateUpWeight() {
+    if (this->gateWeight.empty() || this->upWeight.empty()) return;
+    if (this->gateWeight.cols != this->upWeight.cols)
+        throw std::invalid_argument("CudaFeedForward::syncFusedGateUpWeight embed mismatch");
+    if (this->gateWeight.rows != this->upWeight.rows)
+        throw std::invalid_argument("CudaFeedForward::syncFusedGateUpWeight hidden mismatch");
+
+    this->gateUpWeight.ensureSize(this->gateWeight.rows + this->upWeight.rows, this->gateWeight.cols);
+    const size_t gateBytes = this->gateWeight.byteCount();
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpy(this->gateUpWeight.buffer.deviceData, this->gateWeight.buffer.deviceData, gateBytes, cudaMemcpyDeviceToDevice),
+        "CudaFeedForward::syncFusedGateUpWeight copy gate");
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpy(this->gateUpWeight.buffer.deviceData + this->gateWeight.elementCount(), this->upWeight.buffer.deviceData, this->upWeight.byteCount(), cudaMemcpyDeviceToDevice),
+        "CudaFeedForward::syncFusedGateUpWeight copy up");
+    CudaAmp::registerMasterWeight(this->gateUpWeight.buffer.deviceData, this->gateUpWeight.elementCount());
 }
 
 CudaFeedForward CudaFeedForward::createFrom(const FeedForward& host) {
@@ -35,13 +59,19 @@ void CudaFeedForward::forward(const CudaMatrix& input, CudaMatrix& out) {
     if (this->gateWeight.cols != input.rows) throw std::invalid_argument("CudaFeedForward::forward embedding dim mismatch");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaFeedForward::forward no CUDA device");
 
-    CudaMatrix::multiplyInto(this->gateWeight, input, this->gatePreActivation);
-    CudaOps::broadcastBiasAddInPlace(this->gatePreActivation, this->gateBias);
-    CudaOps::siluInto(this->gatePreActivation, this->gateActivated);
+    if (this->gateUpWeight.empty())
+        this->syncFusedGateUpWeight();
 
-    CudaMatrix::multiplyInto(this->upWeight, input, this->up);
-    CudaOps::broadcastBiasAddInPlace(this->up, this->upBias);
-    CudaOps::multiplyElementwiseInto(this->gateActivated, this->up, this->hidden);
+    this->gateUpPreActivation.ensureSize(this->gateUpWeight.rows, input.cols);
+    CudaMatrix::multiplyInto(this->gateUpWeight, input, this->gateUpPreActivation);
+    CudaOps::swigluFromStackedPreBias(
+        this->gateUpPreActivation,
+        this->gateBias,
+        this->upBias,
+        this->gatePreActivation,
+        this->up,
+        this->gateActivated,
+        this->hidden);
 
     CudaMatrix::multiplyInto(this->downWeight, this->hidden, out);
     CudaOps::broadcastBiasAddInPlace(out, this->downBias);

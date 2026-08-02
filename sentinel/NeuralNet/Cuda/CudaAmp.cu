@@ -17,9 +17,61 @@ CudaLossScaler CudaAmp::lossScaler = CudaLossScaler();
 CudaDeviceBuffer CudaAmp::halfScratchLeft = CudaDeviceBuffer();
 CudaDeviceBuffer CudaAmp::halfScratchRight = CudaDeviceBuffer();
 CudaDeviceBuffer CudaAmp::nonFiniteFlag = CudaDeviceBuffer();
+CudaAmp::MasterWeightHalf CudaAmp::masterWeights[CudaAmp::maxMasterWeights];
+int CudaAmp::masterWeightCount = 0;
 
 bool CudaAmp::lossScalingActive() {
     return CudaAmp::preferMixedPrecision && CudaAmp::useLossScaling;
+}
+
+void CudaAmp::registerMasterWeight(const float* deviceData, size_t elementCount) {
+    if (deviceData == nullptr || elementCount == 0) return;
+    for (int index = 0; index < CudaAmp::masterWeightCount; ++index) {
+        MasterWeightHalf& entry = CudaAmp::masterWeights[index];
+        if (entry.deviceData == deviceData) {
+            entry.elementCount = elementCount;
+            entry.valid = false;
+            return;
+        }
+    }
+    if (CudaAmp::masterWeightCount >= CudaAmp::maxMasterWeights) return;
+    MasterWeightHalf& entry = CudaAmp::masterWeights[CudaAmp::masterWeightCount++];
+    entry.deviceData = deviceData;
+    entry.elementCount = elementCount;
+    entry.valid = false;
+}
+
+void CudaAmp::invalidateMasterWeightHalves() {
+    for (int index = 0; index < CudaAmp::masterWeightCount; ++index)
+        CudaAmp::masterWeights[index].valid = false;
+}
+
+void CudaAmp::clearMasterWeights() {
+    for (int index = 0; index < CudaAmp::masterWeightCount; ++index) {
+        CudaAmp::masterWeights[index].half.free();
+        CudaAmp::masterWeights[index].deviceData = nullptr;
+        CudaAmp::masterWeights[index].elementCount = 0;
+        CudaAmp::masterWeights[index].valid = false;
+    }
+    CudaAmp::masterWeightCount = 0;
+}
+
+const void* CudaAmp::masterWeightHalfOrNull(const float* deviceData, size_t elementCount) {
+    if (deviceData == nullptr || elementCount == 0) return nullptr;
+    for (int index = 0; index < CudaAmp::masterWeightCount; ++index) {
+        MasterWeightHalf& entry = CudaAmp::masterWeights[index];
+        if (entry.deviceData != deviceData || entry.elementCount != elementCount) continue;
+        if (!entry.valid) {
+            try {
+                CudaAmp::castFloatBufferToHalf(deviceData, elementCount, entry.half);
+            } catch (...) {
+                return nullptr;
+            }
+            entry.valid = true;
+        }
+        return entry.half.deviceData;
+    }
+    return nullptr;
 }
 
 void CudaAmp::resetLossScaler() {
@@ -229,12 +281,19 @@ bool CudaAmp::gradientsHaveNonFinite(const CudaLanguageModelGradients& gradients
     return hostFlag != 0;
 }
 
-bool CudaAmp::launchCublasLtMatmulFp16(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds) {
-    if (!CudaAmp::preferMixedPrecision) return false;
-    if (deviceLeft == nullptr || deviceRight == nullptr || deviceOut == nullptr) return false;
+static bool launchCublasLtMatmulFp16Halves(
+    const void* leftHalf,
+    const void* rightHalf,
+    float* deviceOut,
+    int rowCount,
+    int columnCount,
+    int sharedCount,
+    bool transposeLeft,
+    bool transposeRight,
+    double* kernelMilliseconds
+) {
+    if (leftHalf == nullptr || rightHalf == nullptr || deviceOut == nullptr) return false;
     if (rowCount <= 0 || columnCount <= 0 || sharedCount <= 0) return false;
-    // tiny GEMMs (consumer toy dims / attention head pieces) are numerically worse in FP16
-    if (sharedCount < 256 || rowCount < 32 || columnCount < 32) return false;
 
     struct LocalLt {
         cublasLtHandle_t handle;
@@ -261,15 +320,6 @@ bool CudaAmp::launchCublasLtMatmulFp16(const float* deviceLeft, const float* dev
     const int leftCols = transposeLeft ? rowCount : sharedCount;
     const int rightRows = transposeRight ? columnCount : sharedCount;
     const int rightCols = transposeRight ? sharedCount : columnCount;
-    const size_t leftElements = static_cast<size_t>(leftRows) * static_cast<size_t>(leftCols);
-    const size_t rightElements = static_cast<size_t>(rightRows) * static_cast<size_t>(rightCols);
-
-    try {
-        CudaAmp::castFloatBufferToHalf(deviceLeft, leftElements, CudaAmp::halfScratchLeft);
-        CudaAmp::castFloatBufferToHalf(deviceRight, rightElements, CudaAmp::halfScratchRight);
-    } catch (...) {
-        return false;
-    }
 
     cublasLtMatmulDesc_t matmulDesc = nullptr;
     cublasLtMatrixLayout_t layoutLeft = nullptr;
@@ -319,8 +369,6 @@ bool CudaAmp::launchCublasLtMatmulFp16(const float* deviceLeft, const float* dev
 
     const float alpha = 1.0f;
     const float beta = 0.0f;
-    void* workspacePointer = localLt.workspace.deviceData;
-    const size_t workspaceSize = localLt.workspace.capacityBytes;
 
     cudaEvent_t kernelStartEvent = nullptr;
     cudaEvent_t kernelStopEvent = nullptr;
@@ -343,9 +391,9 @@ bool CudaAmp::launchCublasLtMatmulFp16(const float* deviceLeft, const float* dev
         localLt.handle,
         matmulDesc,
         &alpha,
-        CudaAmp::halfScratchLeft.deviceData,
+        leftHalf,
         layoutLeft,
-        CudaAmp::halfScratchRight.deviceData,
+        rightHalf,
         layoutRight,
         &beta,
         deviceOut,
@@ -353,8 +401,8 @@ bool CudaAmp::launchCublasLtMatmulFp16(const float* deviceLeft, const float* dev
         deviceOut,
         layoutOut,
         nullptr,
-        workspacePointer,
-        workspaceSize,
+        localLt.workspace.deviceData,
+        localLt.workspace.capacityBytes,
         nullptr);
 
     if (matmulStatus != CUBLAS_STATUS_SUCCESS) {
@@ -385,4 +433,66 @@ bool CudaAmp::launchCublasLtMatmulFp16(const float* deviceLeft, const float* dev
 
     destroyDescriptors();
     return true;
+}
+
+const void* CudaAmp::castActivationToHalfScratch(const float* source, size_t elementCount) {
+    if (source == nullptr || elementCount == 0) return nullptr;
+    try {
+        CudaAmp::castFloatBufferToHalf(source, elementCount, CudaAmp::halfScratchRight);
+    } catch (...) {
+        return nullptr;
+    }
+    return CudaAmp::halfScratchRight.deviceData;
+}
+
+bool CudaAmp::launchCublasLtMatmulFp16PreCastRight(const float* deviceLeft, const void* rightHalf, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds) {
+    if (!CudaAmp::preferMixedPrecision) return false;
+    if (deviceLeft == nullptr || rightHalf == nullptr || deviceOut == nullptr) return false;
+    if (rowCount <= 0 || columnCount <= 0 || sharedCount <= 0) return false;
+    if (sharedCount < 256 || rowCount < 32 || columnCount < 32) return false;
+
+    const int leftRows = transposeLeft ? sharedCount : rowCount;
+    const int leftCols = transposeLeft ? rowCount : sharedCount;
+    const size_t leftElements = static_cast<size_t>(leftRows) * static_cast<size_t>(leftCols);
+
+    try {
+        const void* cachedLeft = CudaAmp::masterWeightHalfOrNull(deviceLeft, leftElements);
+        const void* leftHalf = cachedLeft;
+        if (leftHalf == nullptr) {
+            CudaAmp::castFloatBufferToHalf(deviceLeft, leftElements, CudaAmp::halfScratchLeft);
+            leftHalf = CudaAmp::halfScratchLeft.deviceData;
+        }
+        return launchCublasLtMatmulFp16Halves(leftHalf, rightHalf, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, kernelMilliseconds);
+    } catch (...) {
+        return false;
+    }
+}
+
+bool CudaAmp::launchCublasLtMatmulFp16(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds) {
+    if (!CudaAmp::preferMixedPrecision) return false;
+    if (deviceLeft == nullptr || deviceRight == nullptr || deviceOut == nullptr) return false;
+    if (rowCount <= 0 || columnCount <= 0 || sharedCount <= 0) return false;
+    if (sharedCount < 256 || rowCount < 32 || columnCount < 32) return false;
+
+    const int leftRows = transposeLeft ? sharedCount : rowCount;
+    const int leftCols = transposeLeft ? rowCount : sharedCount;
+    const int rightRows = transposeRight ? columnCount : sharedCount;
+    const int rightCols = transposeRight ? sharedCount : columnCount;
+    const size_t leftElements = static_cast<size_t>(leftRows) * static_cast<size_t>(leftCols);
+    const size_t rightElements = static_cast<size_t>(rightRows) * static_cast<size_t>(rightCols);
+
+    try {
+        const void* cachedLeft = CudaAmp::masterWeightHalfOrNull(deviceLeft, leftElements);
+        const void* cachedRight = CudaAmp::masterWeightHalfOrNull(deviceRight, rightElements);
+        if (cachedLeft == nullptr)
+            CudaAmp::castFloatBufferToHalf(deviceLeft, leftElements, CudaAmp::halfScratchLeft);
+        if (cachedRight == nullptr)
+            CudaAmp::castFloatBufferToHalf(deviceRight, rightElements, CudaAmp::halfScratchRight);
+
+        const void* leftHalf = cachedLeft != nullptr ? cachedLeft : CudaAmp::halfScratchLeft.deviceData;
+        const void* rightHalf = cachedRight != nullptr ? cachedRight : CudaAmp::halfScratchRight.deviceData;
+        return launchCublasLtMatmulFp16Halves(leftHalf, rightHalf, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, kernelMilliseconds);
+    } catch (...) {
+        return false;
+    }
 }

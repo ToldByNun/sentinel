@@ -12,6 +12,22 @@ public:
     /// <summary>SiLU writing into out</summary>
     static void siluInto(const CudaMatrix& input, CudaMatrix& out);
 
+    /// <summary>out = silu(gatePre) * up in one pass</summary>
+    static void siluMultiplyInto(const CudaMatrix& gatePreActivation, const CudaMatrix& up, CudaMatrix& out);
+
+    /// <summary>
+    /// from stacked [gatePreRaw|upRaw] (2H x T): add biases, write gatePre/up caches,
+    /// gateActivated=silu(gate), hidden=silu(gate)*up
+    /// </summary>
+    static void swigluFromStackedPreBias(
+        const CudaMatrix& stackedPreBias,
+        const CudaMatrix& gateBias,
+        const CudaMatrix& upBias,
+        CudaMatrix& gatePreActivation,
+        CudaMatrix& up,
+        CudaMatrix& gateActivated,
+        CudaMatrix& hidden);
+
     /// <summary>SiLU derivative writing into out</summary>
     static void siluDerivativeInto(const CudaMatrix& input, CudaMatrix& out);
 
@@ -120,14 +136,23 @@ public:
     /// <summary>fold logit chunk into running max and sumExp one column per thread</summary>
     static void onlineSoftmaxUpdateFromChunk(const CudaMatrix& logitChunk, int chunkRows, size_t tokenCount, CudaMatrix& maximumLogits, CudaMatrix& sumExp);
 
+    /// <summary>fold logit chunk pointer (chunkRows x tokenCount row-major) into online softmax stats</summary>
+    static void onlineSoftmaxUpdateFromChunk(const float* logitChunk, int chunkRows, size_t tokenCount, CudaMatrix& maximumLogits, CudaMatrix& sumExp);
+
     /// <summary>if target id falls in chunk write that logit into targetLogits</summary>
     static void captureTargetLogitFromChunk(const CudaMatrix& logitChunk, const CudaIntBuffer& targetTokenIds, int rowStart, int chunkRows, size_t tokenCount, CudaMatrix& targetLogits);
+
+    /// <summary>capture target logit from chunk pointer (chunkRows x tokenCount)</summary>
+    static void captureTargetLogitFromChunk(const float* logitChunk, const CudaIntBuffer& targetTokenIds, int rowStart, int chunkRows, size_t tokenCount, CudaMatrix& targetLogits);
 
     /// <summary>add mean CE from online softmax stats into lossSum 1x1; skips ignoreIndex targets</summary>
     static void onlineSoftmaxAddMeanCrossEntropy(const CudaMatrix& targetLogits, const CudaMatrix& maximumLogits, const CudaMatrix& sumExp, size_t tokenCount, CudaMatrix& lossSum, float lossScale, int meanDivisor, const CudaIntBuffer* targetTokenIds = nullptr, int ignoreIndex = -1, const CudaIntBuffer* perColumnMeanDivisor = nullptr);
 
     /// <summary>write chunk logit grads (p - onehot) / meanDivisor * gradScale; ignored targets get zero grad</summary>
     static void onlineSoftmaxLogitGradientChunkInto(const CudaMatrix& logitChunk, const CudaIntBuffer& targetTokenIds, int rowStart, int chunkRows, size_t tokenCount, const CudaMatrix& maximumLogits, const CudaMatrix& sumExp, CudaMatrix& logitGradientChunk, float gradScale, int meanDivisor, int ignoreIndex = -1, const CudaIntBuffer* perColumnMeanDivisor = nullptr);
+
+    /// <summary>write chunk logit grads from logit chunk pointer (chunkRows x tokenCount)</summary>
+    static void onlineSoftmaxLogitGradientChunkInto(const float* logitChunk, const CudaIntBuffer& targetTokenIds, int rowStart, int chunkRows, size_t tokenCount, const CudaMatrix& maximumLogits, const CudaMatrix& sumExp, CudaMatrix& logitGradientChunk, float gradScale, int meanDivisor, int ignoreIndex = -1, const CudaIntBuffer* perColumnMeanDivisor = nullptr);
 
     /// <summary>sum gradient columns into biasGradient rows starting at rowStart</summary>
     static void sumColumnsAddIntoRows(const CudaMatrix& gradient, CudaMatrix& biasGradient, int rowStart);
