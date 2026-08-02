@@ -332,11 +332,17 @@ public:
     /// <summary>estimated device bytes of train workspaces that scale with one packed column</summary>
     size_t bytesPerPackedColumn() const;
 
+    /// <summary>grads + Adam moments + FP16 weight mirrors still to allocate after weights are resident</summary>
+    size_t estimatePendingTrainStaticBytes() const;
+
     /// <summary>
     /// set maxPackedColumns from cudaMemGetInfo free memory (no-op if maxPackedColumnsManual)
-    /// freeFraction of currently free VRAM is the pack-workspace budget; does not allocate
+    /// reserves static train overhead + safety headroom, then applies freeFraction to the remainder
     /// </summary>
-    void applyVramPackBudget(float freeFraction = 0.55f);
+    void applyVramPackBudget(float freeFraction = 0.55f, size_t safetyReserveBytes = 1536ull * 1024ull * 1024ull);
+
+    /// <summary>largest pack example count for a fixed segment length under current maxPackedColumns</summary>
+    int maxPackExamplesForSegment(int segmentLength) const;
 
 
 

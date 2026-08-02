@@ -39,6 +39,8 @@ int main() {
     // Flip preferCpuAdamOffload / useCheckpointing when VRAM is the limiter, not tok/s.
     const bool runSmokes = false;
     const bool runSpeedBench = false;
+    // Phase 1: pack-budget stability sweep (int8+noCkpt across auto max pack)
+    const bool runPackBudgetBench = false;
     // Phase 0: scale train-step breakdown (8x768 pack32 ckpt=off chunked CE)
     const bool runScaleProfile = false;
 
@@ -52,13 +54,127 @@ int main() {
     const int maximumPositionCount = static_cast<int>(maximumTokenCount);
     const int trainEpochs = 2;
     const int trainBatchSize = 64;
-    const int trainGradAccum = 2;
+    // Fewer Adam steps per token: 64*4 examples between updates (was 64*2)
+    const int trainGradAccum = 4;
     const int chunkExampleCount = 2048;
     const int tokenizerVocabSize = 4000;
     const int tokenizerSampleRows = 2000;
     const int testReservoirCap = 512;
     const bool preferCpuAdamOffload = false;
     const bool useCheckpointing = false;
+
+    if (runPackBudgetBench) {
+        SmokeLog::section("pack budget bench");
+        if (!CudaMatmul::isAvailable()) {
+            SmokeLog::skip("pack budget bench (no CUDA)");
+            return 1;
+        }
+
+        const int vocab = 4000;
+        const int seq = 256;
+        const int warmupSteps = 2;
+        const int timedSteps = 6;
+
+        LanguageModel host(vocab, embeddingDim, maximumPositionCount, Adam(0.001f), blockCount, headCount);
+
+        try {
+            const bool previousAmp = CudaAmp::preferMixedPrecision;
+            const bool previousInt8 = CudaAdam::preferInt8Moments;
+            const bool previousCpu = CudaAdam::preferCpuOffload;
+            CudaAmp::preferMixedPrecision = true;
+            CudaAmp::useLossScaling = true;
+            CudaAmp::resetLossScaler();
+            CudaAdam::preferCpuOffload = false;
+            CudaAdam::preferInt8Moments = true;
+
+            size_t freeBefore = 0;
+            size_t totalBytes = 0;
+            if (cudaMemGetInfo(&freeBefore, &totalBytes) != cudaSuccess)
+                throw std::runtime_error("pack budget bench memGetInfo before failed");
+
+            CudaLanguageModel device = CudaLanguageModel::createFrom(host);
+            device.adam = CudaAdam(0.001f);
+            device.activationCheckpointing = false;
+            device.maxPackedColumnsManual = false;
+            const size_t pendingStatic = device.estimatePendingTrainStaticBytes();
+            device.applyVramPackBudget();
+            for (CudaTransformerBlock& block : device.blocks)
+                block.attention.preferFlashAttention = true;
+            device.ensureTrainState();
+
+            const int autoPack = device.maxPackExamplesForSegment(seq);
+            SmokeLog::result("pack budget", "maxPackCols=%d autoPack@seq%d=%d pendingStaticMiB=%.0f",
+                device.maxPackedColumns, seq, autoPack,
+                static_cast<double>(pendingStatic) / (1024.0 * 1024.0));
+
+            const int packCandidates[] = {
+                (std::min)(28, autoPack),
+                (std::min)(32, autoPack),
+                (std::min)(36, autoPack),
+                autoPack
+            };
+
+            for (int packBatch : packCandidates) {
+                if (packBatch <= 0) continue;
+                std::vector<LanguageModelExample> examples(static_cast<size_t>(packBatch));
+                unsigned rng = 91u;
+                for (int exampleIndex = 0; exampleIndex < packBatch; ++exampleIndex) {
+                    examples[static_cast<size_t>(exampleIndex)].inputTokenIds.resize(static_cast<size_t>(seq));
+                    examples[static_cast<size_t>(exampleIndex)].targetTokenIds.resize(static_cast<size_t>(seq));
+                    for (size_t index = 0; index < static_cast<size_t>(seq); ++index) {
+                        rng = rng * 1664525u + 1013904223u;
+                        examples[static_cast<size_t>(exampleIndex)].inputTokenIds[index] = static_cast<int>(rng % static_cast<unsigned>(vocab));
+                        rng = rng * 1664525u + 1013904223u;
+                        examples[static_cast<size_t>(exampleIndex)].targetTokenIds[index] = static_cast<int>(rng % static_cast<unsigned>(vocab));
+                    }
+                }
+                std::vector<const LanguageModelExample*> packPointers(static_cast<size_t>(packBatch));
+                for (int exampleIndex = 0; exampleIndex < packBatch; ++exampleIndex)
+                    packPointers[static_cast<size_t>(exampleIndex)] = &examples[static_cast<size_t>(exampleIndex)];
+                const int tokensPerStep = seq * packBatch;
+
+                for (int step = 0; step < warmupSteps; ++step) {
+                    device.trainGradients.zeroInPlace();
+                    device.accumulatePackedExamples(packPointers.data(), packBatch, device.trainGradients);
+                    device.applyGradients(device.trainGradients, 1.0f / static_cast<float>(packBatch));
+                }
+                if (cudaDeviceSynchronize() != cudaSuccess)
+                    throw std::runtime_error("pack budget warmup sync failed");
+
+                const auto start = std::chrono::steady_clock::now();
+                for (int step = 0; step < timedSteps; ++step) {
+                    device.trainGradients.zeroInPlace();
+                    device.accumulatePackedExamples(packPointers.data(), packBatch, device.trainGradients);
+                    device.applyGradients(device.trainGradients, 1.0f / static_cast<float>(packBatch));
+                }
+                if (cudaDeviceSynchronize() != cudaSuccess)
+                    throw std::runtime_error("pack budget timed sync failed");
+                const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+                const double tokensPerSecond = seconds > 0.0
+                    ? static_cast<double>(tokensPerStep) * static_cast<double>(timedSteps) / seconds
+                    : 0.0;
+
+                size_t freeAfter = 0;
+                if (cudaMemGetInfo(&freeAfter, &totalBytes) != cudaSuccess)
+                    throw std::runtime_error("pack budget memGetInfo after failed");
+
+                SmokeLog::result(
+                    "pack",
+                    "examples=%d cols=%d tokens/s=%.0f freeMiB=%.0f %s",
+                    packBatch, packBatch * seq, tokensPerSecond,
+                    static_cast<double>(freeAfter) / (1024.0 * 1024.0),
+                    freeAfter < (512ull << 20) ? "WARN_LOW_FREE" : "ok");
+            }
+
+            CudaAmp::preferMixedPrecision = previousAmp;
+            CudaAdam::preferInt8Moments = previousInt8;
+            CudaAdam::preferCpuOffload = previousCpu;
+        } catch (const std::exception& ex) {
+            SmokeLog::result("pack budget", "FAILED: %s", ex.what());
+            return 1;
+        }
+        return 0;
+    }
 
     if (runScaleProfile) {
         SmokeLog::section("scale profile");

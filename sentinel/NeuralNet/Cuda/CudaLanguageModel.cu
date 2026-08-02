@@ -159,13 +159,7 @@ void CudaLanguageModel::ensureTrainWorkspaces() {
     this->packH2dDevice.ensureCapacity(3 * maxColumns);
     this->adamWindowTokenIdsBuffer.ensureCapacity(maxColumns);
 
-    // full vocab x seq tensors are not needed for chunked train head
-    this->logits.free();
-    this->probabilities.free();
-    this->logitGradient.free();
-    this->projectionWeightGradient.free();
-    this->projectionBiasGradient.free();
-
+    // Chunked CE scratch always; full logits when single-pass cache fits (mirrors accumulateChunkedProjection).
     this->logitChunk.ensureSize(chunkRows, maxColumns);
     this->logitGradientChunk.ensureSize(chunkRows, maxColumns);
     this->projectionWeightGradientChunk.ensureSize(chunkRows, embeddingDim);
@@ -173,6 +167,22 @@ void CudaLanguageModel::ensureTrainWorkspaces() {
     this->onlineSoftmaxMax.ensureSize(1, maxColumns);
     this->onlineSoftmaxSumExp.ensureSize(1, maxColumns);
     this->targetLogits.ensureSize(1, maxColumns);
+
+    constexpr size_t maxCachedLogitsBytes = 512ull * 1024ull * 1024ull;
+    const size_t fullLogitsBytes = vocabularySize * maxColumns * sizeof(float);
+    if (fullLogitsBytes <= maxCachedLogitsBytes) {
+        this->logits.ensureSize(vocabularySize, maxColumns);
+        this->probabilities.free();
+        this->logitGradient.free();
+        this->projectionWeightGradient.free();
+        this->projectionBiasGradient.free();
+    } else {
+        this->logits.free();
+        this->probabilities.free();
+        this->logitGradient.free();
+        this->projectionWeightGradient.free();
+        this->projectionBiasGradient.free();
+    }
 
     // FP16 activation checkpoints when AMP is on (saturated cast); else FP32.
     // Restore scratch holds one block input in FP32 during backward recompute.
@@ -210,8 +220,11 @@ size_t CudaLanguageModel::bytesPerPackedColumn() const {
     const size_t chunkRows = static_cast<size_t>((std::min)(this->logitChunkRows, static_cast<int>(vocabularySize)));
     const size_t floatBytes = sizeof(float);
     const size_t intBytes = sizeof(int);
+    const size_t ffnHidden = this->blocks.empty() || this->blocks[0].feedForward.gateWeight.empty()
+        ? (2ull * embeddingDim * 4ull) / 3ull
+        : this->blocks[0].feedForward.gateWeight.rows;
 
-    // Mirrors ensureTrainWorkspaces column-scaling tensors.
+    // LM workspaces that scale with columns (ensureTrainWorkspaces).
     size_t bytes = 0;
     bytes += 5 * embeddingDim * floatBytes; // hidden, normalized, hiddenGradient, blockInputGrad, normInputGrad
     bytes += 2 * chunkRows * floatBytes;    // logitChunk, logitGradientChunk
@@ -221,8 +234,9 @@ size_t CudaLanguageModel::bytesPerPackedColumn() const {
     bytes += 3 * intBytes;                  // packH2d fused staging
     bytes += intBytes;                      // adamWindowTokenIdsBuffer capacity unit
 
-    // Full LM-head logits cache (vocab x cols) for the single-pass CE path.
-    bytes += vocabularySize * floatBytes;
+    constexpr size_t maxCachedLogitsBytes = 512ull * 1024ull * 1024ull;
+    if (vocabularySize * floatBytes * 8192ull <= maxCachedLogitsBytes)
+        bytes += vocabularySize * floatBytes;
 
     if (this->activationCheckpointing) {
         if (this->useHalfActivationCheckpoints())
@@ -232,12 +246,79 @@ size_t CudaLanguageModel::bytesPerPackedColumn() const {
             bytes += this->blocks.size() * embeddingDim * floatBytes;
     }
 
-    // Transient block/flash peak: QKV / attn / FFN scratch scales with depth.
-    bytes += (48ull + 24ull * this->blocks.size()) * embeddingDim * floatBytes;
+    // Each block keeps its own attn/FFN scratch sized to maxPackedColumns (not peak-of-one).
+    // Attn ~ QKV+out+caches+flash (~12 d); FFN ~ gateUp(2h)+gate/up/hidden/act/cache/bwd (~6 h + 4 d).
+    const size_t perBlockScratch =
+        (12ull * embeddingDim + 6ull * ffnHidden + 4ull * embeddingDim) * floatBytes;
+    bytes += this->blocks.size() * perBlockScratch;
+
+    // AMP activation half cast scratch (shared, one active gemm).
+    bytes += embeddingDim * 2ull;
+
     return bytes;
 }
 
-void CudaLanguageModel::applyVramPackBudget(float freeFraction) {
+size_t CudaLanguageModel::estimatePendingTrainStaticBytes() const {
+    if (this->tokenEmbeddingWeight.empty())
+        throw std::logic_error("CudaLanguageModel::estimatePendingTrainStaticBytes weights not uploaded");
+
+    auto matrixBytes = [](const CudaMatrix& matrix) -> size_t {
+        return matrix.elementCount() * sizeof(float);
+    };
+
+    size_t parameterBytes = 0;
+    parameterBytes += matrixBytes(this->tokenEmbeddingWeight);
+    parameterBytes += matrixBytes(this->finalNorm.gamma);
+    parameterBytes += matrixBytes(this->projectionBias);
+    if (!this->tieEmbeddingProjection)
+        parameterBytes += matrixBytes(this->projectionWeight);
+
+    for (const CudaTransformerBlock& block : this->blocks) {
+        parameterBytes += matrixBytes(block.attention.queryWeight);
+        parameterBytes += matrixBytes(block.attention.keyWeight);
+        parameterBytes += matrixBytes(block.attention.valueWeight);
+        parameterBytes += matrixBytes(block.attention.outputWeight);
+        parameterBytes += matrixBytes(block.attentionNorm.gamma);
+        parameterBytes += matrixBytes(block.feedForwardNorm.gamma);
+        parameterBytes += matrixBytes(block.feedForward.gateWeight);
+        parameterBytes += matrixBytes(block.feedForward.gateBias);
+        parameterBytes += matrixBytes(block.feedForward.upWeight);
+        parameterBytes += matrixBytes(block.feedForward.upBias);
+        parameterBytes += matrixBytes(block.feedForward.downWeight);
+        parameterBytes += matrixBytes(block.feedForward.downBias);
+        // Fused gate|up mirror (extra FP32 copy + its FP16 AMP mirror).
+        parameterBytes += matrixBytes(block.feedForward.gateWeight) + matrixBytes(block.feedForward.upWeight);
+    }
+
+    // Gradients mirror FP32 parameters (except fused gateUp which has no separate grad).
+    size_t gradientBytes = parameterBytes;
+    for (const CudaTransformerBlock& block : this->blocks)
+        gradientBytes -= matrixBytes(block.feedForward.gateWeight) + matrixBytes(block.feedForward.upWeight);
+
+    size_t momentBytes = 0;
+    if (!CudaAdam::preferCpuOffload) {
+        if (CudaAdam::preferInt8Moments) {
+            // int8 m1/m2 + FP32 scales (~1/256 of elements, padded).
+            momentBytes = parameterBytes / 2ull + parameterBytes / 128ull;
+        } else {
+            momentBytes = 2ull * parameterBytes;
+        }
+    }
+
+    // Sticky FP16 master-weight mirrors for AMP GEMMs.
+    const size_t halfMirrorBytes = CudaAmp::preferMixedPrecision ? (parameterBytes / 2ull) : 0ull;
+
+    // Grad buffers may already exist if ensureTrainState ran; budget is called before that.
+    return gradientBytes + momentBytes + halfMirrorBytes;
+}
+
+int CudaLanguageModel::maxPackExamplesForSegment(int segmentLength) const {
+    if (segmentLength <= 0) throw std::invalid_argument("CudaLanguageModel::maxPackExamplesForSegment segmentLength must be > 0");
+    if (this->maxPackedColumns <= 0) return 1;
+    return (std::max)(1, this->maxPackedColumns / segmentLength);
+}
+
+void CudaLanguageModel::applyVramPackBudget(float freeFraction, size_t safetyReserveBytes) {
     if (this->maxPackedColumnsManual) return;
     if (this->tokenEmbeddingWeight.empty())
         throw std::logic_error("CudaLanguageModel::applyVramPackBudget weights not uploaded");
@@ -249,15 +330,20 @@ void CudaLanguageModel::applyVramPackBudget(float freeFraction) {
     size_t totalBytes = 0;
     CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeBytes, &totalBytes), "CudaLanguageModel::applyVramPackBudget memGetInfo");
 
+    const size_t pendingStatic = this->estimatePendingTrainStaticBytes();
+    const size_t reserved = pendingStatic + safetyReserveBytes;
+    size_t usableBytes = freeBytes > reserved ? freeBytes - reserved : 0;
+
     const size_t perColumn = this->bytesPerPackedColumn();
     if (perColumn == 0) throw std::logic_error("CudaLanguageModel::applyVramPackBudget zero bytesPerPackedColumn");
 
-    const size_t budgetBytes = static_cast<size_t>(static_cast<double>(freeBytes) * static_cast<double>(freeFraction));
+    const size_t budgetBytes = static_cast<size_t>(static_cast<double>(usableBytes) * static_cast<double>(freeFraction));
     size_t cols = budgetBytes / perColumn;
 
     int minCols = CudaLanguageModel::lengthBucketStep;
     if (this->maximumPositionCount > minCols) minCols = this->maximumPositionCount;
-    constexpr int maxCols = 16384;
+    // Hard cap keeps consumer 16GB configs away from workspace blow-ups.
+    constexpr int maxCols = 10240;
     if (cols < static_cast<size_t>(minCols)) cols = static_cast<size_t>(minCols);
     if (cols > static_cast<size_t>(maxCols)) cols = static_cast<size_t>(maxCols);
 
@@ -268,10 +354,12 @@ void CudaLanguageModel::applyVramPackBudget(float freeFraction) {
 
     const double freeMiB = static_cast<double>(freeBytes) / (1024.0 * 1024.0);
     const double totalMiB = static_cast<double>(totalBytes) / (1024.0 * 1024.0);
+    const double pendingMiB = static_cast<double>(pendingStatic) / (1024.0 * 1024.0);
+    const double safetyMiB = static_cast<double>(safetyReserveBytes) / (1024.0 * 1024.0);
     const double workspaceMiB = static_cast<double>(perColumn) * static_cast<double>(this->maxPackedColumns) / (1024.0 * 1024.0);
     std::printf(
-        "CudaLanguageModel::applyVramPackBudget: free=%.0f/%.0f MiB  fraction=%.2f  maxPackCols=%d  ~workspace=%.0f MiB\n",
-        freeMiB, totalMiB, freeFraction, this->maxPackedColumns, workspaceMiB);
+        "CudaLanguageModel::applyVramPackBudget: free=%.0f/%.0f MiB  pendingStatic=%.0f safety=%.0f fraction=%.2f  maxPackCols=%d  ~workspace=%.0f MiB\n",
+        freeMiB, totalMiB, pendingMiB, safetyMiB, freeFraction, this->maxPackedColumns, workspaceMiB);
 }
 
 void CudaLanguageModel::releaseActivationCheckpoints() {
