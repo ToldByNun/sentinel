@@ -49,6 +49,28 @@ void CudaCausalSelfAttention::releaseFlashAttentionScratch() {
     this->flashDelta.free();
 }
 
+void CudaCausalSelfAttention::releaseActivationScratch() {
+    this->releaseFlashAttentionScratch();
+    this->releaseDenseAttentionScratch();
+    this->qkvProjected.free();
+    this->query.free();
+    this->key.free();
+    this->value.free();
+    this->queryHead.free();
+    this->keyHead.free();
+    this->valueHead.free();
+    this->attendedHead.free();
+    this->attended.free();
+    this->output.free();
+    this->inputCache.free();
+    this->attendedGradient.free();
+    this->queryGradient.free();
+    this->keyGradient.free();
+    this->valueGradient.free();
+    this->temp.free();
+    this->usedFlashAttention = false;
+}
+
 void CudaCausalSelfAttention::uploadFrom(const CausalSelfAttention& host) {
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaCausalSelfAttention::uploadFrom no CUDA device");
 

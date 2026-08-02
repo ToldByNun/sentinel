@@ -87,6 +87,9 @@ public:
     /// <summary>release flash-only scratch (LSE, delta workspace)</summary>
     void releaseFlashAttentionScratch();
 
+    /// <summary>free QKV/Flash activations after forward (weights kept) for selective checkpointing</summary>
+    void releaseActivationScratch();
+
     /// <summary>causal multi head attention writing into out</summary>
     void forward(const CudaMatrix& input, CudaMatrix& out, int segmentLength = 0);
 

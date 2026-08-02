@@ -240,7 +240,7 @@ void LanguageModel::enableCudaTrain() {
     }
 
     this->deviceTrainEnabled = true;
-    this->device->activationCheckpointing = true;
+    this->device->setActivationCheckpointMode(ActivationCheckpointMode::Selective);
     CudaAmp::preferMixedPrecision = true;
     // loss scaling only helps when FP16 GEMMs can run (shared dim gate is 256)
     CudaAmp::useLossScaling = this->tokenEmbedding.embeddingDim() >= 256;
@@ -253,7 +253,9 @@ void LanguageModel::enableCudaTrain() {
     this->device->applyVramPackBudget();
     this->device->trainStateReady = false;
     this->device->ensureTrainState();
-    std::cout << "LanguageModel::enableCudaTrain: device training enabled (packed batches, checkpointing on, FP16 amp "
+    std::cout << "LanguageModel::enableCudaTrain: device training enabled (packed batches, ckpt="
+              << CudaLanguageModel::activationCheckpointModeName(this->device->activationCheckpointMode)
+              << ", FP16 amp "
               << (CudaAmp::preferMixedPrecision ? "on" : "off")
               << ", lossScale=" << (CudaAmp::useLossScaling ? "on" : "off")
               << ", int8 adam " << (CudaAdam::preferInt8Moments ? "on" : "off")
@@ -264,14 +266,16 @@ void LanguageModel::enableCudaTrain() {
 }
 
 void LanguageModel::enableActivationCheckpointing(bool enabled) {
+    this->setActivationCheckpointMode(
+        enabled ? ActivationCheckpointMode::Selective : ActivationCheckpointMode::Off);
+}
+
+void LanguageModel::setActivationCheckpointMode(ActivationCheckpointMode mode) {
     if (this->device == nullptr) this->enableCuda();
     if (this->device == nullptr) return;
-    this->device->activationCheckpointing = enabled;
-    if (enabled)
-        this->device->ensureTrainWorkspaces();
-    else
-        this->device->releaseActivationCheckpoints();
-    std::cout << "LanguageModel::enableActivationCheckpointing: " << (enabled ? "on" : "off") << '\n';
+    this->device->setActivationCheckpointMode(mode);
+    std::cout << "LanguageModel::setActivationCheckpointMode: "
+              << CudaLanguageModel::activationCheckpointModeName(mode) << '\n';
 }
 
 void LanguageModel::setCudaPreferMixedPrecision(bool enabled) {

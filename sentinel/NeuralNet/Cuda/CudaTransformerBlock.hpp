@@ -155,26 +155,34 @@ public:
 
 
     /// <summary>RMSNorm Attn residual RMSNorm SwiGLU residual writing into out</summary>
-
     void forward(const CudaMatrix& input, CudaMatrix& out, int segmentLength = 0);
 
+    /// <summary>
+    /// train forward for Selective ckpt: full block, then drop Attn QKV/Flash scratch; FFN acts kept
+    /// </summary>
+    void forwardSelectiveTrain(const CudaMatrix& input, CudaMatrix& out, int segmentLength = 0);
 
+    /// <summary>recompute AttnNorm+Attn+residual from saved block input (FFN untouched)</summary>
+    void recomputeAttention(const CudaMatrix& blockInput, int segmentLength = 0);
 
     /// <summary>prefill attention KV cache then residual FFN</summary>
-
     void prefill(const CudaMatrix& input, CudaKvCache& cache, CudaMatrix& out);
 
-
-
     /// <summary>decode one token against attention KV cache then residual FFN</summary>
-
     void decode(const CudaMatrix& input, CudaKvCache& cache, CudaMatrix& out);
 
-
-
     /// <summary>backprop through one block accumulates into gradients returns input gradient</summary>
-
     void backward(const CudaMatrix& outputGradient, CudaMatrix& inputGradient, CudaTransformerBlockGradients& gradients);
+
+    /// <summary>
+    /// Selective bwd: FFN from kept acts, then recompute Attn from blockInput, then Attn bwd
+    /// </summary>
+    void backwardSelective(
+        const CudaMatrix& outputGradient,
+        CudaMatrix& inputGradient,
+        CudaTransformerBlockGradients& gradients,
+        const CudaMatrix& blockInput,
+        int segmentLength = 0);
 
 
 

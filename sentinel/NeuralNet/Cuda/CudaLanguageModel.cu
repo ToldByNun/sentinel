@@ -22,7 +22,7 @@ CudaLanguageModel::CudaLanguageModel()
       maxPackedColumnsManual(false),
       logitChunkRows(2048),
       gradientAccumulationSteps(4),
-      activationCheckpointing(true),
+      activationCheckpointMode(ActivationCheckpointMode::Selective),
       preferTrainGraph(true),
       adam(0.001f),
       trainStateReady(false),
@@ -34,6 +34,29 @@ CudaLanguageModel::CudaLanguageModel()
       trainGraphWarmups(0),
       trainGraphSeenSegmentLength(0),
       trainGraphSeenExampleCount(0) {}
+
+bool CudaLanguageModel::activationCheckpointingActive() const {
+    return this->activationCheckpointMode != ActivationCheckpointMode::Off;
+}
+
+const char* CudaLanguageModel::activationCheckpointModeName(ActivationCheckpointMode mode) {
+    switch (mode) {
+    case ActivationCheckpointMode::Off: return "off";
+    case ActivationCheckpointMode::Full: return "full";
+    case ActivationCheckpointMode::Selective: return "selective";
+    }
+    return "unknown";
+}
+
+void CudaLanguageModel::setActivationCheckpointMode(ActivationCheckpointMode mode) {
+    this->activationCheckpointMode = mode;
+    if (mode == ActivationCheckpointMode::Off) {
+        this->releaseActivationCheckpoints();
+        return;
+    }
+    if (!this->tokenEmbeddingWeight.empty())
+        this->ensureTrainWorkspaces();
+}
 
 void CudaLanguageModel::releaseTrainGraph() {
     if (this->trainGraphExec != nullptr) {
@@ -65,24 +88,46 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
     std::swap(this->hiddenGradient, this->normInputGradientScratch);
 
     for (int blockIndex = static_cast<int>(this->blocks.size()) - 1; blockIndex >= 0; --blockIndex) {
-        if (this->activationCheckpointing) {
+        CudaTransformerBlock& block = this->blocks[static_cast<size_t>(blockIndex)];
+
+        if (this->activationCheckpointMode == ActivationCheckpointMode::Selective) {
+            const CudaMatrix* blockInput = nullptr;
             if (this->useHalfActivationCheckpoints()) {
                 CudaAmp::castToFloat(
                     this->blockInputCheckpointsHalf[static_cast<size_t>(blockIndex)],
                     this->checkpointRestoreScratch);
                 this->checkpointRestoreScratch.cols = this->hiddenGradient.cols;
-                this->blocks[static_cast<size_t>(blockIndex)].forward(
+                blockInput = &this->checkpointRestoreScratch;
+            } else {
+                blockInput = &this->blockInputCheckpoints[static_cast<size_t>(blockIndex)];
+            }
+            block.backwardSelective(
+                this->hiddenGradient,
+                this->blockInputGradientScratch,
+                gradients.blocks[static_cast<size_t>(blockIndex)],
+                *blockInput,
+                segmentLength);
+        } else if (this->activationCheckpointMode == ActivationCheckpointMode::Full) {
+            if (this->useHalfActivationCheckpoints()) {
+                CudaAmp::castToFloat(
+                    this->blockInputCheckpointsHalf[static_cast<size_t>(blockIndex)],
+                    this->checkpointRestoreScratch);
+                this->checkpointRestoreScratch.cols = this->hiddenGradient.cols;
+                block.forward(
                     this->checkpointRestoreScratch,
                     this->normalized,
                     segmentLength);
             } else {
-                this->blocks[static_cast<size_t>(blockIndex)].forward(
+                block.forward(
                     this->blockInputCheckpoints[static_cast<size_t>(blockIndex)],
                     this->normalized,
                     segmentLength);
             }
+            block.backward(this->hiddenGradient, this->blockInputGradientScratch, gradients.blocks[static_cast<size_t>(blockIndex)]);
+        } else {
+            block.backward(this->hiddenGradient, this->blockInputGradientScratch, gradients.blocks[static_cast<size_t>(blockIndex)]);
         }
-        this->blocks[static_cast<size_t>(blockIndex)].backward(this->hiddenGradient, this->blockInputGradientScratch, gradients.blocks[static_cast<size_t>(blockIndex)]);
+
         std::swap(this->hiddenGradient, this->blockInputGradientScratch);
     }
 
@@ -90,7 +135,7 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
 }
 
 bool CudaLanguageModel::tryLaunchTrainGraph(int segmentLength, int exampleCount) {
-    if (!this->preferTrainGraph || this->activationCheckpointing) return false;
+    if (!this->preferTrainGraph || this->activationCheckpointingActive()) return false;
     if (this->trainGraphExec == nullptr) return false;
     if (segmentLength != this->trainGraphSegmentLength || exampleCount != this->trainGraphExampleCount) return false;
 
@@ -202,7 +247,7 @@ void CudaLanguageModelGradients::scaleInPlace(float scalar) {
 }
 
 bool CudaLanguageModel::useHalfActivationCheckpoints() const {
-    return this->activationCheckpointing && CudaAmp::preferMixedPrecision;
+    return this->activationCheckpointingActive() && CudaAmp::preferMixedPrecision;
 }
 
 CudaMatrix& CudaLanguageModel::lmHeadWeight() {
@@ -297,7 +342,7 @@ void CudaLanguageModel::ensureTrainWorkspaces() {
 
     // FP16 activation checkpoints when AMP is on (saturated cast); else FP32.
     // Restore scratch holds one block input in FP32 during backward recompute.
-    if (!this->activationCheckpointing) {
+    if (!this->activationCheckpointingActive()) {
         this->releaseActivationCheckpoints();
     } else if (this->useHalfActivationCheckpoints()) {
         for (CudaMatrix& checkpoint : this->blockInputCheckpoints)
@@ -349,7 +394,7 @@ size_t CudaLanguageModel::bytesPerPackedColumn() const {
     if (vocabularySize * floatBytes * 8192ull <= maxCachedLogitsBytes)
         bytes += vocabularySize * floatBytes;
 
-    if (this->activationCheckpointing) {
+    if (this->activationCheckpointingActive()) {
         if (this->useHalfActivationCheckpoints())
             bytes += this->blocks.size() * embeddingDim * 2u
                 + embeddingDim * floatBytes; // restore scratch
@@ -712,7 +757,7 @@ float CudaLanguageModel::flushPackedHostBuffers(int segmentLength, int exampleCo
     this->meanDivisorBuffer.ensureCapacity(tokenCount);
     const size_t bytes = tokenCount * sizeof(int);
 
-    const bool useGraphPath = this->preferTrainGraph && !this->activationCheckpointing;
+    const bool useGraphPath = this->preferTrainGraph && !this->activationCheckpointingActive();
     if (useGraphPath)
         this->ensureTrainStream();
 
@@ -893,7 +938,7 @@ void CudaLanguageModel::forwardTrunkFromDevice(size_t tokenCount, int segmentLen
 
     CudaOps::embeddingGatherInto(this->tokenEmbeddingWeight, this->tokenIdsBuffer, tokenCount, this->hidden);
 
-    if (this->activationCheckpointing) {
+    if (this->activationCheckpointingActive()) {
         if (this->useHalfActivationCheckpoints()) {
             if (this->blockInputCheckpointsHalf.size() != this->blocks.size())
                 this->blockInputCheckpointsHalf.resize(this->blocks.size());
@@ -909,13 +954,16 @@ void CudaLanguageModel::forwardTrunkFromDevice(size_t tokenCount, int segmentLen
     }
 
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
-        if (this->activationCheckpointing) {
+        if (this->activationCheckpointingActive()) {
             if (this->useHalfActivationCheckpoints())
                 CudaAmp::castToHalfSaturated(this->hidden, this->blockInputCheckpointsHalf[blockIndex]);
             else
                 CudaOps::copyInto(this->hidden, this->blockInputCheckpoints[blockIndex]);
         }
-        this->blocks[blockIndex].forward(this->hidden, this->normalized, segmentLength);
+        if (this->activationCheckpointMode == ActivationCheckpointMode::Selective)
+            this->blocks[blockIndex].forwardSelectiveTrain(this->hidden, this->normalized, segmentLength);
+        else
+            this->blocks[blockIndex].forward(this->hidden, this->normalized, segmentLength);
         CudaMatrix swapBuffer = std::move(this->hidden);
         this->hidden = std::move(this->normalized);
         this->normalized = std::move(swapBuffer);
@@ -1887,7 +1935,8 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
         CudaAmp::resetLossScaler();
     CudaAdam::preferCpuOffload = false;
     CudaAdam::preferInt8Moments = true;
-    device.activationCheckpointing = activationCheckpointing;
+    device.setActivationCheckpointMode(
+        activationCheckpointing ? ActivationCheckpointMode::Selective : ActivationCheckpointMode::Off);
     device.ensureTrainState();
     device.ensureTrainWorkspaces();
     device.epochLossSum.ensureSize(1, 1);
@@ -2094,7 +2143,8 @@ void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim
         preferFlash ? "on" : "off",
         CudaAmp::preferMixedPrecision ? "on" : "off",
         CudaAdam::preferInt8Moments ? "on" : "off",
-        activationCheckpointing ? "on" : "off",
+        CudaLanguageModel::activationCheckpointModeName(
+            activationCheckpointing ? ActivationCheckpointMode::Selective : ActivationCheckpointMode::Off),
         device.maxPackedColumns, CudaAmp::lossScaler.scale);
     SmokeLog::result("profile step", "avg=%.2fms  ~tokens/s=%.0f", stepTotal, tokensPerSecond);
     SmokeLog::result("  attention", "fwd=%.2fms bwd=%.2fms  total=%.2fms (%.0f%%)", sumAttn, sumAttnBwd, attnTotal, attnTotal * percent);
@@ -2161,7 +2211,7 @@ void CudaLanguageModel::forwardInto(const std::vector<int>& tokenIds, CudaMatrix
 
     CudaOps::embeddingGatherInto(this->tokenEmbeddingWeight, this->tokenIdsBuffer, tokenIds.size(), this->hidden);
 
-    if (this->activationCheckpointing) {
+    if (this->activationCheckpointingActive()) {
         if (this->useHalfActivationCheckpoints()) {
             if (this->blockInputCheckpointsHalf.size() != this->blocks.size())
                 this->blockInputCheckpointsHalf.resize(this->blocks.size());
@@ -2176,7 +2226,7 @@ void CudaLanguageModel::forwardInto(const std::vector<int>& tokenIds, CudaMatrix
     }
 
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
-        if (this->activationCheckpointing) {
+        if (this->activationCheckpointingActive()) {
             if (this->useHalfActivationCheckpoints())
                 CudaAmp::castToHalfSaturated(this->hidden, this->blockInputCheckpointsHalf[blockIndex]);
             else

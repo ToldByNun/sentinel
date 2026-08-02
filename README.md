@@ -1,98 +1,88 @@
 # Sentinel
 
-Small C++/CUDA neural net framework focused on **full-train** causal language models (no LoRA).
-
-CPU/OpenMP path plus CUDA device training: packed batches, activation checkpointing, optional FP16 AMP, flash attention.
+C++/CUDA framework for **full-train** causal LMs (no LoRA): CPU/OpenMP plus a device train path with packed batches, flash attention, FP16 AMP, int8 Adam, and selective activation checkpointing.
 
 ## Requirements
 
-- Windows, Visual Studio 2022+ (toolset `v145`)
-- CUDA Toolkit (project points at `v13.3`)
-- NVIDIA GPU matching the project arch (`sm_120` in the vcxproj — change if needed)
-- Optional: `SERA-Data/sera_sample.jsonl` next to the repo for the train demo
+- Windows, Visual Studio 2022+ (`v145`)
+- CUDA Toolkit (project targets **v13.3**)
+- NVIDIA GPU — vcxproj currently builds `sm_120` (RTX 50-series); change `CodeGeneration` for other arches (intended floor: Turing `sm_75`+)
+- Data (optional for demos): `SERA-Data/sera_best_subset` (HF Arrow) and/or `*.jsonl`
 
-## Build
+## Build & run
 
 ```bat
 msbuild sentinel\sentinel.vcxproj /p:Configuration=Release /p:Platform=x64
-```
-
-Or open `sentinel.slnx` in Visual Studio and build Release|x64.
-
-Output: `x64\Release\sentinel.exe`
-
-## Run
-
-Working directory must be `sentinel\` (relative data path):
-
-```bat
 cd sentinel
 ..\x64\Release\sentinel.exe
 ```
 
-`main.cpp` runs smoke tests (matmul, layers, attention, Adam, streaming dataset, …) then a short streamed SERA LM train (2 epochs, embed=64).
+Working directory must be `sentinel\` (relative `../SERA-Data/...`). Flags in `main.cpp` gate smokes, benches, and the SERA train demo (default: Arrow corpus, ~8×768).
 
 ## Layout
 
-| Path | Contents |
-|------|----------|
-| `sentinel/NeuralNet/Network/` | `LanguageModel`, CPU training |
-| `sentinel/NeuralNet/Cuda/` | Device mirror, train kernels, AMP, Adam, flash |
-| `sentinel/NeuralNet/Layers/` | Attention, FFN, RMSNorm, embedding, … |
-| `sentinel/NeuralNet/Data/` | JSONL, dataset split, LM examples |
-| `sentinel/main.cpp` | Smoke + SERA demo |
+| Path | Role |
+|------|------|
+| `NeuralNet/Network/` | `LanguageModel`, host train, `.snlm` checkpoints |
+| `NeuralNet/Cuda/` | Device mirror, flash attn, AMP, Adam, packed train |
+| `NeuralNet/Layers/` | Attention, SwiGLU FFN, RMSNorm, embedding, … |
+| `NeuralNet/Data/` | `TextRowReader`, JSONL + from-scratch Arrow IPC reader, chunk source |
+| `NeuralNet/Tokenizer/` | BPE (freq-based train, ranked encode) |
+| `main.cpp` | Smokes / scale harness / SERA demo |
 
-## Checkpoints
-
-```cpp
-model.saveCheckpoint("run.snlm", true);   // weights + Adam moments (FP32 on disk)
-model.loadCheckpoint("run.snlm");         // restores weights, Adam, timeStep
-```
-
-Binary format `SNLM` v1. Architecture must match. Int8 Adam moments are dequantized to FP32 for the file.
-
-## Streaming data
+## Data
 
 ```cpp
-LanguageModelChunkSource source(path, maxChars, maxTokens, /*chunk*/256, /*trainRatio*/0.8f, seed, /*testCap*/256);
+LanguageModelChunkSource source(path, maxChars, maxTokens, chunk, trainRatio, seed, testCap);
 auto sample = source.prepareTokenizerSample(2000);
-tokenizer.train(sample, 1000);
+tokenizer.train(sample, vocabSize);
 source.setTokenizer(&tokenizer);
-source.materialize();  // one JSONL+BPE pass; later epochs reuse token ids
-model.train(source, epochs, logEvery, batchSize, gradAccum);  // testLoss from reservoir
+source.materialize();   // one corpus+BPE pass → cached token ids
+model.train(source, epochs, logEvery, batchSize, gradAccum);
 ```
 
-JSONL is read once and tokenized into compact examples (peak text RAM only during that pass). Later epochs only slice cached token ids. Train/test split is a deterministic row-index hash.
+- **JSONL** (`.jsonl`) or **HF Arrow** (`.arrow` / `save_to_disk` dir with `data-*.arrow`; `cache-*` skipped)
+- Path auto-detect via `createTextRowReader` — no Apache Arrow C++ dependency (custom IPC stream reader)
+- Progress logs for sample / BPE / materialize (`SmokeLog::progress`)
 
-## Training (quick)
+## Training
 
 ```cpp
-LanguageModel model(vocab, embedDim, maxPos, Adam(0.001f), blocks, heads);
+LanguageModel model(vocab, embed, maxPos, Adam(0.001f), blocks, heads);
 model.enableCuda();
-model.enableCudaTrain();          // packed batches, checkpointing, AMP, auto VRAM pack budget
+model.enableCudaTrain();  // pack budget, AMP, int8 Adam, ckpt=Selective
 model.setCudaPreferFlashAttention(true);
-model.train(trainSet, testSet, epochs, logEvery, batchSize, gradAccum);
+model.train(source, epochs, 1, batchSize, gradAccum);
 ```
 
-- `enableCudaTrain` sets `maxPackedColumns` from free GPU memory (`applyVramPackBudget`). Override with `setCudaMaxPackedColumns(n)` (marks manual; auto will not overwrite).
-- AMP on stores **saturated FP16** block-input checkpoints (half VRAM vs FP32; restore scratch is one FP32 buffer). Non-finite activations are zeroed on cast.
-- AMP loss scaling only kicks in for larger embed dims (when FP16 GEMMs can run).
-- 8-bit Adam moments default on: `setCudaPreferInt8AdamMoments(false)` to disable.
-- CPU Adam offload (ZeRO-Offload Stage-1): `setCudaPreferCpuAdamOffload(true)` keeps `m`/`v` in host RAM (disables int8 device moments). Call before or after `enableCudaTrain`; re-inits train state.
-- **Weight tying** default on (`tieEmbeddingProjection`): LM head shares the token embedding matrix (saves ~vocab×embed params + Adam moments). Toggle with `setTieEmbeddingProjection(false)`.
+| Knob | Default / notes |
+|------|-----------------|
+| Pack budget | `applyVramPackBudget` from free VRAM; override `setCudaMaxPackedColumns` |
+| Flash attention | Prefer on for train/forward |
+| AMP | FP16 GEMMs + saturated FP16 block-input checkpoints; loss scale when embed≥256 |
+| Adam | Int8 moments on; or `setCudaPreferCpuAdamOffload(true)` (host `m`/`v`) |
+| Weight tying | On — LM head shares token embedding |
+| Activation ckpt | `Off` / `Full` / **`Selective`** (default): keep FFN acts, recompute Attn; `enableActivationCheckpointing(bool)` maps true→Selective, false→Off |
+| CUDA graphs | Used when checkpointing is **Off** and shapes are stable |
 
-### Consumer VRAM proof (RTX 5070 Ti 16 GB)
+```cpp
+model.setActivationCheckpointMode(ActivationCheckpointMode::Selective); // or Full / Off
+model.saveCheckpoint("run.snlm", true);
+model.loadCheckpoint("run.snlm");
+```
 
-Measured with `runScale100M` in `main.cpp` (SERA scale JSONL, Release|x64) — full-train causal LM, **no LoRA**:
+Checkpoint file: `SNLM` (weights + optional Adam; int8 moments stored as FP32).
+
+## Consumer VRAM proof (RTX 5070 Ti 16 GB)
+
+`runScale100M` — full train, no LoRA:
 
 | | |
 |---|---|
-| model | **97.32M** params (tied embed), vocab 16k, d=768, L=12, H=12, maxTok=512 (~371 MiB FP32 weights) |
-| flags | activation ckpt, FP16 AMP, int8 Adam, flash attention, CUDA graph |
-| VRAM after setup | free **~13.0 GiB** / 15.9 GiB total; auto `maxPackCols`≈3840 |
-| probe | **~21.8k** tok/s (seq=256, pack≤32) |
-| 1 epoch | trainLoss 6.76, testLoss 7.50, **~19.0k** tok/s, ~603 s |
-| data | 37 989 train / 512 test / ~11.4M prediction positions |
+| Model | **97.32M** (tied), vocab 16k, d=768, L=12, H=12, maxTok=512 |
+| Flags | ckpt + FP16 AMP + int8 Adam + flash + graph |
+| After setup | free **~13 GiB** / 15.9 GiB; `maxPackCols`≈3840 |
+| Probe / epoch | **~21.8k** tok/s (seq=256) · epoch **~19.0k** tok/s (~603 s) |
+| Data | ~38k train / 512 test / ~11.4M positions |
 
-Fits on a 16 GB consumer card with several GiB free after setup. Smaller footprint smoke: `CudaLanguageModel::runConsumerVramDemo()` (8k/256/4L — ~66k tok/s packed).
-
+Smaller smoke: `CudaLanguageModel::runConsumerVramDemo()` (~8k/256/4L, ~66k tok/s packed).
