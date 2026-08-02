@@ -74,10 +74,33 @@ void CudaCausalSelfAttention::uploadFrom(const CausalSelfAttention& host) {
     }
     this->cosTable.upload(hostCos);
     this->sinTable.upload(hostSin);
+    this->syncFusedQkvWeight();
     CudaAmp::registerMasterWeight(this->queryWeight.buffer.deviceData, this->queryWeight.elementCount());
     CudaAmp::registerMasterWeight(this->keyWeight.buffer.deviceData, this->keyWeight.elementCount());
     CudaAmp::registerMasterWeight(this->valueWeight.buffer.deviceData, this->valueWeight.elementCount());
     CudaAmp::registerMasterWeight(this->outputWeight.buffer.deviceData, this->outputWeight.elementCount());
+    CudaAmp::registerMasterWeight(this->qkvWeight.buffer.deviceData, this->qkvWeight.elementCount());
+}
+
+void CudaCausalSelfAttention::syncFusedQkvWeight() {
+    if (this->queryWeight.empty() || this->keyWeight.empty() || this->valueWeight.empty()) return;
+    if (this->queryWeight.cols != this->keyWeight.cols || this->queryWeight.cols != this->valueWeight.cols)
+        throw std::invalid_argument("CudaCausalSelfAttention::syncFusedQkvWeight embed mismatch");
+    if (this->queryWeight.rows != this->keyWeight.rows || this->queryWeight.rows != this->valueWeight.rows)
+        throw std::invalid_argument("CudaCausalSelfAttention::syncFusedQkvWeight projection rows mismatch");
+
+    this->qkvWeight.ensureSize(this->queryWeight.rows * 3ull, this->queryWeight.cols);
+    const size_t sliceBytes = this->queryWeight.byteCount();
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpy(this->qkvWeight.buffer.deviceData, this->queryWeight.buffer.deviceData, sliceBytes, cudaMemcpyDeviceToDevice),
+        "CudaCausalSelfAttention::syncFusedQkvWeight copy query");
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpy(this->qkvWeight.buffer.deviceData + this->queryWeight.elementCount(), this->keyWeight.buffer.deviceData, sliceBytes, cudaMemcpyDeviceToDevice),
+        "CudaCausalSelfAttention::syncFusedQkvWeight copy key");
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpy(this->qkvWeight.buffer.deviceData + 2ull * this->queryWeight.elementCount(), this->valueWeight.buffer.deviceData, sliceBytes, cudaMemcpyDeviceToDevice),
+        "CudaCausalSelfAttention::syncFusedQkvWeight copy value");
+    CudaAmp::registerMasterWeight(this->qkvWeight.buffer.deviceData, this->qkvWeight.elementCount());
 }
 
 CudaCausalSelfAttention CudaCausalSelfAttention::createFrom(const CausalSelfAttention& host) {
@@ -88,33 +111,26 @@ CudaCausalSelfAttention CudaCausalSelfAttention::createFrom(const CausalSelfAtte
 
 void CudaCausalSelfAttention::projectAndRotate(const CudaMatrix& input, int positionOffset, int segmentLength) {
     CudaOps::copyInto(input, this->inputCache);
+    if (this->qkvWeight.empty())
+        this->syncFusedQkvWeight();
+
+    this->qkvProjected.ensureSize(this->qkvWeight.rows, input.cols);
+    CudaMatrix::multiplyInto(this->qkvWeight, input, this->qkvProjected);
+
     this->query.ensureSize(this->queryWeight.rows, input.cols);
     this->key.ensureSize(this->keyWeight.rows, input.cols);
     this->value.ensureSize(this->valueWeight.rows, input.cols);
-
-    bool usedSharedActivationHalf = false;
-    if (CudaAmp::preferMixedPrecision) {
-        const void* activationHalf = CudaAmp::castActivationToHalfScratch(input.buffer.deviceData, input.elementCount());
-        if (activationHalf != nullptr) {
-            const int tokens = static_cast<int>(input.cols);
-            const int embed = static_cast<int>(input.rows);
-            const bool queryOk = CudaAmp::launchCublasLtMatmulFp16PreCastRight(
-                this->queryWeight.buffer.deviceData, activationHalf, this->query.buffer.deviceData,
-                static_cast<int>(this->queryWeight.rows), tokens, embed, false, false, nullptr);
-            const bool keyOk = CudaAmp::launchCublasLtMatmulFp16PreCastRight(
-                this->keyWeight.buffer.deviceData, activationHalf, this->key.buffer.deviceData,
-                static_cast<int>(this->keyWeight.rows), tokens, embed, false, false, nullptr);
-            const bool valueOk = CudaAmp::launchCublasLtMatmulFp16PreCastRight(
-                this->valueWeight.buffer.deviceData, activationHalf, this->value.buffer.deviceData,
-                static_cast<int>(this->valueWeight.rows), tokens, embed, false, false, nullptr);
-            usedSharedActivationHalf = queryOk && keyOk && valueOk;
-        }
-    }
-    if (!usedSharedActivationHalf) {
-        CudaMatrix::multiplyInto(this->queryWeight, input, this->query);
-        CudaMatrix::multiplyInto(this->keyWeight, input, this->key);
-        CudaMatrix::multiplyInto(this->valueWeight, input, this->value);
-    }
+    const size_t sliceElements = this->queryWeight.rows * input.cols;
+    const size_t sliceBytes = sliceElements * sizeof(float);
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpy(this->query.buffer.deviceData, this->qkvProjected.buffer.deviceData, sliceBytes, cudaMemcpyDeviceToDevice),
+        "CudaCausalSelfAttention::projectAndRotate split query");
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpy(this->key.buffer.deviceData, this->qkvProjected.buffer.deviceData + sliceElements, sliceBytes, cudaMemcpyDeviceToDevice),
+        "CudaCausalSelfAttention::projectAndRotate split key");
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpy(this->value.buffer.deviceData, this->qkvProjected.buffer.deviceData + 2ull * sliceElements, sliceBytes, cudaMemcpyDeviceToDevice),
+        "CudaCausalSelfAttention::projectAndRotate split value");
 
     CudaOps::rotaryRotateInPlace(this->query, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, positionOffset, segmentLength);
     CudaOps::rotaryRotateInPlace(this->key, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, positionOffset, segmentLength);
