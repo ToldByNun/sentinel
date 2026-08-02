@@ -247,9 +247,9 @@ size_t CudaLanguageModel::bytesPerPackedColumn() const {
     }
 
     // Each block keeps its own attn/FFN scratch sized to maxPackedColumns (not peak-of-one).
-    // Attn ~ QKV+out+caches+flash (~12 d); FFN ~ gateUp(2h)+gate/up/hidden/act/cache/bwd (~6 h + 4 d).
+    // Attn ~ QKV+out+caches+flash+qkvProjected (~15 d); FFN ~ gateUp(2h)+gate/up/hidden/act/cache/bwd (~6 h + 4 d).
     const size_t perBlockScratch =
-        (12ull * embeddingDim + 6ull * ffnHidden + 4ull * embeddingDim) * floatBytes;
+        (15ull * embeddingDim + 6ull * ffnHidden + 4ull * embeddingDim) * floatBytes;
     bytes += this->blocks.size() * perBlockScratch;
 
     // AMP activation half cast scratch (shared, one active gemm).
@@ -286,14 +286,21 @@ size_t CudaLanguageModel::estimatePendingTrainStaticBytes() const {
         parameterBytes += matrixBytes(block.feedForward.upBias);
         parameterBytes += matrixBytes(block.feedForward.downWeight);
         parameterBytes += matrixBytes(block.feedForward.downBias);
-        // Fused gate|up mirror (extra FP32 copy + its FP16 AMP mirror).
+        // Fused gate|up and QKV mirrors (extra FP32 copies; no separate grads).
         parameterBytes += matrixBytes(block.feedForward.gateWeight) + matrixBytes(block.feedForward.upWeight);
+        parameterBytes += matrixBytes(block.attention.queryWeight)
+            + matrixBytes(block.attention.keyWeight)
+            + matrixBytes(block.attention.valueWeight);
     }
 
-    // Gradients mirror FP32 parameters (except fused gateUp which has no separate grad).
+    // Gradients mirror FP32 parameters (except fused mirrors which have no separate grad).
     size_t gradientBytes = parameterBytes;
-    for (const CudaTransformerBlock& block : this->blocks)
+    for (const CudaTransformerBlock& block : this->blocks) {
         gradientBytes -= matrixBytes(block.feedForward.gateWeight) + matrixBytes(block.feedForward.upWeight);
+        gradientBytes -= matrixBytes(block.attention.queryWeight)
+            + matrixBytes(block.attention.keyWeight)
+            + matrixBytes(block.attention.valueWeight);
+    }
 
     size_t momentBytes = 0;
     if (!CudaAdam::preferCpuOffload) {
@@ -1013,8 +1020,10 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
 
         pushOffload(this->tokenEmbeddingWeight, this->hostTokenEmbeddingState, gradients.tokenEmbedding);
         this->adam.updateCpuOffloadedMany(offloadItems.data(), static_cast<int>(offloadItems.size()), effectiveGradientScale);
-        for (CudaTransformerBlock& block : this->blocks)
+        for (CudaTransformerBlock& block : this->blocks) {
+            block.attention.syncFusedQkvWeight();
             block.feedForward.syncFusedGateUpWeight();
+        }
         CudaAmp::invalidateMasterWeightHalves();
 
         if (CudaAmp::lossScalingActive())
@@ -1089,8 +1098,10 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
 
     pushItem(this->tokenEmbeddingWeight, this->tokenEmbeddingState, gradients.tokenEmbedding);
     this->adam.updateMany(items.data(), static_cast<int>(items.size()), effectiveGradientScale);
-    for (CudaTransformerBlock& block : this->blocks)
+    for (CudaTransformerBlock& block : this->blocks) {
+        block.attention.syncFusedQkvWeight();
         block.feedForward.syncFusedGateUpWeight();
+    }
     CudaAmp::invalidateMasterWeightHalves();
 
     if (CudaAmp::lossScalingActive())

@@ -14,6 +14,11 @@ public:
     CudaMatrix keyWeight;
     CudaMatrix valueWeight;
     CudaMatrix outputWeight;
+
+    /// <summary>stacked [query; key; value] for one forward projection GEMM</summary>
+    CudaMatrix qkvWeight;
+    CudaMatrix qkvProjected;
+
     CudaMatrix cosTable;
     CudaMatrix sinTable;
     int headCount;
@@ -67,6 +72,9 @@ public:
 
     /// <summary>upload weights and RoPE tables from host attention</summary>
     void uploadFrom(const CausalSelfAttention& host);
+
+    /// <summary>rebuild stacked QKV weight after Adam updates the split masters</summary>
+    void syncFusedQkvWeight();
 
     /// <summary>create device attention from host</summary>
     static CudaCausalSelfAttention createFrom(const CausalSelfAttention& host);
