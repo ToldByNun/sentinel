@@ -50,6 +50,7 @@ int main() {
     const bool runScaleProfile = false;
     const bool runArrowCorpusSmoke = false;
     const bool runBpeBench = false;
+    const bool runCkptParity = false;
 
     // Arrow HF disk layout (sera_best_subset) via from-scratch ArrowChunkReader; JSONL still works
     const bool useArrowCorpus = true;
@@ -72,6 +73,17 @@ int main() {
     const int testReservoirCap = 512;
     const bool preferCpuAdamOffload = false;
     const bool useCheckpointing = false;
+
+    if (runCkptParity) {
+        SmokeLog::section("ckpt parity");
+        if (!CudaMatmul::isAvailable()) {
+            SmokeLog::skip("ckpt Full vs Selective");
+            return 1;
+        }
+        CudaLanguageModel::runSelectiveCheckpointParitySmokeDemo(256, 64, 32, 2, 4);
+        CudaLanguageModel::runSelectiveCheckpointParitySmokeDemo(512, 128, 48, 4, 4);
+        return 0;
+    }
 
     if (runBpeBench) {
         SmokeLog::section("bpe bench");
@@ -230,10 +242,11 @@ int main() {
 
             SmokeLog::result(
                 "vram",
-                "maxPackCols=%d  freeMiB=%.0f  totalMiB=%.0f  ckpt=on  int8Adam=on  flash=on  graph=on",
+                "maxPackCols=%d  freeMiB=%.0f  totalMiB=%.0f  ckpt=%s  int8Adam=on  flash=on  graph=on",
                 model.cudaMaxPackedColumns(),
                 static_cast<double>(freeAfterSetup) / (1024.0 * 1024.0),
-                static_cast<double>(totalBytes) / (1024.0 * 1024.0));
+                static_cast<double>(totalBytes) / (1024.0 * 1024.0),
+                CudaLanguageModel::activationCheckpointModeName(model.cudaActivationCheckpointMode()));
 
             const double tokensPerSecond = model.probeCudaPackedTrainTokensPerSecond(probeSeq, 3, 8);
             SmokeLog::result(
@@ -978,7 +991,7 @@ int main() {
                 "speed",
                 "%s  embed=%d blocks=%d seq=%d pack=%d maxPackCols=%d ckpt=%s  tokens/s=%.0f  setupMiB=%.0f trainMiB=%.0f free=%.0f",
                 label, embeddingDim, blockCount, seq, packBatch, device.maxPackedColumns,
-                checkpointing ? "on" : "off",
+                CudaLanguageModel::activationCheckpointModeName(device.activationCheckpointMode),
                 tokensPerSecond, setupUsedMiB, trainUsedMiB,
                 static_cast<double>(freeAfterTrain) / (1024.0 * 1024.0));
 
@@ -1034,6 +1047,7 @@ int main() {
         LanguageModel::runStreamingSmokeDemo();
         CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);
         CudaLanguageModel::runTrainSmokeDemo(1000, 64, 48, 2, 4);
+        CudaLanguageModel::runSelectiveCheckpointParitySmokeDemo(256, 64, 32, 2, 4);
         CudaLanguageModel::runTrainInt8AdamSmokeDemo(1000, 64, 48, 2, 4);
         CudaLanguageModel::runTrainCpuAdamOffloadSmokeDemo(2000, 128, 64, 2, 4);
         CudaLanguageModel::runTrainProfileDemo(1000, 64, 48, 2, 4, true, 256);
@@ -1106,7 +1120,7 @@ int main() {
         trainBatchSize,
         trainGradAccum,
         preferCpuAdamOffload ? "on" : "off",
-        useCheckpointing ? "on" : "off");
+        CudaLanguageModel::activationCheckpointModeName(model.cudaActivationCheckpointMode()));
 
     if (model.cudaEnabled()) {
         Matrix deviceLogits = model.forward(parityTokenIds);
