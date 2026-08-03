@@ -2970,6 +2970,308 @@ void CudaLanguageModel::decodeInto(int tokenId, CudaMatrix& outLogits) {
     CudaMatrix::multiplyBiasInto(this->lmHeadWeight(), this->normalized, this->projectionBias, outLogits);
 }
 
+CudaLanguageModelVramBreakdown CudaLanguageModel::estimateVramBreakdown(
+    int vocabularySize,
+    int embeddingDim,
+    int blockCount,
+    int headCount,
+    int maximumPositionCount,
+    ActivationCheckpointMode checkpointMode,
+    bool preferMixedPrecision,
+    bool preferInt8AdamMoments,
+    bool preferCpuAdamOffload,
+    bool preferMuon,
+    bool tieEmbeddingProjection,
+    int maxPackedColumns,
+    int logitChunkRows,
+    size_t displaySafetyBytes
+) {
+    if (vocabularySize <= 0 || embeddingDim <= 0 || blockCount <= 0 || headCount <= 0 || maximumPositionCount <= 0)
+        throw std::invalid_argument("CudaLanguageModel::estimateVramBreakdown invalid dims");
+    if (embeddingDim % headCount != 0)
+        throw std::invalid_argument("CudaLanguageModel::estimateVramBreakdown embeddingDim must divide headCount");
+    if (maxPackedColumns < 0 || logitChunkRows <= 0)
+        throw std::invalid_argument("CudaLanguageModel::estimateVramBreakdown invalid pack/chunk");
+
+    const size_t d = static_cast<size_t>(embeddingDim);
+    const size_t v = static_cast<size_t>(vocabularySize);
+    const size_t layerCount = static_cast<size_t>(blockCount);
+    const size_t pos = static_cast<size_t>(maximumPositionCount);
+    const size_t headDim = d / static_cast<size_t>(headCount);
+    const size_t pairCount = headDim / 2ull;
+    const size_t h = (2ull * d * 4ull) / 3ull;
+    const size_t floatBytes = sizeof(float);
+
+    size_t paramElements = 0;
+    paramElements += v * d;
+    paramElements += d;
+    paramElements += v;
+    if (!tieEmbeddingProjection)
+        paramElements += v * d;
+    paramElements += layerCount * (
+        d
+        + 4ull * d * d
+        + d
+        + 2ull * h * d
+        + 2ull * h
+        + d * h
+        + d
+    );
+
+    const size_t fp32Trainable = paramElements * floatBytes;
+    const size_t fusedMirror = layerCount * (3ull * d * d + 2ull * h * d) * floatBytes;
+    const size_t ropeTables = layerCount * (2ull * pos * pairCount) * floatBytes;
+    const size_t gradients = fp32Trainable;
+
+    size_t adamWeights = 0;
+    size_t muonWeights = 0;
+    adamWeights += v * d + d + v;
+    if (!tieEmbeddingProjection)
+        adamWeights += v * d;
+    {
+        const size_t hiddenWeight = 4ull * d * d + 2ull * h * d + d * h;
+        const size_t auxWeight = 2ull * d + 2ull * h + d;
+        if (preferMuon) {
+            muonWeights += layerCount * hiddenWeight;
+            adamWeights += layerCount * auxWeight;
+        } else {
+            adamWeights += layerCount * (hiddenWeight + auxWeight);
+        }
+    }
+    adamWeights *= floatBytes;
+    muonWeights *= floatBytes;
+
+    size_t adamMoments = 0;
+    if (!preferCpuAdamOffload) {
+        if (preferInt8AdamMoments)
+            adamMoments = adamWeights / 2ull + adamWeights / 128ull;
+        else
+            adamMoments = 2ull * adamWeights;
+    }
+    const size_t muonMoments = preferMuon ? muonWeights : 0ull;
+    const size_t fp16Mirrors = preferMixedPrecision ? (fp32Trainable + fusedMirror) / 2ull : 0ull;
+
+    const size_t chunkRows = static_cast<size_t>((std::min)(logitChunkRows, vocabularySize));
+    size_t perColumn = 0;
+    perColumn += 5ull * d * floatBytes;
+    perColumn += 2ull * chunkRows * floatBytes;
+    perColumn += d * floatBytes;
+    perColumn += 3ull * floatBytes;
+    perColumn += 7ull * sizeof(int);
+    constexpr size_t maxCachedLogitsBytes = 512ull * 1024ull * 1024ull;
+    if (v * floatBytes * 8192ull <= maxCachedLogitsBytes)
+        perColumn += v * floatBytes;
+
+    const size_t attnScratch = 15ull * d * floatBytes;
+    const size_t ffnScratch = (8ull * h + 4ull * d) * floatBytes;
+    if (checkpointMode != ActivationCheckpointMode::Off) {
+        if (preferMixedPrecision)
+            perColumn += layerCount * d * 2ull + d * floatBytes;
+        else
+            perColumn += layerCount * d * floatBytes;
+    }
+    if (checkpointMode == ActivationCheckpointMode::Selective) {
+        perColumn += layerCount * ffnScratch;
+        perColumn += attnScratch;
+    } else {
+        perColumn += layerCount * (attnScratch + ffnScratch);
+    }
+    if (preferMixedPrecision)
+        perColumn += d * 2ull;
+
+    const size_t packCols = static_cast<size_t>((std::max)(0, maxPackedColumns));
+    constexpr double footprintSlack = 1.40;
+    const size_t packWorkspace = static_cast<size_t>(static_cast<double>(perColumn * packCols) * footprintSlack);
+
+    CudaLanguageModelVramBreakdown out;
+    out.parameterElements = paramElements;
+    out.fp32TrainableWeightBytes = fp32Trainable;
+    out.fusedMirrorBytes = fusedMirror;
+    out.ropeTableBytes = ropeTables;
+    out.gradientBytes = gradients;
+    out.fp16AmpMirrorBytes = fp16Mirrors;
+    out.adamMomentBytes = adamMoments;
+    out.muonMomentBytes = muonMoments;
+    out.bytesPerPackedColumn = perColumn;
+    out.packWorkspaceBytes = packWorkspace;
+    out.displaySafetyBytes = displaySafetyBytes;
+    out.weightsResidentBytes = fp32Trainable + fusedMirror + ropeTables;
+    out.staticTrainBytes =
+        out.weightsResidentBytes
+        + out.gradientBytes
+        + out.fp16AmpMirrorBytes
+        + out.adamMomentBytes
+        + out.muonMomentBytes;
+    out.peakEstimateBytes = out.staticTrainBytes + out.packWorkspaceBytes + out.displaySafetyBytes;
+    return out;
+}
+
+static void logVramBreakdown(const char* label, const CudaLanguageModelVramBreakdown& breakdown) {
+    auto miB = [](size_t bytes) -> double {
+        return static_cast<double>(bytes) / (1024.0 * 1024.0);
+    };
+    SmokeLog::result(label,
+        "params=%.2fB  weights=%.0f  fusedMirrors=%.0f  rope=%.0f  grads=%.0f  fp16Mirrors=%.0f  adam=%.0f  muon=%.0f MiB",
+        static_cast<double>(breakdown.parameterElements) / 1.0e9,
+        miB(breakdown.fp32TrainableWeightBytes),
+        miB(breakdown.fusedMirrorBytes),
+        miB(breakdown.ropeTableBytes),
+        miB(breakdown.gradientBytes),
+        miB(breakdown.fp16AmpMirrorBytes),
+        miB(breakdown.adamMomentBytes),
+        miB(breakdown.muonMomentBytes));
+    SmokeLog::result("  resident",
+        "weights+rope=%.0f  staticTrain=%.0f  packWs=%.0f  safety=%.0f  peak=%.0f MiB  (%.0f B/col)",
+        miB(breakdown.weightsResidentBytes),
+        miB(breakdown.staticTrainBytes),
+        miB(breakdown.packWorkspaceBytes),
+        miB(breakdown.displaySafetyBytes),
+        miB(breakdown.peakEstimateBytes),
+        static_cast<double>(breakdown.bytesPerPackedColumn));
+}
+
+void CudaLanguageModel::runScale4BVramProbeDemo() {
+    if (!CudaMatmul::isAvailable()) {
+        SmokeLog::skip("scale-4B VRAM probe");
+        return;
+    }
+
+    const int vocab = 32000;
+    const int embed = 3072;
+    const int blocks = 34;
+    const int heads = 48;
+    const int pos = 2048;
+    const int seq = 512;
+    const int packColsTarget = seq;
+    const size_t safety = 2560ull * 1024ull * 1024ull;
+
+    SmokeLog::section("scale-4B VRAM probe");
+    SmokeLog::result(
+        "shape",
+        "vocab=%d embed=%d blocks=%d heads=%d headDim=%d pos=%d ffnH=%d seqFloor=%d",
+        vocab, embed, blocks, heads, embed / heads, pos, (2 * embed * 4) / 3, seq);
+
+    size_t freeBytes = 0;
+    size_t totalBytes = 0;
+    CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeBytes, &totalBytes), "scale-4B memGetInfo");
+    SmokeLog::result(
+        "device",
+        "total=%.0f MiB  free=%.0f MiB",
+        static_cast<double>(totalBytes) / (1024.0 * 1024.0),
+        static_cast<double>(freeBytes) / (1024.0 * 1024.0));
+
+    struct Scenario {
+        const char* name;
+        ActivationCheckpointMode ckpt;
+        bool amp;
+        bool int8Adam;
+        bool cpuAdam;
+        bool muon;
+        int packCols;
+    };
+    const Scenario scenarios[] = {
+        {"A adam/int8/gpu ckpt=sel pack=1seq", ActivationCheckpointMode::Selective, true, true, false, false, packColsTarget},
+        {"B adam/int8/cpu ckpt=sel pack=1seq", ActivationCheckpointMode::Selective, true, true, true, false, packColsTarget},
+        {"C adam/int8/gpu ckpt=off pack=1seq", ActivationCheckpointMode::Off, true, true, false, false, packColsTarget},
+        {"D muon+adam/int8 ckpt=sel pack=1seq", ActivationCheckpointMode::Selective, true, true, false, true, packColsTarget},
+        {"E adam/int8/gpu ckpt=sel pack=0", ActivationCheckpointMode::Selective, true, true, false, false, 0},
+    };
+
+    for (const Scenario& scenario : scenarios) {
+        const CudaLanguageModelVramBreakdown breakdown = CudaLanguageModel::estimateVramBreakdown(
+            vocab, embed, blocks, heads, pos,
+            scenario.ckpt, scenario.amp, scenario.int8Adam, scenario.cpuAdam, scenario.muon,
+            true, scenario.packCols, 2048, safety);
+        logVramBreakdown(scenario.name, breakdown);
+        const bool fitsStatic = breakdown.staticTrainBytes + breakdown.displaySafetyBytes <= totalBytes;
+        const bool fitsPeak = breakdown.peakEstimateBytes <= totalBytes;
+        const double deficitStatic = fitsStatic
+            ? 0.0
+            : static_cast<double>(breakdown.staticTrainBytes + breakdown.displaySafetyBytes - totalBytes) / (1024.0 * 1024.0);
+        const double deficitPeak = fitsPeak
+            ? 0.0
+            : static_cast<double>(breakdown.peakEstimateBytes - totalBytes) / (1024.0 * 1024.0);
+        SmokeLog::result(
+            "  fit",
+            "static+safety %s  peak %s  deficitStatic=%.0f MiB  deficitPeak=%.0f MiB",
+            fitsStatic ? "OK" : "OOM",
+            fitsPeak ? "OK" : "OOM",
+            deficitStatic,
+            deficitPeak);
+    }
+
+    SmokeLog::section("scale-4B alloc probe (scenario A pieces)");
+    const CudaLanguageModelVramBreakdown a = CudaLanguageModel::estimateVramBreakdown(
+        vocab, embed, blocks, heads, pos,
+        ActivationCheckpointMode::Selective, true, true, false, false,
+        true, 0, 2048, safety);
+    const CudaLanguageModelVramBreakdown aPack = CudaLanguageModel::estimateVramBreakdown(
+        vocab, embed, blocks, heads, pos,
+        ActivationCheckpointMode::Selective, true, true, false, false,
+        true, packColsTarget, 2048, safety);
+
+    struct Piece {
+        const char* name;
+        size_t bytes;
+    };
+    const Piece pieces[] = {
+        {"fp32 trainable weights", a.fp32TrainableWeightBytes},
+        {"fused QKV+gateUp mirrors", a.fusedMirrorBytes},
+        {"RoPE tables", a.ropeTableBytes},
+        {"fp32 gradients", a.gradientBytes},
+        {"fp16 AMP mirrors", a.fp16AmpMirrorBytes},
+        {"int8 Adam moments", a.adamMomentBytes},
+        {"pack workspace (1x seq)", aPack.packWorkspaceBytes},
+    };
+
+    size_t allocated = 0;
+    std::vector<void*> holds;
+    holds.reserve(16);
+    auto freeHolds = [&]() {
+        for (void* pointer : holds) {
+            if (pointer != nullptr)
+                cudaFree(pointer);
+        }
+        holds.clear();
+    };
+
+    for (const Piece& piece : pieces) {
+        void* pointer = nullptr;
+        const cudaError_t status = cudaMalloc(&pointer, piece.bytes);
+        if (status != cudaSuccess) {
+            size_t freeNow = 0;
+            size_t totalNow = 0;
+            cudaMemGetInfo(&freeNow, &totalNow);
+            SmokeLog::result(
+                "alloc FAIL",
+                "%s  need=%.0f MiB  alreadyHeld=%.0f MiB  freeNow=%.0f MiB  err=%s",
+                piece.name,
+                static_cast<double>(piece.bytes) / (1024.0 * 1024.0),
+                static_cast<double>(allocated) / (1024.0 * 1024.0),
+                static_cast<double>(freeNow) / (1024.0 * 1024.0),
+                cudaGetErrorString(status));
+            cudaGetLastError();
+            freeHolds();
+            SmokeLog::note("blocker: FP32 weight residency (and mirrors) before grads/opt — layout change required for 4B");
+            return;
+        }
+        holds.push_back(pointer);
+        allocated += piece.bytes;
+        size_t freeNow = 0;
+        size_t totalNow = 0;
+        cudaMemGetInfo(&freeNow, &totalNow);
+        SmokeLog::result(
+            "alloc OK",
+            "%s  +%.0f MiB  held=%.0f  free=%.0f MiB",
+            piece.name,
+            static_cast<double>(piece.bytes) / (1024.0 * 1024.0),
+            static_cast<double>(allocated) / (1024.0 * 1024.0),
+            static_cast<double>(freeNow) / (1024.0 * 1024.0));
+    }
+    freeHolds();
+    SmokeLog::note("unexpected: all scenario-A pieces fit as raw cudaMalloc (fragmentation/real objects may still OOM)");
+}
+
 void CudaLanguageModel::runConsumerVramDemo(
     int vocabularySize,
     int embeddingDim,

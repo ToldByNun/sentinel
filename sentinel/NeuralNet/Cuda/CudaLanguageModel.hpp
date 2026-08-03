@@ -87,6 +87,24 @@ public:
 
 
 
+/// <summary>estimated device VRAM buckets for a train config (dimensional; no allocation)</summary>
+struct CudaLanguageModelVramBreakdown {
+    size_t parameterElements = 0;
+    size_t fp32TrainableWeightBytes = 0;
+    size_t fusedMirrorBytes = 0;
+    size_t ropeTableBytes = 0;
+    size_t gradientBytes = 0;
+    size_t fp16AmpMirrorBytes = 0;
+    size_t adamMomentBytes = 0;
+    size_t muonMomentBytes = 0;
+    size_t bytesPerPackedColumn = 0;
+    size_t packWorkspaceBytes = 0;
+    size_t displaySafetyBytes = 0;
+    size_t weightsResidentBytes = 0;
+    size_t staticTrainBytes = 0;
+    size_t peakEstimateBytes = 0;
+};
+
 /// <summary>device resident accumulated gradients for one language model</summary>
 
 class CudaLanguageModelGradients {
@@ -528,6 +546,31 @@ public:
 
     /// <summary>breakdown of one packed train step; packBatchSize 0 => min(32, maxPack/seq); ckpt default off for throughput</summary>
     static void runTrainProfileDemo(int vocabularySize = 1000, int embeddingDim = 64, int sequenceLength = 48, int blockCount = 2, int headCount = 4, bool preferFlash = true, int maxPackedColumns = 0, int packBatchSize = 0, bool activationCheckpointing = false);
+
+    /// <summary>
+    /// dimensional VRAM bucket estimate (no alloc); matches train static + pack footprint math
+    /// </summary>
+    static CudaLanguageModelVramBreakdown estimateVramBreakdown(
+        int vocabularySize,
+        int embeddingDim,
+        int blockCount,
+        int headCount,
+        int maximumPositionCount,
+        ActivationCheckpointMode checkpointMode,
+        bool preferMixedPrecision,
+        bool preferInt8AdamMoments,
+        bool preferCpuAdamOffload,
+        bool preferMuon,
+        bool tieEmbeddingProjection,
+        int maxPackedColumns,
+        int logitChunkRows = 2048,
+        size_t displaySafetyBytes = 2560ull * 1024ull * 1024ull
+    );
+
+    /// <summary>
+    /// ~4B-shape VRAM probe: log detailed byte buckets for current train layouts, then cudaMalloc fit check
+    /// </summary>
+    static void runScale4BVramProbeDemo();
 
     /// <summary>
     /// consumer VRAM proof: larger LM (d&gt;=256), auto pack budget, loss scale, timed packed epoch
