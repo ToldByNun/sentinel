@@ -98,11 +98,33 @@ public:
     /// <summary>register FP32 master weight for sticky FP16 GEMM casts (same pointer until free)</summary>
     static void registerMasterWeight(const float* deviceData, size_t elementCount);
 
+    /// <summary>
+    /// bind matrix as FP16-only working weight: cast FP32 device → sticky half, free FP32 buffer
+    /// </summary>
+    static void bindFp16WorkingWeight(CudaMatrix& matrix);
+
+    /// <summary>upload host FP32 master into an existing FP16 working-weight slot</summary>
+    static void uploadHostMasterToFp16Working(CudaMatrix& matrix, const float* hostMaster);
+
+    /// <summary>device half pointer for a bound working weight; nullptr if unbound</summary>
+    static const void* fp16WorkingWeightOrNull(const CudaMatrix& matrix);
+
+    /// <summary>
+    /// FP32 device pointer for GEMM: resident buffer, or cast of FP16 working weight into scratch
+    /// </summary>
+    static const float* resolveFp32Operand(const CudaMatrix& matrix, CudaDeviceBuffer& floatScratch);
+
+    /// <summary>FP16 GEMM using CudaMatrix operands (resolves FP16 working weights)</summary>
+    static bool launchCublasLtMatmulFp16Matrices(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& out, bool transposeLeft, bool transposeRight, double* kernelMilliseconds, const float* deviceBiasOrNull = nullptr);
+
     /// <summary>mark all registered master-weight FP16 mirrors stale (call after Adam)</summary>
     static void invalidateMasterWeightHalves();
 
     /// <summary>drop all master-weight registrations</summary>
     static void clearMasterWeights();
+
+    static CudaDeviceBuffer floatScratchLeft;
+    static CudaDeviceBuffer floatScratchRight;
 
 private:
     static CudaDeviceBuffer halfScratchLeft;
@@ -114,9 +136,11 @@ private:
         size_t elementCount;
         CudaDeviceBuffer half;
         bool valid;
+        bool fp16Working;
     };
 
-    static constexpr int maxMasterWeights = 128;
+    /// <summary>4B @ 34L needs ~embed+proj+9/layer fused+2d; leave headroom</summary>
+    static constexpr int maxMasterWeights = 1024;
     static MasterWeightHalf masterWeights[maxMasterWeights];
     static int masterWeightCount;
 

@@ -1,5 +1,6 @@
 #include "CudaAdam.hpp"
 
+#include "CudaAmp.hpp"
 #include "CudaOps.hpp"
 #include "../Utils/SmokeLog.hpp"
 
@@ -20,6 +21,7 @@
 
 bool CudaAdam::preferInt8Moments = true;
 bool CudaAdam::preferCpuOffload = false;
+bool CudaAdam::preferFp16GpuWeights = false;
 int CudaAdam::int8BlockSize = 256;
 
 namespace {
@@ -469,6 +471,7 @@ void CudaAdam::updateCpuOffloadedMany(const CudaAdamCpuOffloadItem* items, int i
     if (items == nullptr || itemCount <= 0) throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany empty items");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaAdam::updateCpuOffloadedMany no CUDA device");
 
+    const bool fp16Working = CudaAdam::preferFp16GpuWeights;
     std::vector<size_t> offsets(static_cast<size_t>(itemCount));
     std::vector<size_t> elementCounts(static_cast<size_t>(itemCount));
     size_t totalElements = 0;
@@ -480,8 +483,16 @@ void CudaAdam::updateCpuOffloadedMany(const CudaAdamCpuOffloadItem* items, int i
             throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany empty parameter/gradient");
         if (item.parameter->rows != item.gradient->rows || item.parameter->cols != item.gradient->cols)
             throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany parameter/gradient shape mismatch");
-        if (item.parameter->buffer.deviceData == nullptr || item.gradient->buffer.deviceData == nullptr)
-            throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany null device pointer");
+        if (item.gradient->buffer.deviceData == nullptr)
+            throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany null gradient device pointer");
+        if (fp16Working) {
+            if (item.hostMaster == nullptr)
+                throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany fp16 mode requires hostMaster");
+            if (item.hostMaster->empty() || item.hostMaster->data.size() != item.parameter->elementCount())
+                throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany hostMaster size mismatch");
+        } else if (item.parameter->buffer.deviceData == nullptr) {
+            throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany null parameter device pointer");
+        }
 
         const size_t elementCount = item.parameter->elementCount();
         offsets[static_cast<size_t>(itemIndex)] = totalElements;
@@ -496,14 +507,16 @@ void CudaAdam::updateCpuOffloadedMany(const CudaAdamCpuOffloadItem* items, int i
         const CudaAdamCpuOffloadItem& item = items[itemIndex];
         const size_t offset = offsets[static_cast<size_t>(itemIndex)];
         const size_t bytes = elementCounts[static_cast<size_t>(itemIndex)] * sizeof(float);
-        throwIfCudaFailedPinned(
-            cudaMemcpyAsync(
-                gCudaAdamOffloadArena.parameters + offset,
-                item.parameter->buffer.deviceData,
-                bytes,
-                cudaMemcpyDeviceToHost,
-                stream),
-            "CudaAdam::updateCpuOffloadedMany D2H parameter");
+        if (!fp16Working) {
+            throwIfCudaFailedPinned(
+                cudaMemcpyAsync(
+                    gCudaAdamOffloadArena.parameters + offset,
+                    item.parameter->buffer.deviceData,
+                    bytes,
+                    cudaMemcpyDeviceToHost,
+                    stream),
+                "CudaAdam::updateCpuOffloadedMany D2H parameter");
+        }
         throwIfCudaFailedPinned(
             cudaMemcpyAsync(
                 gCudaAdamOffloadArena.gradients + offset,
@@ -527,15 +540,41 @@ void CudaAdam::updateCpuOffloadedMany(const CudaAdamCpuOffloadItem* items, int i
         const size_t elementCount = elementCounts[static_cast<size_t>(itemIndex)];
         const size_t bytes = elementCount * sizeof(float);
 
-        Matrix hostParameter(item.parameter->rows, item.parameter->cols);
-        Matrix hostGradient(item.gradient->rows, item.gradient->cols);
-        std::memcpy(hostParameter.data.data(), gCudaAdamOffloadArena.parameters + offset, bytes);
+        Matrix hostGradient(item.parameter->rows, item.parameter->cols);
         std::memcpy(hostGradient.data.data(), gCudaAdamOffloadArena.gradients + offset, bytes);
         if (gradientScale != 1.0f)
             Matrix::scaleInPlace(hostGradient, gradientScale);
 
-        hostAdam.update(hostParameter, *item.hostState, hostGradient);
-        std::memcpy(gCudaAdamOffloadArena.parameters + offset, hostParameter.data.data(), bytes);
+        if (fp16Working) {
+            hostAdam.update(*item.hostMaster, *item.hostState, hostGradient);
+        } else {
+            Matrix hostParameter(item.parameter->rows, item.parameter->cols);
+            std::memcpy(hostParameter.data.data(), gCudaAdamOffloadArena.parameters + offset, bytes);
+            hostAdam.update(hostParameter, *item.hostState, hostGradient);
+            std::memcpy(gCudaAdamOffloadArena.parameters + offset, hostParameter.data.data(), bytes);
+        }
+    }
+
+    if (fp16Working) {
+        for (int itemIndex = 0; itemIndex < itemCount; ++itemIndex) {
+            const CudaAdamCpuOffloadItem& item = items[itemIndex];
+            if (item.parameter->ampWeightSlot >= 0)
+                CudaAmp::uploadHostMasterToFp16Working(*item.parameter, item.hostMaster->data.data());
+            else if (item.parameter->hasDeviceStorage()) {
+                const size_t bytes = item.parameter->byteCount();
+                throwIfCudaFailedPinned(
+                    cudaMemcpyAsync(
+                        item.parameter->buffer.deviceData,
+                        item.hostMaster->data.data(),
+                        bytes,
+                        cudaMemcpyHostToDevice,
+                        stream),
+                    "CudaAdam::updateCpuOffloadedMany H2D fp32 parameter");
+            }
+            // else: host-master-only (fused GEMM mirrors rebuilt by caller)
+        }
+        throwIfCudaFailedPinned(cudaStreamSynchronize(stream), "CudaAdam::updateCpuOffloadedMany H2D sync");
+        return;
     }
 
     for (int itemIndex = 0; itemIndex < itemCount; ++itemIndex) {

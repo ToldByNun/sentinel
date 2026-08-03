@@ -60,9 +60,11 @@ public:
 /// <summary>one tensor for CPU-offloaded Adam (device weights + host moments)</summary>
 class CudaAdamCpuOffloadItem {
 public:
-    CudaMatrix* parameter;
-    const CudaMatrix* gradient;
-    AdamState* hostState;
+    CudaMatrix* parameter = nullptr;
+    const CudaMatrix* gradient = nullptr;
+    AdamState* hostState = nullptr;
+    /// <summary>persistent FP32 master on host when preferFp16GpuWeights; else nullptr (D2H from parameter)</summary>
+    Matrix* hostMaster = nullptr;
 };
 
 /// <summary>device resident Adam optimizer with bias corrected moments</summary>
@@ -82,6 +84,11 @@ public:
     /// ZeRO-Offload Stage-1 style: keep Adam m/v on host RAM (mutually exclusive with preferInt8Moments for train wiring)
     /// </summary>
     static bool preferCpuOffload;
+
+    /// <summary>
+    /// with preferCpuOffload: FP32 Adam masters on host, FP16 working weights on GPU (requires AMP)
+    /// </summary>
+    static bool preferFp16GpuWeights;
 
     /// <summary>absmax quantization block size for int8 moments</summary>
     static int int8BlockSize;

@@ -83,6 +83,19 @@ public:
     AdamState feedForwardUpBias;
     AdamState feedForwardDownWeight;
     AdamState feedForwardDownBias;
+
+    Matrix queryWeightMaster;
+    Matrix keyWeightMaster;
+    Matrix valueWeightMaster;
+    Matrix attentionOutputWeightMaster;
+    Matrix attentionNormGammaMaster;
+    Matrix feedForwardNormGammaMaster;
+    Matrix feedForwardGateWeightMaster;
+    Matrix feedForwardGateBiasMaster;
+    Matrix feedForwardUpWeightMaster;
+    Matrix feedForwardUpBiasMaster;
+    Matrix feedForwardDownWeightMaster;
+    Matrix feedForwardDownBiasMaster;
 };
 
 
@@ -250,6 +263,12 @@ public:
     AdamState hostProjectionBiasState;
     std::vector<CudaTransformerBlockHostAdamStates> hostBlockAdamStates;
 
+    /// <summary>FP32 Adam masters on host when preferFp16GpuWeights</summary>
+    Matrix hostTokenEmbeddingMaster;
+    Matrix hostFinalNormGammaMaster;
+    Matrix hostProjectionWeightMaster;
+    Matrix hostProjectionBiasMaster;
+
 
 
     CudaMatrix probabilities;
@@ -390,7 +409,8 @@ public:
 
     void ensureTrainState();
 
-
+    /// <summary>download FP32 masters from GPU, bind FP16 working weights, free FP32 2D weights</summary>
+    void materializeFp16GpuWorkingWeights();
 
     /// <summary>pre-allocate train activation workspaces to maxPackedColumns</summary>
 
@@ -564,7 +584,8 @@ public:
         bool tieEmbeddingProjection,
         int maxPackedColumns,
         int logitChunkRows = 2048,
-        size_t displaySafetyBytes = 2560ull * 1024ull * 1024ull
+        size_t displaySafetyBytes = 2560ull * 1024ull * 1024ull,
+        bool preferFp16GpuWeights = false
     );
 
     /// <summary>

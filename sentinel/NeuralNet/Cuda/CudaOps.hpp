@@ -3,6 +3,10 @@
 
 #include "CudaMatmul.hpp"
 
+#ifdef __CUDACC__
+#include <cuda_fp16.h>
+#endif
+
 /// <summary>elementwise broadcast attention and residual ops on CudaMatrix</summary>
 class CudaOps {
 public:
@@ -211,6 +215,7 @@ private:
     __device__ static void runRotaryRotateInPlace(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, int segmentLength, const float* cosTable, const float* sinTable);
     __device__ static void runRotaryRotateInverseInPlace(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, int segmentLength, const float* cosTable, const float* sinTable);
     __device__ static void runEmbeddingGatherInto(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);
+    __device__ static void runEmbeddingGatherHalfInto(const __half* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);
     __device__ static void runEmbeddingScatterAddInto(float* weightGradient, const int* tokenIds, const float* outputGradient, int embeddingDim, int tokenCount, int vocabularySize);
     __device__ static void runEmbeddingZeroRows(float* weightGradient, const int* tokenIds, int embeddingDim, int tokenCount, int vocabularySize);
     __device__ static void runCrossEntropyLossFromIds(const float* probabilities, const int* targetTokenIds, float* columnLosses, int vocabularySize, int tokenCount);
@@ -241,6 +246,7 @@ private:
     friend __global__ void CudaOpsRotaryRotateEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, int segmentLength, const float* cosTable, const float* sinTable);
     friend __global__ void CudaOpsRotaryRotateInverseEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, int segmentLength, const float* cosTable, const float* sinTable);
     friend __global__ void CudaOpsEmbeddingGatherEntry(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);
+    friend __global__ void CudaOpsEmbeddingGatherHalfEntry(const __half* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);
     friend __global__ void CudaOpsEmbeddingScatterAddEntry(float* weightGradient, const int* tokenIds, const float* outputGradient, int embeddingDim, int tokenCount, int vocabularySize);
     friend __global__ void CudaOpsEmbeddingZeroRowsEntry(float* weightGradient, const int* tokenIds, int embeddingDim, int tokenCount, int vocabularySize);
     friend __global__ void CudaOpsCrossEntropyLossFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* columnLosses, int vocabularySize, int tokenCount);
@@ -274,6 +280,7 @@ __global__ void CudaOpsZeroForbiddenScoreGradientsEntry(float* scoresGrad, int k
 __global__ void CudaOpsRotaryRotateEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, int segmentLength, const float* cosTable, const float* sinTable);
 __global__ void CudaOpsRotaryRotateInverseEntry(float* tensor, int headCount, int headDimension, int pairCount, int sequenceLength, int positionOffset, int segmentLength, const float* cosTable, const float* sinTable);
 __global__ void CudaOpsEmbeddingGatherEntry(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);
+__global__ void CudaOpsEmbeddingGatherHalfEntry(const __half* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize);
 __global__ void CudaOpsEmbeddingScatterAddEntry(float* weightGradient, const int* tokenIds, const float* outputGradient, int embeddingDim, int tokenCount, int vocabularySize);
 __global__ void CudaOpsEmbeddingZeroRowsEntry(float* weightGradient, const int* tokenIds, int embeddingDim, int tokenCount, int vocabularySize);
 __global__ void CudaOpsCrossEntropyLossFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* columnLosses, int vocabularySize, int tokenCount);

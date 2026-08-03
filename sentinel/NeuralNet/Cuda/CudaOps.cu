@@ -1,5 +1,8 @@
 #include "CudaOps.hpp"
 
+#include "CudaAmp.hpp"
+
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <limits>
 #include <stdexcept>
@@ -314,6 +317,22 @@ __device__ void CudaOps::runEmbeddingGatherInto(const float* weight, const int* 
     out[index] = weight[tokenId * embeddingDim + dimensionIndex];
 }
 
+__device__ void CudaOps::runEmbeddingGatherHalfInto(const __half* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize) {
+    const int elementCount = embeddingDim * tokenCount;
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+
+    const int dimensionIndex = index / tokenCount;
+    const int tokenIndex = index - dimensionIndex * tokenCount;
+    const int tokenId = tokenIds[tokenIndex];
+    if (tokenId < 0 || tokenId >= vocabularySize) {
+        out[index] = 0.0f;
+        return;
+    }
+
+    out[index] = __half2float(weight[tokenId * embeddingDim + dimensionIndex]);
+}
+
 __device__ void CudaOps::runEmbeddingScatterAddInto(float* weightGradient, const int* tokenIds, const float* outputGradient, int embeddingDim, int tokenCount, int vocabularySize) {
     const int elementCount = embeddingDim * tokenCount;
     const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
@@ -624,6 +643,10 @@ __global__ void CudaOpsRotaryRotateInverseEntry(float* tensor, int headCount, in
 
 __global__ void CudaOpsEmbeddingGatherEntry(const float* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize) {
     CudaOps::runEmbeddingGatherInto(weight, tokenIds, out, embeddingDim, tokenCount, vocabularySize);
+}
+
+__global__ void CudaOpsEmbeddingGatherHalfEntry(const __half* weight, const int* tokenIds, float* out, int embeddingDim, int tokenCount, int vocabularySize) {
+    CudaOps::runEmbeddingGatherHalfInto(weight, tokenIds, out, embeddingDim, tokenCount, vocabularySize);
 }
 
 __global__ void CudaOpsEmbeddingScatterAddEntry(float* weightGradient, const int* tokenIds, const float* outputGradient, int embeddingDim, int tokenCount, int vocabularySize) {
@@ -1098,6 +1121,14 @@ void CudaOps::embeddingGatherInto(const CudaMatrix& weight, const int* tokenIdsD
 
     const int elementCount = embeddingDim * static_cast<int>(tokenCount);
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    if (const void* halfWeight = CudaAmp::fp16WorkingWeightOrNull(weight)) {
+        CudaOpsEmbeddingGatherHalfEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(
+            reinterpret_cast<const __half*>(halfWeight), tokenIdsDevice, out.buffer.deviceData, embeddingDim, static_cast<int>(tokenCount), vocabularySize);
+        CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsEmbeddingGatherHalfEntry launch");
+        return;
+    }
+    if (!weight.hasDeviceStorage())
+        throw std::runtime_error("CudaOps::embeddingGatherInto weight missing FP32/FP16 storage");
     CudaOpsEmbeddingGatherEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(weight.buffer.deviceData, tokenIdsDevice, out.buffer.deviceData, embeddingDim, static_cast<int>(tokenCount), vocabularySize);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsEmbeddingGatherEntry launch");
 }

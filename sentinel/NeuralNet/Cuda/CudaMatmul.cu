@@ -252,11 +252,13 @@ void CudaByteBuffer::free() {
     this->capacityCount = 0;
 }
 
-CudaMatrix::CudaMatrix() : rows(0), cols(0) {}
+CudaMatrix::CudaMatrix() : rows(0), cols(0), ampWeightSlot(-1) {}
 
-CudaMatrix::CudaMatrix(CudaMatrix&& other) noexcept : rows(other.rows), cols(other.cols), buffer(std::move(other.buffer)) {
+CudaMatrix::CudaMatrix(CudaMatrix&& other) noexcept
+    : rows(other.rows), cols(other.cols), buffer(std::move(other.buffer)), ampWeightSlot(other.ampWeightSlot) {
     other.rows = 0;
     other.cols = 0;
+    other.ampWeightSlot = -1;
 }
 
 CudaMatrix& CudaMatrix::operator=(CudaMatrix&& other) noexcept {
@@ -265,13 +267,19 @@ CudaMatrix& CudaMatrix::operator=(CudaMatrix&& other) noexcept {
     this->rows = other.rows;
     this->cols = other.cols;
     this->buffer = std::move(other.buffer);
+    this->ampWeightSlot = other.ampWeightSlot;
     other.rows = 0;
     other.cols = 0;
+    other.ampWeightSlot = -1;
     return *this;
 }
 
 bool CudaMatrix::empty() const {
     return this->rows == 0 || this->cols == 0;
+}
+
+bool CudaMatrix::hasDeviceStorage() const {
+    return this->buffer.deviceData != nullptr;
 }
 
 size_t CudaMatrix::elementCount() const {
@@ -292,6 +300,11 @@ void CudaMatrix::free() {
     this->buffer.free();
     this->rows = 0;
     this->cols = 0;
+    this->ampWeightSlot = -1;
+}
+
+void CudaMatrix::releaseDeviceKeepShape() {
+    this->buffer.free();
 }
 
 void CudaMatrix::upload(const Matrix& host) {
@@ -328,7 +341,13 @@ void CudaMatrix::multiplyInto(const CudaMatrix& left, const CudaMatrix& right, C
     if (leftCols != rightRows) throw std::invalid_argument("CudaMatrix::multiplyInto shape mismatch");
 
     out.ensureSize(leftRows, rightCols);
-    CudaMatmul::launchSharedMemoryMatmul(left.buffer.deviceData, right.buffer.deviceData, out.buffer.deviceData, static_cast<int>(leftRows), static_cast<int>(rightCols), static_cast<int>(leftCols), transposeLeft, transposeRight, nullptr);
+    if (CudaAmp::launchCublasLtMatmulFp16Matrices(left, right, out, transposeLeft, transposeRight, nullptr, nullptr))
+        return;
+    const float* leftPtr = CudaAmp::resolveFp32Operand(left, CudaAmp::floatScratchLeft);
+    const float* rightPtr = CudaAmp::resolveFp32Operand(right, CudaAmp::floatScratchRight);
+    if (leftPtr == nullptr || rightPtr == nullptr)
+        throw std::runtime_error("CudaMatrix::multiplyInto requires FP32 or FP16 working storage");
+    CudaMatmul::launchSharedMemoryMatmul(leftPtr, rightPtr, out.buffer.deviceData, static_cast<int>(leftRows), static_cast<int>(rightCols), static_cast<int>(leftCols), transposeLeft, transposeRight, nullptr);
 }
 
 bool CudaMatrix::multiplyBiasInto(const CudaMatrix& left, const CudaMatrix& right, const CudaMatrix& bias, CudaMatrix& out, bool transposeLeft, bool transposeRight) {
@@ -345,22 +364,24 @@ bool CudaMatrix::multiplyBiasInto(const CudaMatrix& left, const CudaMatrix& righ
     if (bias.rows != leftRows) throw std::invalid_argument("CudaMatrix::multiplyBiasInto bias row mismatch");
 
     out.ensureSize(leftRows, rightCols);
+    const float* biasPtr = bias.buffer.deviceData;
+    if (CudaAmp::launchCublasLtMatmulFp16Matrices(left, right, out, transposeLeft, transposeRight, nullptr, biasPtr))
+        return true;
+    const float* leftPtr = CudaAmp::resolveFp32Operand(left, CudaAmp::floatScratchLeft);
+    const float* rightPtr = CudaAmp::resolveFp32Operand(right, CudaAmp::floatScratchRight);
+    if (leftPtr == nullptr || rightPtr == nullptr || !bias.hasDeviceStorage())
+        throw std::runtime_error("CudaMatrix::multiplyBiasInto requires FP32/FP16 working storage and FP32 bias");
     const int rowCount = static_cast<int>(leftRows);
     const int columnCount = static_cast<int>(rightCols);
     const int sharedCount = static_cast<int>(leftCols);
-    const float* biasPtr = bias.buffer.deviceData;
 
-    if (CudaAmp::launchCublasLtMatmulFp16(
-            left.buffer.deviceData, right.buffer.deviceData, out.buffer.deviceData,
-            rowCount, columnCount, sharedCount, transposeLeft, transposeRight, nullptr, biasPtr))
-        return true;
     if (CudaMatmul::launchCublasLtMatmul(
-            left.buffer.deviceData, right.buffer.deviceData, out.buffer.deviceData,
+            leftPtr, rightPtr, out.buffer.deviceData,
             rowCount, columnCount, sharedCount, transposeLeft, transposeRight, nullptr, biasPtr))
         return true;
 
     CudaMatmul::launchSharedMemoryMatmul(
-        left.buffer.deviceData, right.buffer.deviceData, out.buffer.deviceData,
+        leftPtr, rightPtr, out.buffer.deviceData,
         rowCount, columnCount, sharedCount, transposeLeft, transposeRight, nullptr);
     CudaOps::broadcastBiasAddInPlace(out, bias);
     return false;
