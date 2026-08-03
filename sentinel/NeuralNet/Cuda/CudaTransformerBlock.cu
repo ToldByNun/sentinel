@@ -93,9 +93,8 @@ void CudaTransformerBlock::forward(const CudaMatrix& input, CudaMatrix& out, int
 
     this->attentionNorm.forward(input, this->attentionInput);
     this->attention.forward(this->attentionInput, this->attended, segmentLength);
-    CudaOps::addInto(input, this->attended, this->afterAttention);
-
-    this->feedForwardNorm.forward(this->afterAttention, this->feedForwardInput);
+    // Epilogue fuse: afterAttention = input + attended, feedForwardInput = RMSNorm(afterAttention)
+    this->feedForwardNorm.forwardFromResidual(input, this->attended, this->afterAttention, this->feedForwardInput);
     this->feedForward.forward(this->feedForwardInput, this->feedForwardOutput);
     CudaOps::addInto(this->afterAttention, this->feedForwardOutput, out);
 }
@@ -123,9 +122,7 @@ void CudaTransformerBlock::prefill(const CudaMatrix& input, CudaKvCache& cache, 
 
     this->attentionNorm.forward(input, this->attentionInput);
     this->attention.prefill(this->attentionInput, cache, this->attended);
-    CudaOps::addInto(input, this->attended, this->afterAttention);
-
-    this->feedForwardNorm.forward(this->afterAttention, this->feedForwardInput);
+    this->feedForwardNorm.forwardFromResidual(input, this->attended, this->afterAttention, this->feedForwardInput);
     this->feedForward.forward(this->feedForwardInput, this->feedForwardOutput);
     CudaOps::addInto(this->afterAttention, this->feedForwardOutput, out);
 }
@@ -136,9 +133,7 @@ void CudaTransformerBlock::decode(const CudaMatrix& input, CudaKvCache& cache, C
 
     this->attentionNorm.forward(input, this->attentionInput);
     this->attention.decode(this->attentionInput, cache, this->attended);
-    CudaOps::addInto(input, this->attended, this->afterAttention);
-
-    this->feedForwardNorm.forward(this->afterAttention, this->feedForwardInput);
+    this->feedForwardNorm.forwardFromResidual(input, this->attended, this->afterAttention, this->feedForwardInput);
     this->feedForward.forward(this->feedForwardInput, this->feedForwardOutput);
     CudaOps::addInto(this->afterAttention, this->feedForwardOutput, out);
 }
@@ -148,11 +143,20 @@ void CudaTransformerBlock::backward(const CudaMatrix& outputGradient, CudaMatrix
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaTransformerBlock::backward no CUDA device");
 
     this->feedForward.backward(outputGradient, this->feedForwardInputGradient, this->feedForwardGateWeightGradient, this->feedForwardGateBiasGradient, this->feedForwardUpWeightGradient, this->feedForwardUpBiasGradient, this->feedForwardDownWeightGradient, this->feedForwardDownBiasGradient);
-    this->feedForwardNorm.backward(this->feedForwardInputGradient, this->afterAttentionFromFeedForward, this->feedForwardNormGammaGradient);
-    CudaOps::addInto(outputGradient, this->afterAttentionFromFeedForward, this->afterAttentionGradient);
+    // afterAttentionGrad = outputGrad + d(FFN-RMSNorm)/d(afterAttention)
+    this->feedForwardNorm.backwardThroughResidual(
+        this->feedForwardInputGradient,
+        outputGradient,
+        this->afterAttentionGradient,
+        this->feedForwardNormGammaGradient);
 
     this->attention.backward(this->afterAttentionGradient, this->attentionInputGradient, this->queryWeightGradient, this->keyWeightGradient, this->valueWeightGradient, this->attentionOutputWeightGradient);
-    this->attentionNorm.backward(this->attentionInputGradient, this->inputFromAttention, this->attentionNormGammaGradient);
+    // inputGrad = afterAttentionGrad + d(Attn-RMSNorm)/d(input)
+    this->attentionNorm.backwardThroughResidual(
+        this->attentionInputGradient,
+        this->afterAttentionGradient,
+        inputGradient,
+        this->attentionNormGammaGradient);
 
     CudaOps::addInPlace(gradients.feedForwardDownWeight, this->feedForwardDownWeightGradient);
     CudaOps::addInPlace(gradients.feedForwardDownBias, this->feedForwardDownBiasGradient);
@@ -166,8 +170,6 @@ void CudaTransformerBlock::backward(const CudaMatrix& outputGradient, CudaMatrix
     CudaOps::addInPlace(gradients.keyWeight, this->keyWeightGradient);
     CudaOps::addInPlace(gradients.queryWeight, this->queryWeightGradient);
     CudaOps::addInPlace(gradients.attentionNormGamma, this->attentionNormGammaGradient);
-
-    CudaOps::addInto(this->afterAttentionGradient, this->inputFromAttention, inputGradient);
 }
 
 void CudaTransformerBlock::backwardSelective(
@@ -183,13 +185,20 @@ void CudaTransformerBlock::backwardSelective(
 
     // FFN path from kept activations (no SwiGLU recompute).
     this->feedForward.backward(outputGradient, this->feedForwardInputGradient, this->feedForwardGateWeightGradient, this->feedForwardGateBiasGradient, this->feedForwardUpWeightGradient, this->feedForwardUpBiasGradient, this->feedForwardDownWeightGradient, this->feedForwardDownBiasGradient);
-    this->feedForwardNorm.backward(this->feedForwardInputGradient, this->afterAttentionFromFeedForward, this->feedForwardNormGammaGradient);
-    CudaOps::addInto(outputGradient, this->afterAttentionFromFeedForward, this->afterAttentionGradient);
+    this->feedForwardNorm.backwardThroughResidual(
+        this->feedForwardInputGradient,
+        outputGradient,
+        this->afterAttentionGradient,
+        this->feedForwardNormGammaGradient);
 
     // Refresh Attn activations from saved block input, then Attn bwd.
     this->recomputeAttention(blockInput, segmentLength);
     this->attention.backward(this->afterAttentionGradient, this->attentionInputGradient, this->queryWeightGradient, this->keyWeightGradient, this->valueWeightGradient, this->attentionOutputWeightGradient);
-    this->attentionNorm.backward(this->attentionInputGradient, this->inputFromAttention, this->attentionNormGammaGradient);
+    this->attentionNorm.backwardThroughResidual(
+        this->attentionInputGradient,
+        this->afterAttentionGradient,
+        inputGradient,
+        this->attentionNormGammaGradient);
 
     CudaOps::addInPlace(gradients.feedForwardDownWeight, this->feedForwardDownWeightGradient);
     CudaOps::addInPlace(gradients.feedForwardDownBias, this->feedForwardDownBiasGradient);
@@ -203,10 +212,7 @@ void CudaTransformerBlock::backwardSelective(
     CudaOps::addInPlace(gradients.keyWeight, this->keyWeightGradient);
     CudaOps::addInPlace(gradients.queryWeight, this->queryWeightGradient);
     CudaOps::addInPlace(gradients.attentionNormGamma, this->attentionNormGammaGradient);
-
-    CudaOps::addInto(this->afterAttentionGradient, this->inputFromAttention, inputGradient);
 }
-
 void CudaTransformerBlock::runSmokeDemo(int embeddingDim, int headCount, int sequenceLength, int maximumPositionCount) {
     if (!CudaMatmul::isAvailable()) {
         SmokeLog::skip("TransformerBlock fwd");

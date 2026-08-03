@@ -21,14 +21,33 @@ public:
     /// <summary>normalize by rms then scale writing into out</summary>
     void forward(const CudaMatrix& input, CudaMatrix& out) const;
 
+    /// <summary>
+    /// block epilogue: residualOut = left + right, then normOut = RMSNorm(residualOut)
+    /// one launch; caches lastNormalized/inverseRms for backward (lastInput shape only)
+    /// </summary>
+    void forwardFromResidual(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& residualOut, CudaMatrix& normOut) const;
+
     /// <summary>backprop through RMSNorm fills gamma gradient and input gradient</summary>
     void backward(const CudaMatrix& outputGradient, CudaMatrix& inputGradient, CudaMatrix& gammaGradient) const;
+
+    /// <summary>
+    /// fused residual bwd: residualInputGrad = residualOutputGrad + d(RMSNorm)/d(residual)
+    /// (covers Attn residual→input and FFN residual→afterAttention)
+    /// </summary>
+    void backwardThroughResidual(
+        const CudaMatrix& normOutputGradient,
+        const CudaMatrix& residualOutputGradient,
+        CudaMatrix& residualInputGradient,
+        CudaMatrix& gammaGradient) const;
 
     /// <summary>compare CPU RMSNorm vs device forward</summary>
     static void runSmokeDemo(int embeddingDim = 128, int sequenceLength = 64);
 
     /// <summary>compare CPU vs CUDA RMSNorm backward gradients</summary>
     static void runBackwardSmokeDemo(int embeddingDim = 64, int sequenceLength = 32);
+
+    /// <summary>parity: forwardFromResidual + backwardThroughResidual vs add+norm path</summary>
+    static void runResidualEpilogueSmokeDemo(int embeddingDim = 64, int sequenceLength = 48);
 
 private:
     /// <summary>scratch inverse rms per sequence column reused across calls</summary>
@@ -47,10 +66,31 @@ private:
     __device__ static void runComputeInverseRms(const float* input, float* inverseRms, int embeddingDim, int sequenceLength, float epsilon);
     __device__ static void runApply(const float* input, float* out, float* normalizedOut, const float* gamma, const float* inverseRms, int embeddingDim, int sequenceLength);
     __device__ static void runBackwardInputGradColumn(const float* outputGrad, const float* normalized, const float* gamma, float* inputGrad, float inverseRmsValue, int embeddingDim, int sequenceLength, int column, float dimension);
+    __device__ static void runBackwardThroughResidualColumn(
+        const float* normOutputGrad,
+        const float* residualOutputGrad,
+        const float* normalized,
+        const float* gamma,
+        float* residualInputGrad,
+        float inverseRmsValue,
+        int embeddingDim,
+        int sequenceLength,
+        int column,
+        float dimension);
 
     friend __global__ void CudaRMSNormComputeInverseRmsEntry(const float* input, float* inverseRms, int embeddingDim, int sequenceLength, float epsilon);
     friend __global__ void CudaRMSNormApplyEntry(const float* input, float* out, float* normalizedOut, const float* gamma, const float* inverseRms, int embeddingDim, int sequenceLength);
     friend __global__ void CudaRMSNormBackwardInputGradEntry(const float* outputGrad, const float* normalized, const float* gamma, float* inputGrad, const float* inverseRms, int embeddingDim, int sequenceLength, float dimension);
+    friend __global__ void CudaRMSNormBackwardThroughResidualEntry(
+        const float* normOutputGrad,
+        const float* residualOutputGrad,
+        const float* normalized,
+        const float* gamma,
+        float* residualInputGrad,
+        const float* inverseRms,
+        int embeddingDim,
+        int sequenceLength,
+        float dimension);
 #endif
 };
 
@@ -58,6 +98,16 @@ private:
 __global__ void CudaRMSNormComputeInverseRmsEntry(const float* input, float* inverseRms, int embeddingDim, int sequenceLength, float epsilon);
 __global__ void CudaRMSNormApplyEntry(const float* input, float* out, float* normalizedOut, const float* gamma, const float* inverseRms, int embeddingDim, int sequenceLength);
 __global__ void CudaRMSNormBackwardInputGradEntry(const float* outputGrad, const float* normalized, const float* gamma, float* inputGrad, const float* inverseRms, int embeddingDim, int sequenceLength, float dimension);
+__global__ void CudaRMSNormBackwardThroughResidualEntry(
+    const float* normOutputGrad,
+    const float* residualOutputGrad,
+    const float* normalized,
+    const float* gamma,
+    float* residualInputGrad,
+    const float* inverseRms,
+    int embeddingDim,
+    int sequenceLength,
+    float dimension);
 #endif
 
 #endif // CUDARMSNORM_HPP

@@ -1151,6 +1151,7 @@ int main() {
         CudaFeedForward::runBackwardSmokeDemo(64, 32);
         CudaRMSNorm::runSmokeDemo(128, 64);
         CudaRMSNorm::runBackwardSmokeDemo(64, 32);
+        CudaRMSNorm::runResidualEpilogueSmokeDemo(64, 48);
         CudaAdam::runSmokeDemo(128, 64);
 
         SmokeLog::section("muon");
