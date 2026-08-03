@@ -16,6 +16,8 @@
 
 #include "CudaMatmul.hpp"
 
+#include "CudaMuon.hpp"
+
 #include "CudaOps.hpp"
 
 #include "CudaRMSNorm.hpp"
@@ -48,6 +50,24 @@ public:
     void ensureFrom(const CudaTransformerBlock& block);
 
     /// <summary>release all device moment buffers</summary>
+    void free();
+
+    /// <summary>release Adam moments for hidden 2D weights (Muon owns those)</summary>
+    void freeMuonManagedWeights();
+};
+
+/// <summary>device Muon momentum for hidden 2D weights in one block</summary>
+class CudaTransformerBlockMuonStates {
+public:
+    CudaMuonState queryWeight;
+    CudaMuonState keyWeight;
+    CudaMuonState valueWeight;
+    CudaMuonState attentionOutputWeight;
+    CudaMuonState feedForwardGateWeight;
+    CudaMuonState feedForwardUpWeight;
+    CudaMuonState feedForwardDownWeight;
+
+    void ensureFrom(const CudaTransformerBlock& block);
     void free();
 };
 
@@ -177,11 +197,17 @@ public:
     /// <summary>capture fixed-shape packed microsteps into a CUDA Graph after warmup</summary>
     bool preferTrainGraph;
 
+    /// <summary>Muon on hidden 2D weights; Adam on embed/norms/biases/head</summary>
+    bool preferMuon;
+
     /// <summary>true when mode is Full or Selective</summary>
     bool activationCheckpointingActive() const;
 
     /// <summary>set checkpoint mode; Off releases saved block inputs</summary>
     void setActivationCheckpointMode(ActivationCheckpointMode mode);
+
+    /// <summary>enable/disable Muon hybrid; marks train state stale</summary>
+    void setPreferMuon(bool enabled);
 
     /// <summary>log label for mode</summary>
     static const char* activationCheckpointModeName(ActivationCheckpointMode mode);
@@ -191,6 +217,8 @@ public:
 
     CudaAdam adam;
 
+    CudaMuon muon;
+
     CudaLanguageModelGradients trainGradients;
 
     CudaAdamState tokenEmbeddingState;
@@ -198,6 +226,7 @@ public:
     CudaAdamState projectionWeightState;
     CudaAdamState projectionBiasState;
     std::vector<CudaTransformerBlockAdamStates> blockAdamStates;
+    std::vector<CudaTransformerBlockMuonStates> blockMuonStates;
 
     /// <summary>host Adam moments used when CudaAdam::preferCpuOffload (device states stay empty)</summary>
     AdamState hostTokenEmbeddingState;

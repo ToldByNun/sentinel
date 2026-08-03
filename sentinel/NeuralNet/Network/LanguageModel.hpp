@@ -118,6 +118,9 @@ public:
     /// <summary>store Adam m/v as int8 block scales for low VRAM</summary>
     void setCudaPreferInt8AdamMoments(bool enabled);
 
+    /// <summary>Muon on hidden 2D weights + Adam on embed/norms/biases/head (default on in enableCudaTrain)</summary>
+    void setCudaPreferMuon(bool enabled);
+
     /// <summary>ZeRO-Offload Stage-1: keep Adam m/v on host RAM (disables int8 device moments)</summary>
     void setCudaPreferCpuAdamOffload(bool enabled);
 

@@ -25,7 +25,9 @@ CudaLanguageModel::CudaLanguageModel()
       gradientAccumulationSteps(4),
       activationCheckpointMode(ActivationCheckpointMode::Selective),
       preferTrainGraph(true),
+      preferMuon(false),
       adam(0.001f),
+      muon(0.001f),
       trainStateReady(false),
       trainStream(nullptr),
       trainGraph(nullptr),
@@ -57,6 +59,17 @@ void CudaLanguageModel::setActivationCheckpointMode(ActivationCheckpointMode mod
     }
     if (!this->tokenEmbeddingWeight.empty())
         this->ensureTrainWorkspaces();
+}
+
+void CudaLanguageModel::setPreferMuon(bool enabled) {
+    if (this->preferMuon == enabled) return;
+    this->preferMuon = enabled;
+    this->trainStateReady = false;
+    if (!enabled) {
+        for (CudaTransformerBlockMuonStates& blockStates : this->blockMuonStates)
+            blockStates.free();
+        this->blockMuonStates.clear();
+    }
 }
 
 void CudaLanguageModel::releaseTrainGraph() {
@@ -195,6 +208,36 @@ void CudaTransformerBlockAdamStates::free() {
     this->feedForwardDownBias.free();
 }
 
+void CudaTransformerBlockAdamStates::freeMuonManagedWeights() {
+    this->queryWeight.free();
+    this->keyWeight.free();
+    this->valueWeight.free();
+    this->attentionOutputWeight.free();
+    this->feedForwardGateWeight.free();
+    this->feedForwardUpWeight.free();
+    this->feedForwardDownWeight.free();
+}
+
+void CudaTransformerBlockMuonStates::ensureFrom(const CudaTransformerBlock& block) {
+    this->queryWeight.ensure(block.attention.queryWeight);
+    this->keyWeight.ensure(block.attention.keyWeight);
+    this->valueWeight.ensure(block.attention.valueWeight);
+    this->attentionOutputWeight.ensure(block.attention.outputWeight);
+    this->feedForwardGateWeight.ensure(block.feedForward.gateWeight);
+    this->feedForwardUpWeight.ensure(block.feedForward.upWeight);
+    this->feedForwardDownWeight.ensure(block.feedForward.downWeight);
+}
+
+void CudaTransformerBlockMuonStates::free() {
+    this->queryWeight.free();
+    this->keyWeight.free();
+    this->valueWeight.free();
+    this->attentionOutputWeight.free();
+    this->feedForwardGateWeight.free();
+    this->feedForwardUpWeight.free();
+    this->feedForwardDownWeight.free();
+}
+
 void CudaLanguageModelGradients::ensureFrom(const CudaLanguageModel& model) {
     this->tokenEmbedding.ensureSize(model.tokenEmbeddingWeight.rows, model.tokenEmbeddingWeight.cols);
     this->blocks.resize(model.blocks.size());
@@ -265,6 +308,7 @@ void CudaLanguageModel::ensureTrainState() {
 
     this->trainGradients.ensureFrom(*this);
     this->trainGradients.zeroInPlace();
+    this->muon.learningRate = this->adam.learningRate;
 
     if (CudaAdam::preferCpuOffload) {
         // moments live on host; free any leftover device Adam buffers
@@ -286,6 +330,19 @@ void CudaLanguageModel::ensureTrainState() {
         this->blockAdamStates.resize(this->blocks.size());
         for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex)
             this->blockAdamStates[blockIndex].ensureFrom(this->blocks[blockIndex]);
+    }
+
+    if (this->preferMuon) {
+        this->blockMuonStates.resize(this->blocks.size());
+        for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+            this->blockMuonStates[blockIndex].ensureFrom(this->blocks[blockIndex]);
+            if (blockIndex < this->blockAdamStates.size())
+                this->blockAdamStates[blockIndex].freeMuonManagedWeights();
+        }
+    } else {
+        for (CudaTransformerBlockMuonStates& blockStates : this->blockMuonStates)
+            blockStates.free();
+        this->blockMuonStates.clear();
     }
 
     this->finalNormGammaGradient.ensureSize(this->finalNorm.gamma.rows, this->finalNorm.gamma.cols);
@@ -470,13 +527,46 @@ size_t CudaLanguageModel::estimatePendingTrainStaticBytes() const {
             + matrixBytes(block.attention.valueWeight);
     }
 
+    size_t muonWeightBytes = 0;
+    size_t adamWeightBytes = 0;
+    adamWeightBytes += matrixBytes(this->tokenEmbeddingWeight);
+    adamWeightBytes += matrixBytes(this->finalNorm.gamma);
+    adamWeightBytes += matrixBytes(this->projectionBias);
+    if (!this->tieEmbeddingProjection)
+        adamWeightBytes += matrixBytes(this->projectionWeight);
+
+    for (const CudaTransformerBlock& block : this->blocks) {
+        const size_t hiddenWeightBytes =
+            matrixBytes(block.attention.queryWeight)
+            + matrixBytes(block.attention.keyWeight)
+            + matrixBytes(block.attention.valueWeight)
+            + matrixBytes(block.attention.outputWeight)
+            + matrixBytes(block.feedForward.gateWeight)
+            + matrixBytes(block.feedForward.upWeight)
+            + matrixBytes(block.feedForward.downWeight);
+        const size_t auxWeightBytes =
+            matrixBytes(block.attentionNorm.gamma)
+            + matrixBytes(block.feedForwardNorm.gamma)
+            + matrixBytes(block.feedForward.gateBias)
+            + matrixBytes(block.feedForward.upBias)
+            + matrixBytes(block.feedForward.downBias);
+        if (this->preferMuon) {
+            muonWeightBytes += hiddenWeightBytes;
+            adamWeightBytes += auxWeightBytes;
+        } else {
+            adamWeightBytes += hiddenWeightBytes + auxWeightBytes;
+        }
+    }
+
     size_t momentBytes = 0;
+    if (this->preferMuon)
+        momentBytes += muonWeightBytes; // one FP32 momentum per Muon tensor
     if (!CudaAdam::preferCpuOffload) {
         if (CudaAdam::preferInt8Moments) {
             // int8 m1/m2 + FP32 scales (~1/256 of elements, padded).
-            momentBytes = parameterBytes / 2ull + parameterBytes / 128ull;
+            momentBytes += adamWeightBytes / 2ull + adamWeightBytes / 128ull;
         } else {
-            momentBytes = 2ull * parameterBytes;
+            momentBytes += 2ull * adamWeightBytes;
         }
     }
 
@@ -1160,7 +1250,7 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
 
     float effectiveGradientScale = gradientScale;
     if (CudaAmp::lossScalingActive()) {
-        // unscale first so overflow checks and Adam see true grad magnitudes
+        // unscale first so overflow checks and Adam/Muon see true grad magnitudes
         const float inverseLossScale = 1.0f / CudaAmp::lossScaler.scale;
         gradients.scaleInPlace(inverseLossScale);
         if (CudaAmp::gradientsHaveNonFinite(gradients)) {
@@ -1171,6 +1261,33 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
     }
 
     this->adam.step();
+    this->muon.learningRate = this->adam.learningRate;
+
+    auto syncFusedMirrors = [this]() {
+        for (CudaTransformerBlock& block : this->blocks) {
+            block.attention.syncFusedQkvWeight();
+            block.feedForward.syncFusedGateUpWeight();
+        }
+        CudaAmp::invalidateMasterWeightHalves();
+    };
+
+    auto applyMuonBlockWeights = [this, &gradients, effectiveGradientScale]() {
+        if (!this->preferMuon) return;
+        if (this->blockMuonStates.size() != this->blocks.size())
+            throw std::logic_error("CudaLanguageModel::applyGradients Muon states not ready");
+        for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+            CudaTransformerBlock& block = this->blocks[blockIndex];
+            CudaTransformerBlockGradients& blockGradients = gradients.blocks[blockIndex];
+            CudaTransformerBlockMuonStates& muonStates = this->blockMuonStates[blockIndex];
+            this->muon.update(block.attention.queryWeight, muonStates.queryWeight, blockGradients.queryWeight, effectiveGradientScale);
+            this->muon.update(block.attention.keyWeight, muonStates.keyWeight, blockGradients.keyWeight, effectiveGradientScale);
+            this->muon.update(block.attention.valueWeight, muonStates.valueWeight, blockGradients.valueWeight, effectiveGradientScale);
+            this->muon.update(block.attention.outputWeight, muonStates.attentionOutputWeight, blockGradients.attentionOutputWeight, effectiveGradientScale);
+            this->muon.update(block.feedForward.gateWeight, muonStates.feedForwardGateWeight, blockGradients.feedForwardGateWeight, effectiveGradientScale);
+            this->muon.update(block.feedForward.upWeight, muonStates.feedForwardUpWeight, blockGradients.feedForwardUpWeight, effectiveGradientScale);
+            this->muon.update(block.feedForward.downWeight, muonStates.feedForwardDownWeight, blockGradients.feedForwardDownWeight, effectiveGradientScale);
+        }
+    };
 
     if (CudaAdam::preferCpuOffload) {
         if (this->hostBlockAdamStates.size() != this->blocks.size())
@@ -1200,27 +1317,26 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
             CudaTransformerBlockGradients& blockGradients = gradients.blocks[blockIndex];
             CudaTransformerBlockHostAdamStates& blockStates = this->hostBlockAdamStates[blockIndex];
 
-            pushOffload(block.attention.queryWeight, blockStates.queryWeight, blockGradients.queryWeight);
-            pushOffload(block.attention.keyWeight, blockStates.keyWeight, blockGradients.keyWeight);
-            pushOffload(block.attention.valueWeight, blockStates.valueWeight, blockGradients.valueWeight);
-            pushOffload(block.attention.outputWeight, blockStates.attentionOutputWeight, blockGradients.attentionOutputWeight);
+            if (!this->preferMuon) {
+                pushOffload(block.attention.queryWeight, blockStates.queryWeight, blockGradients.queryWeight);
+                pushOffload(block.attention.keyWeight, blockStates.keyWeight, blockGradients.keyWeight);
+                pushOffload(block.attention.valueWeight, blockStates.valueWeight, blockGradients.valueWeight);
+                pushOffload(block.attention.outputWeight, blockStates.attentionOutputWeight, blockGradients.attentionOutputWeight);
+                pushOffload(block.feedForward.gateWeight, blockStates.feedForwardGateWeight, blockGradients.feedForwardGateWeight);
+                pushOffload(block.feedForward.upWeight, blockStates.feedForwardUpWeight, blockGradients.feedForwardUpWeight);
+                pushOffload(block.feedForward.downWeight, blockStates.feedForwardDownWeight, blockGradients.feedForwardDownWeight);
+            }
             pushOffload(block.attentionNorm.gamma, blockStates.attentionNormGamma, blockGradients.attentionNormGamma);
             pushOffload(block.feedForwardNorm.gamma, blockStates.feedForwardNormGamma, blockGradients.feedForwardNormGamma);
-            pushOffload(block.feedForward.gateWeight, blockStates.feedForwardGateWeight, blockGradients.feedForwardGateWeight);
             pushOffload(block.feedForward.gateBias, blockStates.feedForwardGateBias, blockGradients.feedForwardGateBias);
-            pushOffload(block.feedForward.upWeight, blockStates.feedForwardUpWeight, blockGradients.feedForwardUpWeight);
             pushOffload(block.feedForward.upBias, blockStates.feedForwardUpBias, blockGradients.feedForwardUpBias);
-            pushOffload(block.feedForward.downWeight, blockStates.feedForwardDownWeight, blockGradients.feedForwardDownWeight);
             pushOffload(block.feedForward.downBias, blockStates.feedForwardDownBias, blockGradients.feedForwardDownBias);
         }
 
         pushOffload(this->tokenEmbeddingWeight, this->hostTokenEmbeddingState, gradients.tokenEmbedding);
+        applyMuonBlockWeights();
         this->adam.updateCpuOffloadedMany(offloadItems.data(), static_cast<int>(offloadItems.size()), effectiveGradientScale);
-        for (CudaTransformerBlock& block : this->blocks) {
-            block.attention.syncFusedQkvWeight();
-            block.feedForward.syncFusedGateUpWeight();
-        }
-        CudaAmp::invalidateMasterWeightHalves();
+        syncFusedMirrors();
 
         if (CudaAmp::lossScalingActive())
             CudaAmp::lossScaler.updateOnSuccess();
@@ -1278,27 +1394,26 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
         CudaTransformerBlockGradients& blockGradients = gradients.blocks[blockIndex];
         CudaTransformerBlockAdamStates& blockStates = this->blockAdamStates[blockIndex];
 
-        pushItem(block.attention.queryWeight, blockStates.queryWeight, blockGradients.queryWeight);
-        pushItem(block.attention.keyWeight, blockStates.keyWeight, blockGradients.keyWeight);
-        pushItem(block.attention.valueWeight, blockStates.valueWeight, blockGradients.valueWeight);
-        pushItem(block.attention.outputWeight, blockStates.attentionOutputWeight, blockGradients.attentionOutputWeight);
+        if (!this->preferMuon) {
+            pushItem(block.attention.queryWeight, blockStates.queryWeight, blockGradients.queryWeight);
+            pushItem(block.attention.keyWeight, blockStates.keyWeight, blockGradients.keyWeight);
+            pushItem(block.attention.valueWeight, blockStates.valueWeight, blockGradients.valueWeight);
+            pushItem(block.attention.outputWeight, blockStates.attentionOutputWeight, blockGradients.attentionOutputWeight);
+            pushItem(block.feedForward.gateWeight, blockStates.feedForwardGateWeight, blockGradients.feedForwardGateWeight);
+            pushItem(block.feedForward.upWeight, blockStates.feedForwardUpWeight, blockGradients.feedForwardUpWeight);
+            pushItem(block.feedForward.downWeight, blockStates.feedForwardDownWeight, blockGradients.feedForwardDownWeight);
+        }
         pushItem(block.attentionNorm.gamma, blockStates.attentionNormGamma, blockGradients.attentionNormGamma);
         pushItem(block.feedForwardNorm.gamma, blockStates.feedForwardNormGamma, blockGradients.feedForwardNormGamma);
-        pushItem(block.feedForward.gateWeight, blockStates.feedForwardGateWeight, blockGradients.feedForwardGateWeight);
         pushItem(block.feedForward.gateBias, blockStates.feedForwardGateBias, blockGradients.feedForwardGateBias);
-        pushItem(block.feedForward.upWeight, blockStates.feedForwardUpWeight, blockGradients.feedForwardUpWeight);
         pushItem(block.feedForward.upBias, blockStates.feedForwardUpBias, blockGradients.feedForwardUpBias);
-        pushItem(block.feedForward.downWeight, blockStates.feedForwardDownWeight, blockGradients.feedForwardDownWeight);
         pushItem(block.feedForward.downBias, blockStates.feedForwardDownBias, blockGradients.feedForwardDownBias);
     }
 
     pushItem(this->tokenEmbeddingWeight, this->tokenEmbeddingState, gradients.tokenEmbedding);
+    applyMuonBlockWeights();
     this->adam.updateMany(items.data(), static_cast<int>(items.size()), effectiveGradientScale);
-    for (CudaTransformerBlock& block : this->blocks) {
-        block.attention.syncFusedQkvWeight();
-        block.feedForward.syncFusedGateUpWeight();
-    }
-    CudaAmp::invalidateMasterWeightHalves();
+    syncFusedMirrors();
 
     if (CudaAmp::lossScalingActive())
         CudaAmp::lossScaler.updateOnSuccess();

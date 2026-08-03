@@ -241,6 +241,7 @@ void LanguageModel::enableCudaTrain() {
 
     this->deviceTrainEnabled = true;
     this->device->setActivationCheckpointMode(ActivationCheckpointMode::Selective);
+    this->device->setPreferMuon(true);
     CudaAmp::preferMixedPrecision = true;
     // loss scaling only helps when FP16 GEMMs can run (shared dim gate is 256)
     CudaAmp::useLossScaling = this->tokenEmbedding.embeddingDim() >= 256;
@@ -255,6 +256,7 @@ void LanguageModel::enableCudaTrain() {
     this->device->ensureTrainState();
     std::cout << "LanguageModel::enableCudaTrain: device training enabled (packed batches, ckpt="
               << CudaLanguageModel::activationCheckpointModeName(this->device->activationCheckpointMode)
+              << ", opt=" << (this->device->preferMuon ? "muon+adam" : "adam")
               << ", FP16 amp "
               << (CudaAmp::preferMixedPrecision ? "on" : "off")
               << ", lossScale=" << (CudaAmp::useLossScaling ? "on" : "off")
@@ -331,6 +333,17 @@ void LanguageModel::setCudaPreferInt8AdamMoments(bool enabled) {
     std::cout << "LanguageModel::setCudaPreferInt8AdamMoments: " << (enabled ? "on" : "off")
               << "  blockSize=" << CudaAdam::int8BlockSize
               << "  cpuAdam=" << (CudaAdam::preferCpuOffload ? "on" : "off") << '\n';
+}
+
+void LanguageModel::setCudaPreferMuon(bool enabled) {
+    if (this->device == nullptr) this->enableCuda();
+    if (this->device == nullptr) return;
+    this->device->setPreferMuon(enabled);
+    if (this->deviceTrainEnabled) {
+        this->device->trainStateReady = false;
+        this->device->ensureTrainState();
+    }
+    std::cout << "LanguageModel::setCudaPreferMuon: " << (enabled ? "on" : "off") << '\n';
 }
 
 void LanguageModel::setCudaPreferCpuAdamOffload(bool enabled) {
