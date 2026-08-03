@@ -68,7 +68,6 @@ void CudaCausalSelfAttention::releaseActivationScratch() {
     this->keyGradient.free();
     this->valueGradient.free();
     this->temp.free();
-    this->usedFlashAttention = false;
 }
 
 void CudaCausalSelfAttention::uploadFrom(const CausalSelfAttention& host) {

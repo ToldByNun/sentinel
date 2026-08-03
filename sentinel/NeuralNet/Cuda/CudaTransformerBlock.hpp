@@ -173,6 +173,12 @@ public:
     /// </summary>
     void forwardSelectiveTrain(const CudaMatrix& input, CudaMatrix& out, int segmentLength = 0);
 
+    /// <summary>
+    /// free Attn/FFN/RMSNorm activation scratch and block intermediates (weights untouched).
+    /// Safe after Full-ckpt forward (recomputed on bwd) and after any block backward.
+    /// </summary>
+    void releaseTrainActivationScratch();
+
     /// <summary>recompute AttnNorm+Attn+residual from saved block input (FFN untouched)</summary>
     void recomputeAttention(const CudaMatrix& blockInput, int segmentLength = 0);
 

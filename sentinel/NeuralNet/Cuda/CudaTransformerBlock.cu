@@ -117,6 +117,39 @@ void CudaTransformerBlock::forwardSelectiveTrain(const CudaMatrix& input, CudaMa
     this->attentionInput.free();
 }
 
+void CudaTransformerBlock::releaseTrainActivationScratch() {
+    this->attention.releaseActivationScratch();
+    this->attention.qkvWeightGradient.free();
+    this->feedForward.releaseActivationScratch();
+    this->attentionNorm.releaseActivationScratch();
+    this->feedForwardNorm.releaseActivationScratch();
+
+    this->attentionInput.free();
+    this->attended.free();
+    this->afterAttention.free();
+    this->feedForwardInput.free();
+    this->feedForwardOutput.free();
+
+    this->feedForwardInputGradient.free();
+    this->afterAttentionFromFeedForward.free();
+    this->afterAttentionGradient.free();
+    this->attentionInputGradient.free();
+    this->inputFromAttention.free();
+
+    this->feedForwardGateWeightGradient.free();
+    this->feedForwardGateBiasGradient.free();
+    this->feedForwardUpWeightGradient.free();
+    this->feedForwardUpBiasGradient.free();
+    this->feedForwardDownWeightGradient.free();
+    this->feedForwardDownBiasGradient.free();
+    this->feedForwardNormGammaGradient.free();
+    this->queryWeightGradient.free();
+    this->keyWeightGradient.free();
+    this->valueWeightGradient.free();
+    this->attentionOutputWeightGradient.free();
+    this->attentionNormGammaGradient.free();
+}
+
 void CudaTransformerBlock::recomputeAttention(const CudaMatrix& blockInput, int segmentLength) {
     if (blockInput.empty()) throw std::invalid_argument("CudaTransformerBlock::recomputeAttention empty blockInput");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaTransformerBlock::recomputeAttention no CUDA device");
@@ -209,6 +242,8 @@ void CudaTransformerBlock::backward(const CudaMatrix& outputGradient, CudaMatrix
         this->feedForwardNormGammaGradient.free();
         this->attentionNormGammaGradient.free();
     }
+
+    this->releaseTrainActivationScratch();
 }
 
 void CudaTransformerBlock::backwardSelective(
@@ -281,6 +316,8 @@ void CudaTransformerBlock::backwardSelective(
         this->feedForwardNormGammaGradient.free();
         this->attentionNormGammaGradient.free();
     }
+
+    this->releaseTrainActivationScratch();
 }
 void CudaTransformerBlock::runSmokeDemo(int embeddingDim, int headCount, int sequenceLength, int maximumPositionCount) {
     if (!CudaMatmul::isAvailable()) {

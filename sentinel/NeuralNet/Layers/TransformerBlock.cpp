@@ -67,19 +67,7 @@ void TransformerBlockGradients::scaleInPlace(float scalar) {
 TransformerBlock::TransformerBlock(int embeddingDim, int headCount, int maximumPositionCount, unsigned seed)
     : attentionNorm(embeddingDim), attention(CausalSelfAttention::create(embeddingDim, headCount, maximumPositionCount, seed)), feedForwardNorm(embeddingDim), feedForward(FeedForward::create(embeddingDim, 4, seed + 20u)) {
     if (embeddingDim <= 0) throw std::invalid_argument("TransformerBlock embeddingDim must be > 0");
-
-    this->queryWeightState = AdamState::zerosLike(this->attention.queryWeight);
-    this->keyWeightState = AdamState::zerosLike(this->attention.keyWeight);
-    this->valueWeightState = AdamState::zerosLike(this->attention.valueWeight);
-    this->attentionOutputWeightState = AdamState::zerosLike(this->attention.outputWeight);
-    this->attentionNormGammaState = AdamState::zerosLike(this->attentionNorm.gamma);
-    this->feedForwardNormGammaState = AdamState::zerosLike(this->feedForwardNorm.gamma);
-    this->feedForwardGateWeightState = AdamState::zerosLike(this->feedForward.gateWeight);
-    this->feedForwardGateBiasState = AdamState::zerosLike(this->feedForward.gateBias);
-    this->feedForwardUpWeightState = AdamState::zerosLike(this->feedForward.upWeight);
-    this->feedForwardUpBiasState = AdamState::zerosLike(this->feedForward.upBias);
-    this->feedForwardDownWeightState = AdamState::zerosLike(this->feedForward.downWeight);
-    this->feedForwardDownBiasState = AdamState::zerosLike(this->feedForward.downBias);
+    // Adam moments stay empty until first Adam::update (avoids 2x param host RAM at ctor for large models).
 }
 
 Matrix TransformerBlock::forward(const Matrix& input, TransformerBlockCache& cache) const {

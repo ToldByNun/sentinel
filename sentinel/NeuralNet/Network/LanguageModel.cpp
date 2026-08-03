@@ -85,10 +85,11 @@ LanguageModel::LanguageModel(int vocabularySize, int embeddingDim, int maximumPo
 
     // weight tying: LM head shares tokenEmbedding; drop untied projection weight + Adam
     this->outputProjection.weight = Matrix();
-    this->tokenEmbeddingState = AdamState::zerosLike(this->tokenEmbedding.weight);
-    this->finalNormGammaState = AdamState::zerosLike(this->finalNorm.gamma);
+    // Adam moments allocated lazily on first update (4B ctor must not reserve 2x param RAM).
+    this->tokenEmbeddingState = AdamState{};
+    this->finalNormGammaState = AdamState{};
     this->projectionWeightState = AdamState{};
-    this->projectionBiasState = AdamState::zerosLike(this->outputProjection.bias);
+    this->projectionBiasState = AdamState{};
 }
 
 Matrix& LanguageModel::lmHeadWeight() {

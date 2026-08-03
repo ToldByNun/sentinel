@@ -126,6 +126,13 @@ __global__ void CudaRMSNormBackwardThroughResidualEntry(
         inverseRms[column], embeddingDim, sequenceLength, column, dimension);
 }
 
+void CudaRMSNorm::releaseActivationScratch() const {
+    this->inverseRms.free();
+    this->lastInput.free();
+    this->lastNormalized.free();
+    this->backwardScratch.free();
+}
+
 void CudaRMSNorm::forward(const CudaMatrix& input, CudaMatrix& out) const {
     if (input.empty()) throw std::invalid_argument("CudaRMSNorm::forward empty input");
     if (this->gamma.empty()) throw std::logic_error("CudaRMSNorm::forward weights not uploaded");
