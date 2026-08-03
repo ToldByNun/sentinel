@@ -1,6 +1,6 @@
 # Sentinel
 
-C++/CUDA framework for **full-train** causal LMs (no LoRA): CPU/OpenMP plus a device train path with packed batches, flash attention, FP16 AMP, int8 Adam, and selective activation checkpointing.
+C++/CUDA framework for **full-train** causal LMs (no LoRA): CPU/OpenMP plus a device train path with packed batches, flash attention, FP16 AMP, int8 Adam / Muon, and selective activation checkpointing.
 
 ## Requirements
 
@@ -61,6 +61,7 @@ model.train(source, epochs, 1, batchSize, gradAccum);
 | Flash attention | Prefer on for train/forward |
 | AMP | FP16 GEMMs + saturated FP16 block-input checkpoints; loss scale when embed≥256 |
 | Adam | Int8 moments on; or `setCudaPreferCpuAdamOffload(true)` (host `m`/`v`) |
+| Muon | `setCudaPreferMuon(true)` — Newton–Schulz on 2D hidden weights; Adam on embed / norms / biases / head |
 | Weight tying | On — LM head shares token embedding |
 | Activation ckpt | `Off` / `Full` / **`Selective`** (default): keep FFN acts, recompute Attn; `enableActivationCheckpointing(bool)` maps true→Selective, false→Off |
 | CUDA graphs | Used when checkpointing is **Off** and shapes are stable |
@@ -84,5 +85,18 @@ Checkpoint file: `SNLM` (weights + optional Adam; int8 moments stored as FP32).
 | After setup | free **~13 GiB** / 15.9 GiB; `maxPackCols`≈3840 |
 | Probe / epoch | **~21.8k** tok/s (seq=256) · epoch **~19.0k** tok/s (~603 s) |
 | Data | ~38k train / 512 test / ~11.4M positions |
+
+### Adam vs Muon × checkpoint (probe, seq=256)
+
+Fresh one-shot models, same shape as above, FP16 AMP + int8 Adam + flash, auto pack budget (`runMuonThroughputProbe`):
+
+| Optimizer | ckpt | tok/s | vs Adam Off |
+|-----------|------|------:|------------:|
+| Adam | Off | **~24.3k** | 100% |
+| Adam | Selective | **~19.0k** | ~78% |
+| Muon | Off | **~19.1k** | ~78% |
+| Muon | Selective | **~16.8k** | ~69% |
+
+Muon ≈ Adam+Selective when ckpt is Off; Selective costs ~20% on both. README epoch ~21.8k is Adam + Selective (same ballpark as the Adam Selective row).
 
 Smaller smoke: `CudaLanguageModel::runConsumerVramDemo()` (~8k/256/4L, ~66k tok/s packed).

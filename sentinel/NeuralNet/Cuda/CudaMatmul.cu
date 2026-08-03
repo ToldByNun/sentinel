@@ -20,10 +20,38 @@ struct CublasLtGemmState {
     bool initSucceeded;
     CudaDeviceBuffer workspace;
     static constexpr size_t workspaceBytes = 16 * 1024 * 1024;
+    static constexpr int descCacheSize = 16;
+
+    struct DescCacheEntry {
+        int rowCount = 0;
+        int columnCount = 0;
+        int sharedCount = 0;
+        bool transposeLeft = false;
+        bool transposeRight = false;
+        cublasLtMatmulDesc_t matmulDesc = nullptr;
+        cublasLtMatrixLayout_t layoutLeft = nullptr;
+        cublasLtMatrixLayout_t layoutRight = nullptr;
+        cublasLtMatrixLayout_t layoutOut = nullptr;
+        bool valid = false;
+        unsigned lastUsed = 0;
+    };
+
+    DescCacheEntry descCache[descCacheSize]{};
+    unsigned descCacheClock = 0;
 
     CublasLtGemmState() : handle(nullptr), initAttempted(false), initSucceeded(false) {}
 
+    void destroyDescEntry(DescCacheEntry& entry) {
+        if (entry.layoutOut != nullptr) cublasLtMatrixLayoutDestroy(entry.layoutOut);
+        if (entry.layoutRight != nullptr) cublasLtMatrixLayoutDestroy(entry.layoutRight);
+        if (entry.layoutLeft != nullptr) cublasLtMatrixLayoutDestroy(entry.layoutLeft);
+        if (entry.matmulDesc != nullptr) cublasLtMatmulDescDestroy(entry.matmulDesc);
+        entry = DescCacheEntry{};
+    }
+
     ~CublasLtGemmState() {
+        for (int index = 0; index < descCacheSize; ++index)
+            this->destroyDescEntry(this->descCache[index]);
         if (this->handle == nullptr) return;
         cublasLtDestroy(this->handle);
         this->handle = nullptr;
@@ -475,6 +503,97 @@ bool CudaMatmul::launchCublasLtMatmul(const float* deviceLeft, const float* devi
         state.workspace.ensureCapacity(CublasLtGemmState::workspaceBytes);
     } catch (...) {
         return false;
+    }
+
+    // Hot path: Muon NS / plain GEMMs recreate the same TF32 descriptors hundreds of times
+    // per step. Cache layouts by shape and skip heuristic/create overhead.
+    if (deviceBiasOrNull == nullptr && kernelMilliseconds == nullptr) {
+        CublasLtGemmState::DescCacheEntry* cacheEntry = nullptr;
+        for (int index = 0; index < CublasLtGemmState::descCacheSize; ++index) {
+            CublasLtGemmState::DescCacheEntry& entry = state.descCache[index];
+            if (!entry.valid) continue;
+            if (entry.rowCount != rowCount || entry.columnCount != columnCount || entry.sharedCount != sharedCount)
+                continue;
+            if (entry.transposeLeft != transposeLeft || entry.transposeRight != transposeRight)
+                continue;
+            cacheEntry = &entry;
+            break;
+        }
+
+        if (cacheEntry == nullptr) {
+            int victim = 0;
+            for (int index = 1; index < CublasLtGemmState::descCacheSize; ++index) {
+                if (!state.descCache[index].valid) {
+                    victim = index;
+                    break;
+                }
+                if (state.descCache[index].lastUsed < state.descCache[victim].lastUsed)
+                    victim = index;
+            }
+            cacheEntry = &state.descCache[victim];
+            state.destroyDescEntry(*cacheEntry);
+
+            if (cublasLtMatmulDescCreate(&cacheEntry->matmulDesc, CUBLAS_COMPUTE_32F_FAST_TF32, CUDA_R_32F) != CUBLAS_STATUS_SUCCESS)
+                return false;
+
+            const cublasOperation_t transLeftCached = transposeLeft ? CUBLAS_OP_T : CUBLAS_OP_N;
+            const cublasOperation_t transRightCached = transposeRight ? CUBLAS_OP_T : CUBLAS_OP_N;
+            if (cublasLtMatmulDescSetAttribute(cacheEntry->matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transLeftCached, sizeof(transLeftCached)) != CUBLAS_STATUS_SUCCESS
+                || cublasLtMatmulDescSetAttribute(cacheEntry->matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transRightCached, sizeof(transRightCached)) != CUBLAS_STATUS_SUCCESS) {
+                state.destroyDescEntry(*cacheEntry);
+                return false;
+            }
+
+            const int leftRows = transposeLeft ? sharedCount : rowCount;
+            const int leftCols = transposeLeft ? rowCount : sharedCount;
+            const int rightRows = transposeRight ? columnCount : sharedCount;
+            const int rightCols = transposeRight ? sharedCount : columnCount;
+            const cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;
+            if (cublasLtMatrixLayoutCreate(&cacheEntry->layoutLeft, CUDA_R_32F, leftRows, leftCols, leftCols) != CUBLAS_STATUS_SUCCESS
+                || cublasLtMatrixLayoutCreate(&cacheEntry->layoutRight, CUDA_R_32F, rightRows, rightCols, rightCols) != CUBLAS_STATUS_SUCCESS
+                || cublasLtMatrixLayoutCreate(&cacheEntry->layoutOut, CUDA_R_32F, rowCount, columnCount, columnCount) != CUBLAS_STATUS_SUCCESS
+                || cublasLtMatrixLayoutSetAttribute(cacheEntry->layoutLeft, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)) != CUBLAS_STATUS_SUCCESS
+                || cublasLtMatrixLayoutSetAttribute(cacheEntry->layoutRight, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)) != CUBLAS_STATUS_SUCCESS
+                || cublasLtMatrixLayoutSetAttribute(cacheEntry->layoutOut, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)) != CUBLAS_STATUS_SUCCESS) {
+                state.destroyDescEntry(*cacheEntry);
+                return false;
+            }
+
+            cacheEntry->rowCount = rowCount;
+            cacheEntry->columnCount = columnCount;
+            cacheEntry->sharedCount = sharedCount;
+            cacheEntry->transposeLeft = transposeLeft;
+            cacheEntry->transposeRight = transposeRight;
+            cacheEntry->valid = true;
+        }
+
+        ++state.descCacheClock;
+        cacheEntry->lastUsed = state.descCacheClock;
+
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
+        const cublasStatus_t cachedStatus = cublasLtMatmul(
+            state.handle,
+            cacheEntry->matmulDesc,
+            &alpha,
+            deviceLeft,
+            cacheEntry->layoutLeft,
+            deviceRight,
+            cacheEntry->layoutRight,
+            &beta,
+            deviceOut,
+            cacheEntry->layoutOut,
+            deviceOut,
+            cacheEntry->layoutOut,
+            nullptr,
+            state.workspace.deviceData,
+            state.workspace.capacityBytes,
+            CudaMatmul::activeStream());
+        if (cachedStatus != CUBLAS_STATUS_SUCCESS) {
+            state.destroyDescEntry(*cacheEntry);
+            return false;
+        }
+        return true;
     }
 
     cublasLtMatmulDesc_t matmulDesc = nullptr;

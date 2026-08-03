@@ -56,15 +56,12 @@ public:
     void freeMuonManagedWeights();
 };
 
-/// <summary>device Muon momentum for hidden 2D weights in one block</summary>
+/// <summary>device Muon momentum for hidden 2D weights in one block (fused QKV / gateUp)</summary>
 class CudaTransformerBlockMuonStates {
 public:
-    CudaMuonState queryWeight;
-    CudaMuonState keyWeight;
-    CudaMuonState valueWeight;
+    CudaMuonState qkvWeight;
     CudaMuonState attentionOutputWeight;
-    CudaMuonState feedForwardGateWeight;
-    CudaMuonState feedForwardUpWeight;
+    CudaMuonState feedForwardGateUpWeight;
     CudaMuonState feedForwardDownWeight;
 
     void ensureFrom(const CudaTransformerBlock& block);
@@ -507,6 +504,9 @@ public:
 
     /// <summary>compare CPU vs CUDA training step and report tokens per second</summary>
     static void runTrainSmokeDemo(int vocabularySize = 64, int embeddingDim = 32, int sequenceLength = 16, int blockCount = 1, int headCount = 2);
+
+    /// <summary>tiny packed Muon+Adam train: finite loss after a few steps</summary>
+    static void runMuonTrainSmokeDemo(int vocabularySize = 128, int embeddingDim = 64, int sequenceLength = 32, int blockCount = 2, int headCount = 4);
 
     /// <summary>Full vs Selective checkpointing: one packed microstep loss + embed-grad max abs diff</summary>
     static void runSelectiveCheckpointParitySmokeDemo(

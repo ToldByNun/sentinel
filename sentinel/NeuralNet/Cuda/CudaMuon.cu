@@ -1,5 +1,6 @@
 #include "CudaMuon.hpp"
 
+#include "CudaAmp.hpp"
 #include "CudaOps.hpp"
 #include "../Utils/SmokeLog.hpp"
 
@@ -87,6 +88,29 @@ __global__ void muonScale(float* data, int elementCount, float scalar) {
     data[index] *= scalar;
 }
 
+/// <summary>invScale = 1 / (sqrt(sumSquares) + eps); runs as 1 thread</summary>
+__global__ void muonInvFrobeniusFromSumSquares(const float* sumSquares, float* invScale) {
+    *invScale = 1.0f / (sqrtf(*sumSquares) + kNsEps);
+}
+
+__global__ void muonScaleByDeviceScalar(float* data, int elementCount, const float* scalar) {
+    const int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= elementCount) return;
+    data[index] *= *scalar;
+}
+
+__global__ void muonPolyCombine(float* out, const float* a, const float* aa, int elementCount, float scaleA, float scaleAA) {
+    const int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= elementCount) return;
+    out[index] = scaleA * a[index] + scaleAA * aa[index];
+}
+
+__global__ void muonScaleAddInPlace(float* total, const float* delta, int elementCount, float scaleTotal) {
+    const int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= elementCount) return;
+    total[index] = scaleTotal * total[index] + delta[index];
+}
+
 __global__ void muonAxpy(float* total, const float* delta, int elementCount, float alpha) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= elementCount) return;
@@ -120,24 +144,30 @@ void transposeInto(const CudaMatrix& source, CudaMatrix& destination) {
     throwIfFailed(cudaGetLastError(), "muonTranspose");
 }
 
-float frobeniusNorm(const CudaMatrix& matrix, CudaDeviceBuffer& scratch) {
-    scratch.ensureCapacity(sizeof(float));
-    CudaMatmul::memsetDevice(scratch.deviceData, 0, sizeof(float));
+/// <summary>
+/// Frobenius-normalize on device without host sync:
+/// sumSquares → invScale → scale. Same CUDA stream keeps ordering.
+/// frobeniusScratch layout: [0]=sumSquares, [1]=invScale.
+/// </summary>
+void normalizeFrobeniusInPlace(CudaMatrix& matrix, CudaDeviceBuffer& frobeniusScratch) {
+    frobeniusScratch.ensureCapacity(2 * sizeof(float));
+    float* sumSquares = frobeniusScratch.deviceData;
+    float* invScale = frobeniusScratch.deviceData + 1;
+    CudaMatmul::memsetDevice(sumSquares, 0, sizeof(float));
+
     const int elementCount = static_cast<int>(matrix.elementCount());
     const int threads = 256;
     const int blocks = (std::min)(1024, elementwiseBlocks(elementCount, threads));
     muonSumSquares<<<blocks, threads, 0, CudaMatmul::activeStream()>>>(
-        matrix.buffer.deviceData, elementCount, scratch.deviceData);
+        matrix.buffer.deviceData, elementCount, sumSquares);
     throwIfFailed(cudaGetLastError(), "muonSumSquares");
-    if (CudaMatmul::activeStream() != nullptr)
-        throwIfFailed(cudaStreamSynchronize(CudaMatmul::activeStream()), "muon frobenius sync");
-    else
-        throwIfFailed(cudaDeviceSynchronize(), "muon frobenius sync");
-    float sumSquares = 0.0f;
-    throwIfFailed(
-        cudaMemcpy(&sumSquares, scratch.deviceData, sizeof(float), cudaMemcpyDeviceToHost),
-        "muon frobenius D2H");
-    return std::sqrt(sumSquares);
+
+    muonInvFrobeniusFromSumSquares<<<1, 1, 0, CudaMatmul::activeStream()>>>(sumSquares, invScale);
+    throwIfFailed(cudaGetLastError(), "muonInvFrobeniusFromSumSquares");
+
+    muonScaleByDeviceScalar<<<elementwiseBlocks(elementCount, threads), threads, 0, CudaMatmul::activeStream()>>>(
+        matrix.buffer.deviceData, elementCount, invScale);
+    throwIfFailed(cudaGetLastError(), "muonScaleByDeviceScalar");
 }
 
 Matrix hostNewtonSchulz5(Matrix matrix, int steps) {
@@ -212,16 +242,57 @@ CudaMuon::CudaMuon(
       weightDecay(weightDecay),
       nsSteps(nsSteps),
       nesterov(nesterov),
-      adjustLrMatchRmsAdamw(adjustLrMatchRmsAdamw) {
+      adjustLrMatchRmsAdamw(adjustLrMatchRmsAdamw),
+      profileEnabled(false) {
     if (learningRate <= 0.0f) throw std::invalid_argument("CudaMuon learningRate must be > 0");
     if (momentumBeta < 0.0f || momentumBeta >= 1.0f) throw std::invalid_argument("CudaMuon momentumBeta must be in [0, 1)");
     if (weightDecay < 0.0f) throw std::invalid_argument("CudaMuon weightDecay must be >= 0");
     if (nsSteps <= 0) throw std::invalid_argument("CudaMuon nsSteps must be > 0");
 }
 
+namespace {
+
+struct ScopedCudaEventPair {
+    cudaEvent_t start = nullptr;
+    cudaEvent_t stop = nullptr;
+    bool active = false;
+
+    void begin(bool enabled) {
+        active = enabled;
+        if (!active) return;
+        throwIfFailed(cudaEventCreate(&start), "cudaEventCreate muon start");
+        throwIfFailed(cudaEventCreate(&stop), "cudaEventCreate muon stop");
+        throwIfFailed(cudaEventRecord(start, CudaMatmul::activeStream()), "cudaEventRecord muon start");
+    }
+
+    double endMs() {
+        if (!active) return 0.0;
+        throwIfFailed(cudaEventRecord(stop, CudaMatmul::activeStream()), "cudaEventRecord muon stop");
+        throwIfFailed(cudaEventSynchronize(stop), "cudaEventSynchronize muon stop");
+        float ms = 0.0f;
+        throwIfFailed(cudaEventElapsedTime(&ms, start, stop), "cudaEventElapsedTime muon");
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+        start = nullptr;
+        stop = nullptr;
+        active = false;
+        return static_cast<double>(ms);
+    }
+};
+
+} // namespace
+
 void CudaMuon::newtonSchulz5InPlace(CudaMatrix& matrix) {
     if (matrix.empty()) throw std::invalid_argument("CudaMuon::newtonSchulz5InPlace empty matrix");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaMuon::newtonSchulz5InPlace no CUDA device");
+
+    // NS intermediates are not AMP master weights — FP16 path would re-cast every GEMM.
+    // Reference Muon orthogonalizes in FP32/TF32; keep that here for speed and stability.
+    const bool previousAmp = CudaAmp::preferMixedPrecision;
+    CudaAmp::preferMixedPrecision = false;
+
+    ScopedCudaEventPair nsTimer;
+    nsTimer.begin(this->profileEnabled);
 
     const bool transposeBack = matrix.rows > matrix.cols;
     CudaMatrix* working = &matrix;
@@ -230,12 +301,7 @@ void CudaMuon::newtonSchulz5InPlace(CudaMatrix& matrix) {
         working = &this->nsWork;
     }
 
-    const float norm = frobeniusNorm(*working, this->frobeniusScratch);
-    const int elementCount = static_cast<int>(working->elementCount());
-    muonScale<<<elementwiseBlocks(elementCount), 256, 0, CudaMatmul::activeStream()>>>(
-        working->buffer.deviceData, elementCount, 1.0f / (norm + kNsEps));
-    throwIfFailed(cudaGetLastError(), "muonScale normalize");
-
+    normalizeFrobeniusInPlace(*working, this->frobeniusScratch);
     this->nsX.ensureSize(working->rows, working->cols);
     CudaOps::copyInto(*working, this->nsX);
 
@@ -247,24 +313,36 @@ void CudaMuon::newtonSchulz5InPlace(CudaMatrix& matrix) {
         CudaMatrix::multiplyInto(this->nsA, this->nsA, this->nsAA, false, false);
 
         this->nsB.ensureSize(this->nsA.rows, this->nsA.cols);
-        CudaOps::copyInto(this->nsA, this->nsB);
-        CudaOps::scaleInPlace(this->nsB, kNsB);
         const int bCount = static_cast<int>(this->nsB.elementCount());
-        muonAxpy<<<elementwiseBlocks(bCount), 256, 0, CudaMatmul::activeStream()>>>(
-            this->nsB.buffer.deviceData, this->nsAA.buffer.deviceData, bCount, kNsC);
-        throwIfFailed(cudaGetLastError(), "muonAxpy B");
+        muonPolyCombine<<<elementwiseBlocks(bCount), 256, 0, CudaMatmul::activeStream()>>>(
+            this->nsB.buffer.deviceData,
+            this->nsA.buffer.deviceData,
+            this->nsAA.buffer.deviceData,
+            bCount,
+            kNsB,
+            kNsC);
+        throwIfFailed(cudaGetLastError(), "muonPolyCombine B");
 
         this->nsBX.ensureSize(this->nsX.rows, this->nsX.cols);
         CudaMatrix::multiplyInto(this->nsB, this->nsX, this->nsBX, false, false);
 
-        CudaOps::scaleInPlace(this->nsX, kNsA);
-        CudaOps::addInPlace(this->nsX, this->nsBX);
+        const int xCount = static_cast<int>(this->nsX.elementCount());
+        muonScaleAddInPlace<<<elementwiseBlocks(xCount), 256, 0, CudaMatmul::activeStream()>>>(
+            this->nsX.buffer.deviceData,
+            this->nsBX.buffer.deviceData,
+            xCount,
+            kNsA);
+        throwIfFailed(cudaGetLastError(), "muonScaleAddInPlace X");
     }
 
     if (transposeBack)
         transposeInto(this->nsX, matrix);
     else
         CudaOps::copyInto(this->nsX, matrix);
+
+    // Attribute whole NS (normalize + gemms + elemwise) to nsGemmMs for coarse profile.
+    this->profile.nsGemmMs += nsTimer.endMs();
+    CudaAmp::preferMixedPrecision = previousAmp;
 }
 
 void CudaMuon::update(CudaMatrix& parameter, CudaMuonState& state, const CudaMatrix& gradient, float gradientScale) {
@@ -281,59 +359,72 @@ void CudaMuon::update(CudaMatrix& parameter, CudaMuonState& state, const CudaMat
     const float oneMinusBeta = 1.0f - beta;
     const int blocks = elementwiseBlocks(elementCount);
 
-    muonLerpMomentum<<<blocks, 256, 0, CudaMatmul::activeStream()>>>(
-        state.momentum.buffer.deviceData,
-        gradient.buffer.deviceData,
-        elementCount,
-        beta,
-        oneMinusBeta,
-        gradientScale);
-    throwIfFailed(cudaGetLastError(), "muonLerpMomentum");
-
-    this->updateScratch.ensureSize(parameter.rows, parameter.cols);
-    if (this->nesterov) {
-        muonNesterovUpdate<<<blocks, 256, 0, CudaMatmul::activeStream()>>>(
-            this->updateScratch.buffer.deviceData,
+    {
+        ScopedCudaEventPair timer;
+        timer.begin(this->profileEnabled);
+        muonLerpMomentum<<<blocks, 256, 0, CudaMatmul::activeStream()>>>(
             state.momentum.buffer.deviceData,
             gradient.buffer.deviceData,
             elementCount,
             beta,
             oneMinusBeta,
             gradientScale);
-        throwIfFailed(cudaGetLastError(), "muonNesterovUpdate");
-    } else {
-        muonCopy<<<blocks, 256, 0, CudaMatmul::activeStream()>>>(
-            this->updateScratch.buffer.deviceData,
-            state.momentum.buffer.deviceData,
-            elementCount);
-        throwIfFailed(cudaGetLastError(), "muonCopy");
+        throwIfFailed(cudaGetLastError(), "muonLerpMomentum");
+
+        this->updateScratch.ensureSize(parameter.rows, parameter.cols);
+        if (this->nesterov) {
+            muonNesterovUpdate<<<blocks, 256, 0, CudaMatmul::activeStream()>>>(
+                this->updateScratch.buffer.deviceData,
+                state.momentum.buffer.deviceData,
+                gradient.buffer.deviceData,
+                elementCount,
+                beta,
+                oneMinusBeta,
+                gradientScale);
+            throwIfFailed(cudaGetLastError(), "muonNesterovUpdate");
+        } else {
+            muonCopy<<<blocks, 256, 0, CudaMatmul::activeStream()>>>(
+                this->updateScratch.buffer.deviceData,
+                state.momentum.buffer.deviceData,
+                elementCount);
+            throwIfFailed(cudaGetLastError(), "muonCopy");
+        }
+        this->profile.momentumMs += timer.endMs();
     }
 
     this->newtonSchulz5InPlace(this->updateScratch);
 
-    float stepLr = this->learningRate;
-    if (this->adjustLrMatchRmsAdamw) {
-        const float shape = static_cast<float>((std::max)(parameter.rows, parameter.cols));
-        stepLr *= 0.2f * std::sqrt(shape);
-    } else {
-        const float aspect = static_cast<float>(parameter.rows) / static_cast<float>((std::max)(size_t{1}, parameter.cols));
-        muonScale<<<blocks, 256, 0, CudaMatmul::activeStream()>>>(
-            this->updateScratch.buffer.deviceData, elementCount, std::sqrt((std::max)(1.0f, aspect)));
-        throwIfFailed(cudaGetLastError(), "muonScale spectral");
+    {
+        ScopedCudaEventPair timer;
+        timer.begin(this->profileEnabled);
+        float stepLr = this->learningRate;
+        if (this->adjustLrMatchRmsAdamw) {
+            const float shape = static_cast<float>((std::max)(parameter.rows, parameter.cols));
+            stepLr *= 0.2f * std::sqrt(shape);
+        } else {
+            const float aspect = static_cast<float>(parameter.rows) / static_cast<float>((std::max)(size_t{1}, parameter.cols));
+            muonScale<<<blocks, 256, 0, CudaMatmul::activeStream()>>>(
+                this->updateScratch.buffer.deviceData, elementCount, std::sqrt((std::max)(1.0f, aspect)));
+            throwIfFailed(cudaGetLastError(), "muonScale spectral");
+        }
+
+        if (this->weightDecay != 0.0f) {
+            muonDecay<<<blocks, 256, 0, CudaMatmul::activeStream()>>>(
+                parameter.buffer.deviceData, elementCount, 1.0f - stepLr * this->weightDecay);
+            throwIfFailed(cudaGetLastError(), "muonDecay");
+        }
+
+        muonAxpy<<<blocks, 256, 0, CudaMatmul::activeStream()>>>(
+            parameter.buffer.deviceData,
+            this->updateScratch.buffer.deviceData,
+            elementCount,
+            -stepLr);
+        throwIfFailed(cudaGetLastError(), "muonAxpy param");
+        this->profile.applyMs += timer.endMs();
     }
 
-    if (this->weightDecay != 0.0f) {
-        muonDecay<<<blocks, 256, 0, CudaMatmul::activeStream()>>>(
-            parameter.buffer.deviceData, elementCount, 1.0f - stepLr * this->weightDecay);
-        throwIfFailed(cudaGetLastError(), "muonDecay");
-    }
-
-    muonAxpy<<<blocks, 256, 0, CudaMatmul::activeStream()>>>(
-        parameter.buffer.deviceData,
-        this->updateScratch.buffer.deviceData,
-        elementCount,
-        -stepLr);
-    throwIfFailed(cudaGetLastError(), "muonAxpy param");
+    if (this->profileEnabled)
+        ++this->profile.updateCount;
 }
 
 void CudaMuon::runSmokeDemo(int parameterRows, int parameterCols) {

@@ -41,8 +41,9 @@ int main() {
     const bool runSmokes = false;
     const bool runSpeedBench = false;
     const bool runGate40k = false;
-    const bool runFlashParity256 = true;
+    const bool runFlashParity256 = false;
     const bool runScale100M = false;
+    const bool runMuonThroughputProbe = false;
     const bool runGraphCheck = false;
     const bool runEpilogueCheck = false;
     const bool runFfnBwdCheck = false;
@@ -66,7 +67,7 @@ int main() {
     const int blockCount = 8;
     const int headCount = 12;
     const int maximumPositionCount = static_cast<int>(maximumTokenCount);
-    const int trainEpochs = 2;
+    const int trainEpochs = 10;
     const int trainBatchSize = 64;
     const int trainGradAccum = 4;
     const int chunkExampleCount = 2048;
@@ -80,11 +81,68 @@ int main() {
         SmokeLog::section("muon");
         if (!CudaMatmul::isAvailable()) {
             SmokeLog::skip("Muon NS");
+            SmokeLog::skip("Muon train");
             return 1;
         }
         CudaMuon::runSmokeDemo(64, 48);
         CudaMuon::runSmokeDemo(48, 64);
+        CudaLanguageModel::runMuonTrainSmokeDemo(128, 64, 32, 2, 4);
         return 0;
+    }
+
+    if (runMuonThroughputProbe) {
+        SmokeLog::section("toks-regression");
+        if (!CudaMatmul::isAvailable()) {
+            SmokeLog::skip("toks-regression (no CUDA)");
+            return 1;
+        }
+        try {
+            const int vocab = 16000;
+            const int embed = 768;
+            const int blocks = 12;
+            const int heads = 12;
+            const int pos = 512;
+            const int probeSeq = 256;
+
+            auto oneShot = [&](const char* label, bool muon, ActivationCheckpointMode ckpt, int forcedPackCols) {
+                LanguageModel model(vocab, embed, pos, Adam(0.001f), blocks, heads);
+                model.enableCuda();
+                model.setCudaPreferCpuAdamOffload(false);
+                model.setCudaPreferInt8AdamMoments(true);
+                model.setCudaPreferFlashAttention(true);
+                model.enableCudaTrain();
+                model.setCudaPreferMuon(muon);
+                model.setActivationCheckpointMode(ckpt);
+                model.setCudaPreferTrainGraph(true);
+                if (forcedPackCols > 0)
+                    model.setCudaMaxPackedColumns(forcedPackCols);
+                else
+                    model.applyCudaVramPackBudget(0.55f);
+
+                size_t freeBytes = 0;
+                size_t totalBytes = 0;
+                cudaMemGetInfo(&freeBytes, &totalBytes);
+                const double tok = model.probeCudaPackedTrainTokensPerSecond(probeSeq, 3, 8);
+                SmokeLog::result(
+                    label,
+                    "muon=%s ckpt=%s maxPackCols=%d pack~=%d freeMiB=%.0f tokens/s=%.0f",
+                    muon ? "on" : "off",
+                    CudaLanguageModel::activationCheckpointModeName(ckpt),
+                    model.cudaMaxPackedColumns(),
+                    (std::max)(1, model.cudaMaxPackedColumns() / probeSeq),
+                    static_cast<double>(freeBytes) / (1024.0 * 1024.0),
+                    tok);
+            };
+
+            oneShot("adam ckpt-off auto", false, ActivationCheckpointMode::Off, 0);
+            oneShot("adam selective auto", false, ActivationCheckpointMode::Selective, 0);
+            oneShot("muon selective auto", true, ActivationCheckpointMode::Selective, 0);
+            oneShot("muon ckpt-off auto", true, ActivationCheckpointMode::Off, 0);
+            return 0;
+        } catch (const std::exception& ex) {
+            SmokeLog::result("toks-regression", "FAILED: %s", ex.what());
+            return 1;
+        }
     }
 
     if (runCkptParity) {
@@ -186,8 +244,15 @@ int main() {
         const int scaleTestCap = 512;
         const int scaleBatch = 32;
         const int scaleAccum = 4;
-        const int scaleEpochs = 1;
+        const int scaleEpochs = 10;
         const int probeSeq = 256;
+        const int generateNewTokens = 64;
+        const int generatePromptTokens = 48;
+
+        auto truncatePreview = [](const std::string& text, size_t maxChars) -> std::string {
+            if (text.size() <= maxChars) return text;
+            return text.substr(0, maxChars) + "...";
+        };
 
         try {
             LanguageModelChunkSource source(scalePath, scaleMaxTextChars, scaleMaxTokens, scaleChunkExamples, 0.8f, 42u, scaleTestCap);
@@ -243,7 +308,8 @@ int main() {
             model.setCudaPreferCpuAdamOffload(false);
             model.setCudaPreferInt8AdamMoments(true);
             model.setCudaPreferFlashAttention(true);
-            model.enableCudaTrain();
+            model.enableCudaTrain(); // preferMuon=true (Muon hidden 2D + Adam aux)
+            model.setCudaPreferMuon(true);
             model.enableActivationCheckpointing(true);
             model.setCudaPreferTrainGraph(true);
             model.applyCudaVramPackBudget(0.55f);
@@ -252,11 +318,14 @@ int main() {
             size_t totalBytes = 0;
             if (cudaMemGetInfo(&freeAfterSetup, &totalBytes) != cudaSuccess)
                 throw std::runtime_error("scale-100M memGetInfo failed");
+            const double usedAfterSetupMiB =
+                static_cast<double>(totalBytes - freeAfterSetup) / (1024.0 * 1024.0);
 
             SmokeLog::result(
-                "vram",
-                "maxPackCols=%d  freeMiB=%.0f  totalMiB=%.0f  ckpt=%s  int8Adam=on  flash=on  graph=on",
+                "vram-setup",
+                "maxPackCols=%d  usedMiB=%.0f  freeMiB=%.0f  totalMiB=%.0f  ckpt=%s  opt=muon+adam  int8Adam=on  flash=on",
                 model.cudaMaxPackedColumns(),
+                usedAfterSetupMiB,
                 static_cast<double>(freeAfterSetup) / (1024.0 * 1024.0),
                 static_cast<double>(totalBytes) / (1024.0 * 1024.0),
                 CudaLanguageModel::activationCheckpointModeName(model.cudaActivationCheckpointMode()));
@@ -268,21 +337,63 @@ int main() {
                 probeSeq,
                 tokensPerSecond);
 
-            SmokeLog::note("starting 1 epoch streamed train...");
+            SmokeLog::note(("starting " + std::to_string(scaleEpochs) + " epoch streamed train (muon+adam)...").c_str());
+            const auto trainStart = std::chrono::steady_clock::now();
             model.train(source, scaleEpochs, 1, scaleBatch, scaleAccum);
+            const double trainSeconds =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - trainStart).count();
+
+            size_t freeAfterTrain = 0;
+            size_t totalAfterTrain = 0;
+            if (cudaMemGetInfo(&freeAfterTrain, &totalAfterTrain) != cudaSuccess)
+                throw std::runtime_error("scale-100M memGetInfo after train failed");
+            const double usedAfterTrainMiB =
+                static_cast<double>(totalAfterTrain - freeAfterTrain) / (1024.0 * 1024.0);
+            SmokeLog::result(
+                "vram-train",
+                "usedMiB=%.0f  freeMiB=%.0f  totalMiB=%.0f  trainSec=%.1f",
+                usedAfterTrainMiB,
+                static_cast<double>(freeAfterTrain) / (1024.0 * 1024.0),
+                static_cast<double>(totalAfterTrain) / (1024.0 * 1024.0),
+                trainSeconds);
+
             model.saveCheckpoint("sera_100m.snlm", true);
 
-            if (!source.testDataset().examples.empty())
-                SmokeLog::result("final", "testLoss=%.6f", model.averageLoss(source.testDataset()));
-            SmokeLog::result("checkpoint", "saved sera_100m.snlm (weights+adam)");
+            float finalTestLoss = 0.0f;
+            float finalTestPpl = 0.0f;
+            if (!source.testDataset().examples.empty()) {
+                finalTestLoss = model.averageLoss(source.testDataset());
+                finalTestPpl = std::exp((std::min)(finalTestLoss, 20.0f));
+                SmokeLog::result("final", "testLoss=%.6f  testPpl=%.2f", finalTestLoss, finalTestPpl);
+            }
+            SmokeLog::result("checkpoint", "saved sera_100m.snlm (weights+muon+adam)");
 
-            const std::vector<int> prompt = promptChunk.examples[0].inputTokenIds;
-            const std::vector<int> greedy = model.generate(prompt, 32, 0.0f, 0, 7u);
+            const std::vector<int>& fullPrompt = promptChunk.examples[0].inputTokenIds;
+            const int promptLen = (std::min)(generatePromptTokens, static_cast<int>(fullPrompt.size()));
+            std::vector<int> prompt(fullPrompt.begin(), fullPrompt.begin() + promptLen);
+            const std::vector<int> greedy = model.generate(prompt, generateNewTokens, 0.0f, 0, 7u);
+            const std::vector<int> sampled = model.generate(prompt, generateNewTokens, 0.8f, 40, 7u);
+
+            // continuation-only decode for README-friendly samples
+            auto continuation = [&tokenizer](const std::vector<int>& full, size_t promptSize) -> std::string {
+                if (full.size() <= promptSize) return "";
+                return tokenizer.decode(std::vector<int>(full.begin() + static_cast<std::ptrdiff_t>(promptSize), full.end()));
+            };
+
             SmokeLog::section("generate");
-            std::cout << "  prompt:  " << tokenizer.decode(prompt) << '\n';
-            std::cout << "  greedy:  " << tokenizer.decode(greedy) << '\n';
+            std::cout << "  prompt:  " << truncatePreview(tokenizer.decode(prompt), 240) << '\n';
+            std::cout << "  greedy:  " << truncatePreview(continuation(greedy, prompt.size()), 400) << '\n';
+            std::cout << "  sample:  " << truncatePreview(continuation(sampled, prompt.size()), 400) << '\n';
 
-            SmokeLog::result("scale-100M", "PASS  tokens/s=%.0f  params=%.2fM", tokensPerSecond, static_cast<double>(paramCount) / 1.0e6);
+            SmokeLog::result(
+                "scale-100M",
+                "PASS  params=%.2fM  epochs=%d  probeTok/s=%.0f  testLoss=%.4f  testPpl=%.2f  usedMiB=%.0f",
+                static_cast<double>(paramCount) / 1.0e6,
+                scaleEpochs,
+                tokensPerSecond,
+                finalTestLoss,
+                finalTestPpl,
+                usedAfterTrainMiB);
             return 0;
         } catch (const std::exception& ex) {
             SmokeLog::result("scale-100M", "FAILED: %s", ex.what());
@@ -1041,7 +1152,11 @@ int main() {
         CudaRMSNorm::runSmokeDemo(128, 64);
         CudaRMSNorm::runBackwardSmokeDemo(64, 32);
         CudaAdam::runSmokeDemo(128, 64);
+
+        SmokeLog::section("muon");
         CudaMuon::runSmokeDemo(64, 48);
+        CudaMuon::runSmokeDemo(48, 64);
+        CudaLanguageModel::runMuonTrainSmokeDemo(128, 64, 32, 2, 4);
 
         SmokeLog::section("attention");
         CausalSelfAttention::runSparseMaskSmokeDemo(32, 2, 16, 32, 4, 2);

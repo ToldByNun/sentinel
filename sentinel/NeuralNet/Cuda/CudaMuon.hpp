@@ -22,6 +22,29 @@ public:
     void uploadFrom(const MuonState& host);
 };
 
+/// <summary>accumulated GPU ms for Muon update sections (profileEnabled)</summary>
+struct CudaMuonProfile {
+    double momentumMs = 0.0;
+    double normalizeMs = 0.0;
+    double nsGemmMs = 0.0;
+    double nsElemwiseMs = 0.0;
+    double applyMs = 0.0;
+    int updateCount = 0;
+
+    void reset() {
+        momentumMs = 0.0;
+        normalizeMs = 0.0;
+        nsGemmMs = 0.0;
+        nsElemwiseMs = 0.0;
+        applyMs = 0.0;
+        updateCount = 0;
+    }
+
+    double totalMs() const {
+        return momentumMs + normalizeMs + nsGemmMs + nsElemwiseMs + applyMs;
+    }
+};
+
 /// <summary>
 /// Muon (Keller Jordan): momentum + Newton-Schulz5 for hidden 2D weights.
 /// Use Adam for embeddings, norms, biases, and LM head.
@@ -36,6 +59,10 @@ public:
     /// <summary>if true: lr_eff = lr * 0.2 * sqrt(max(rows,cols)); else Jordan spectral scale on update</summary>
     bool adjustLrMatchRmsAdamw;
 
+    /// <summary>when true, update() accumulates section times into profile (syncs per section)</summary>
+    bool profileEnabled;
+    CudaMuonProfile profile;
+
     CudaMatrix updateScratch;
     CudaMatrix nsX;
     CudaMatrix nsA;
@@ -49,7 +76,7 @@ public:
         float learningRate = 0.02f,
         float momentumBeta = 0.95f,
         float weightDecay = 0.0f,
-        int nsSteps = 5,
+        int nsSteps = 3,
         bool nesterov = true,
         bool adjustLrMatchRmsAdamw = true);
 

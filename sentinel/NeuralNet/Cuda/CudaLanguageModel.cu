@@ -219,22 +219,18 @@ void CudaTransformerBlockAdamStates::freeMuonManagedWeights() {
 }
 
 void CudaTransformerBlockMuonStates::ensureFrom(const CudaTransformerBlock& block) {
-    this->queryWeight.ensure(block.attention.queryWeight);
-    this->keyWeight.ensure(block.attention.keyWeight);
-    this->valueWeight.ensure(block.attention.valueWeight);
+    if (block.attention.qkvWeight.empty() || block.feedForward.gateUpWeight.empty())
+        throw std::logic_error("CudaTransformerBlockMuonStates::ensureFrom requires fused QKV/gateUp weights");
+    this->qkvWeight.ensure(block.attention.qkvWeight);
     this->attentionOutputWeight.ensure(block.attention.outputWeight);
-    this->feedForwardGateWeight.ensure(block.feedForward.gateWeight);
-    this->feedForwardUpWeight.ensure(block.feedForward.upWeight);
+    this->feedForwardGateUpWeight.ensure(block.feedForward.gateUpWeight);
     this->feedForwardDownWeight.ensure(block.feedForward.downWeight);
 }
 
 void CudaTransformerBlockMuonStates::free() {
-    this->queryWeight.free();
-    this->keyWeight.free();
-    this->valueWeight.free();
+    this->qkvWeight.free();
     this->attentionOutputWeight.free();
-    this->feedForwardGateWeight.free();
-    this->feedForwardUpWeight.free();
+    this->feedForwardGateUpWeight.free();
     this->feedForwardDownWeight.free();
 }
 
@@ -335,6 +331,8 @@ void CudaLanguageModel::ensureTrainState() {
     if (this->preferMuon) {
         this->blockMuonStates.resize(this->blocks.size());
         for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+            this->blocks[blockIndex].attention.syncFusedQkvWeight();
+            this->blocks[blockIndex].feedForward.syncFusedGateUpWeight();
             this->blockMuonStates[blockIndex].ensureFrom(this->blocks[blockIndex]);
             if (blockIndex < this->blockAdamStates.size())
                 this->blockAdamStates[blockIndex].freeMuonManagedWeights();
@@ -715,13 +713,32 @@ void CudaLanguageModel::downloadOptimizerTo(LanguageModel& host) {
     };
 
     auto downloadBlockMuon = [&](TransformerBlock& hostBlock, const CudaTransformerBlock& block, const CudaTransformerBlockMuonStates& muonStates) {
-        downloadMuonOrZero(muonStates.queryWeight, hostBlock.queryWeightMuon, block.attention.queryWeight.rows, block.attention.queryWeight.cols);
-        downloadMuonOrZero(muonStates.keyWeight, hostBlock.keyWeightMuon, block.attention.keyWeight.rows, block.attention.keyWeight.cols);
-        downloadMuonOrZero(muonStates.valueWeight, hostBlock.valueWeightMuon, block.attention.valueWeight.rows, block.attention.valueWeight.cols);
+        // fused device momentum → split host Q/K/V and gate/up for checkpoint compatibility
+        MuonState qkvHost;
+        MuonState gateUpHost;
+        downloadMuonOrZero(muonStates.qkvWeight, qkvHost, block.attention.queryWeight.rows * 3ull, block.attention.queryWeight.cols);
         downloadMuonOrZero(muonStates.attentionOutputWeight, hostBlock.attentionOutputWeightMuon, block.attention.outputWeight.rows, block.attention.outputWeight.cols);
-        downloadMuonOrZero(muonStates.feedForwardGateWeight, hostBlock.feedForwardGateWeightMuon, block.feedForward.gateWeight.rows, block.feedForward.gateWeight.cols);
-        downloadMuonOrZero(muonStates.feedForwardUpWeight, hostBlock.feedForwardUpWeightMuon, block.feedForward.upWeight.rows, block.feedForward.upWeight.cols);
+        downloadMuonOrZero(muonStates.feedForwardGateUpWeight, gateUpHost, block.feedForward.gateWeight.rows + block.feedForward.upWeight.rows, block.feedForward.gateWeight.cols);
         downloadMuonOrZero(muonStates.feedForwardDownWeight, hostBlock.feedForwardDownWeightMuon, block.feedForward.downWeight.rows, block.feedForward.downWeight.cols);
+
+        const size_t qSlice = block.attention.queryWeight.elementCount();
+        hostBlock.queryWeightMuon.momentum = Matrix(block.attention.queryWeight.rows, block.attention.queryWeight.cols, 0.0f);
+        hostBlock.keyWeightMuon.momentum = Matrix(block.attention.keyWeight.rows, block.attention.keyWeight.cols, 0.0f);
+        hostBlock.valueWeightMuon.momentum = Matrix(block.attention.valueWeight.rows, block.attention.valueWeight.cols, 0.0f);
+        if (!qkvHost.momentum.empty() && qkvHost.momentum.data.size() >= 3ull * qSlice) {
+            std::copy(qkvHost.momentum.data.begin(), qkvHost.momentum.data.begin() + static_cast<std::ptrdiff_t>(qSlice), hostBlock.queryWeightMuon.momentum.data.begin());
+            std::copy(qkvHost.momentum.data.begin() + static_cast<std::ptrdiff_t>(qSlice), qkvHost.momentum.data.begin() + static_cast<std::ptrdiff_t>(2ull * qSlice), hostBlock.keyWeightMuon.momentum.data.begin());
+            std::copy(qkvHost.momentum.data.begin() + static_cast<std::ptrdiff_t>(2ull * qSlice), qkvHost.momentum.data.begin() + static_cast<std::ptrdiff_t>(3ull * qSlice), hostBlock.valueWeightMuon.momentum.data.begin());
+        }
+
+        const size_t gateSlice = block.feedForward.gateWeight.elementCount();
+        hostBlock.feedForwardGateWeightMuon.momentum = Matrix(block.feedForward.gateWeight.rows, block.feedForward.gateWeight.cols, 0.0f);
+        hostBlock.feedForwardUpWeightMuon.momentum = Matrix(block.feedForward.upWeight.rows, block.feedForward.upWeight.cols, 0.0f);
+        if (!gateUpHost.momentum.empty() && gateUpHost.momentum.data.size() >= gateSlice + block.feedForward.upWeight.elementCount()) {
+            std::copy(gateUpHost.momentum.data.begin(), gateUpHost.momentum.data.begin() + static_cast<std::ptrdiff_t>(gateSlice), hostBlock.feedForwardGateWeightMuon.momentum.data.begin());
+            std::copy(gateUpHost.momentum.data.begin() + static_cast<std::ptrdiff_t>(gateSlice), gateUpHost.momentum.data.begin() + static_cast<std::ptrdiff_t>(gateSlice + block.feedForward.upWeight.elementCount()), hostBlock.feedForwardUpWeightMuon.momentum.data.begin());
+        }
+
         hostBlock.queryWeightState = AdamState{};
         hostBlock.keyWeightState = AdamState{};
         hostBlock.valueWeightState = AdamState{};
@@ -837,12 +854,35 @@ void CudaLanguageModel::uploadOptimizerFrom(const LanguageModel& host) {
                 if (this->blockMuonStates.size() != this->blocks.size())
                     throw std::logic_error("CudaLanguageModel::uploadOptimizerFrom Muon states not ready");
                 CudaTransformerBlockMuonStates& muonStates = this->blockMuonStates[blockIndex];
-                muonStates.queryWeight.uploadFrom(hostBlock.queryWeightMuon);
-                muonStates.keyWeight.uploadFrom(hostBlock.keyWeightMuon);
-                muonStates.valueWeight.uploadFrom(hostBlock.valueWeightMuon);
+                CudaTransformerBlock& block = this->blocks[blockIndex];
+                block.attention.syncFusedQkvWeight();
+                block.feedForward.syncFusedGateUpWeight();
+                muonStates.ensureFrom(block);
+
+                Matrix qkvMom(block.attention.queryWeight.rows * 3ull, block.attention.queryWeight.cols, 0.0f);
+                const size_t qSlice = block.attention.queryWeight.elementCount();
+                if (!hostBlock.queryWeightMuon.momentum.empty())
+                    std::copy(hostBlock.queryWeightMuon.momentum.data.begin(), hostBlock.queryWeightMuon.momentum.data.end(), qkvMom.data.begin());
+                if (!hostBlock.keyWeightMuon.momentum.empty())
+                    std::copy(hostBlock.keyWeightMuon.momentum.data.begin(), hostBlock.keyWeightMuon.momentum.data.end(), qkvMom.data.begin() + static_cast<std::ptrdiff_t>(qSlice));
+                if (!hostBlock.valueWeightMuon.momentum.empty())
+                    std::copy(hostBlock.valueWeightMuon.momentum.data.begin(), hostBlock.valueWeightMuon.momentum.data.end(), qkvMom.data.begin() + static_cast<std::ptrdiff_t>(2ull * qSlice));
+                MuonState qkvState;
+                qkvState.momentum = std::move(qkvMom);
+                muonStates.qkvWeight.uploadFrom(qkvState);
+
                 muonStates.attentionOutputWeight.uploadFrom(hostBlock.attentionOutputWeightMuon);
-                muonStates.feedForwardGateWeight.uploadFrom(hostBlock.feedForwardGateWeightMuon);
-                muonStates.feedForwardUpWeight.uploadFrom(hostBlock.feedForwardUpWeightMuon);
+
+                Matrix gateUpMom(block.feedForward.gateWeight.rows + block.feedForward.upWeight.rows, block.feedForward.gateWeight.cols, 0.0f);
+                const size_t gateSlice = block.feedForward.gateWeight.elementCount();
+                if (!hostBlock.feedForwardGateWeightMuon.momentum.empty())
+                    std::copy(hostBlock.feedForwardGateWeightMuon.momentum.data.begin(), hostBlock.feedForwardGateWeightMuon.momentum.data.end(), gateUpMom.data.begin());
+                if (!hostBlock.feedForwardUpWeightMuon.momentum.empty())
+                    std::copy(hostBlock.feedForwardUpWeightMuon.momentum.data.begin(), hostBlock.feedForwardUpWeightMuon.momentum.data.end(), gateUpMom.data.begin() + static_cast<std::ptrdiff_t>(gateSlice));
+                MuonState gateUpState;
+                gateUpState.momentum = std::move(gateUpMom);
+                muonStates.feedForwardGateUpWeight.uploadFrom(gateUpState);
+
                 muonStates.feedForwardDownWeight.uploadFrom(hostBlock.feedForwardDownWeightMuon);
                 states.queryWeight = AdamState{};
                 states.keyWeight = AdamState{};
@@ -885,12 +925,35 @@ void CudaLanguageModel::uploadOptimizerFrom(const LanguageModel& host) {
             if (this->blockMuonStates.size() != this->blocks.size())
                 throw std::logic_error("CudaLanguageModel::uploadOptimizerFrom Muon states not ready");
             CudaTransformerBlockMuonStates& muonStates = this->blockMuonStates[blockIndex];
-            muonStates.queryWeight.uploadFrom(hostBlock.queryWeightMuon);
-            muonStates.keyWeight.uploadFrom(hostBlock.keyWeightMuon);
-            muonStates.valueWeight.uploadFrom(hostBlock.valueWeightMuon);
+            CudaTransformerBlock& block = this->blocks[blockIndex];
+            block.attention.syncFusedQkvWeight();
+            block.feedForward.syncFusedGateUpWeight();
+            muonStates.ensureFrom(block);
+
+            Matrix qkvMom(block.attention.queryWeight.rows * 3ull, block.attention.queryWeight.cols, 0.0f);
+            const size_t qSlice = block.attention.queryWeight.elementCount();
+            if (!hostBlock.queryWeightMuon.momentum.empty())
+                std::copy(hostBlock.queryWeightMuon.momentum.data.begin(), hostBlock.queryWeightMuon.momentum.data.end(), qkvMom.data.begin());
+            if (!hostBlock.keyWeightMuon.momentum.empty())
+                std::copy(hostBlock.keyWeightMuon.momentum.data.begin(), hostBlock.keyWeightMuon.momentum.data.end(), qkvMom.data.begin() + static_cast<std::ptrdiff_t>(qSlice));
+            if (!hostBlock.valueWeightMuon.momentum.empty())
+                std::copy(hostBlock.valueWeightMuon.momentum.data.begin(), hostBlock.valueWeightMuon.momentum.data.end(), qkvMom.data.begin() + static_cast<std::ptrdiff_t>(2ull * qSlice));
+            MuonState qkvState;
+            qkvState.momentum = std::move(qkvMom);
+            muonStates.qkvWeight.uploadFrom(qkvState);
+
             muonStates.attentionOutputWeight.uploadFrom(hostBlock.attentionOutputWeightMuon);
-            muonStates.feedForwardGateWeight.uploadFrom(hostBlock.feedForwardGateWeightMuon);
-            muonStates.feedForwardUpWeight.uploadFrom(hostBlock.feedForwardUpWeightMuon);
+
+            Matrix gateUpMom(block.feedForward.gateWeight.rows + block.feedForward.upWeight.rows, block.feedForward.gateWeight.cols, 0.0f);
+            const size_t gateSlice = block.feedForward.gateWeight.elementCount();
+            if (!hostBlock.feedForwardGateWeightMuon.momentum.empty())
+                std::copy(hostBlock.feedForwardGateWeightMuon.momentum.data.begin(), hostBlock.feedForwardGateWeightMuon.momentum.data.end(), gateUpMom.data.begin());
+            if (!hostBlock.feedForwardUpWeightMuon.momentum.empty())
+                std::copy(hostBlock.feedForwardUpWeightMuon.momentum.data.begin(), hostBlock.feedForwardUpWeightMuon.momentum.data.end(), gateUpMom.data.begin() + static_cast<std::ptrdiff_t>(gateSlice));
+            MuonState gateUpState;
+            gateUpState.momentum = std::move(gateUpMom);
+            muonStates.feedForwardGateUpWeight.uploadFrom(gateUpState);
+
             muonStates.feedForwardDownWeight.uploadFrom(hostBlock.feedForwardDownWeightMuon);
             states.freeMuonManagedWeights();
         } else {
@@ -1369,12 +1432,31 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
             CudaTransformerBlock& block = this->blocks[blockIndex];
             CudaTransformerBlockGradients& blockGradients = gradients.blocks[blockIndex];
             CudaTransformerBlockMuonStates& muonStates = this->blockMuonStates[blockIndex];
-            this->muon.update(block.attention.queryWeight, muonStates.queryWeight, blockGradients.queryWeight, effectiveGradientScale);
-            this->muon.update(block.attention.keyWeight, muonStates.keyWeight, blockGradients.keyWeight, effectiveGradientScale);
-            this->muon.update(block.attention.valueWeight, muonStates.valueWeight, blockGradients.valueWeight, effectiveGradientScale);
+
+            // Fused QKV: one NS for Q/K/V instead of three
+            block.attention.syncFusedQkvWeight();
+            block.attention.qkvWeightGradient.ensureSize(block.attention.qkvWeight.rows, block.attention.qkvWeight.cols);
+            const size_t qSliceBytes = block.attention.queryWeight.byteCount();
+            CudaMatmul::memcpyDevice(block.attention.qkvWeightGradient.buffer.deviceData, blockGradients.queryWeight.buffer.deviceData, qSliceBytes);
+            CudaMatmul::memcpyDevice(block.attention.qkvWeightGradient.buffer.deviceData + block.attention.queryWeight.elementCount(), blockGradients.keyWeight.buffer.deviceData, qSliceBytes);
+            CudaMatmul::memcpyDevice(block.attention.qkvWeightGradient.buffer.deviceData + 2ull * block.attention.queryWeight.elementCount(), blockGradients.valueWeight.buffer.deviceData, qSliceBytes);
+            this->muon.update(block.attention.qkvWeight, muonStates.qkvWeight, block.attention.qkvWeightGradient, effectiveGradientScale);
+            CudaMatmul::memcpyDevice(block.attention.queryWeight.buffer.deviceData, block.attention.qkvWeight.buffer.deviceData, qSliceBytes);
+            CudaMatmul::memcpyDevice(block.attention.keyWeight.buffer.deviceData, block.attention.qkvWeight.buffer.deviceData + block.attention.queryWeight.elementCount(), qSliceBytes);
+            CudaMatmul::memcpyDevice(block.attention.valueWeight.buffer.deviceData, block.attention.qkvWeight.buffer.deviceData + 2ull * block.attention.queryWeight.elementCount(), qSliceBytes);
+
             this->muon.update(block.attention.outputWeight, muonStates.attentionOutputWeight, blockGradients.attentionOutputWeight, effectiveGradientScale);
-            this->muon.update(block.feedForward.gateWeight, muonStates.feedForwardGateWeight, blockGradients.feedForwardGateWeight, effectiveGradientScale);
-            this->muon.update(block.feedForward.upWeight, muonStates.feedForwardUpWeight, blockGradients.feedForwardUpWeight, effectiveGradientScale);
+
+            // Fused gate+up: one NS instead of two
+            block.feedForward.syncFusedGateUpWeight();
+            block.feedForward.gateUpWeightGradient.ensureSize(block.feedForward.gateUpWeight.rows, block.feedForward.gateUpWeight.cols);
+            const size_t gateSliceBytes = block.feedForward.gateWeight.byteCount();
+            CudaMatmul::memcpyDevice(block.feedForward.gateUpWeightGradient.buffer.deviceData, blockGradients.feedForwardGateWeight.buffer.deviceData, gateSliceBytes);
+            CudaMatmul::memcpyDevice(block.feedForward.gateUpWeightGradient.buffer.deviceData + block.feedForward.gateWeight.elementCount(), blockGradients.feedForwardUpWeight.buffer.deviceData, block.feedForward.upWeight.byteCount());
+            this->muon.update(block.feedForward.gateUpWeight, muonStates.feedForwardGateUpWeight, block.feedForward.gateUpWeightGradient, effectiveGradientScale);
+            CudaMatmul::memcpyDevice(block.feedForward.gateWeight.buffer.deviceData, block.feedForward.gateUpWeight.buffer.deviceData, gateSliceBytes);
+            CudaMatmul::memcpyDevice(block.feedForward.upWeight.buffer.deviceData, block.feedForward.gateUpWeight.buffer.deviceData + block.feedForward.gateWeight.elementCount(), block.feedForward.upWeight.byteCount());
+
             this->muon.update(block.feedForward.downWeight, muonStates.feedForwardDownWeight, blockGradients.feedForwardDownWeight, effectiveGradientScale);
         }
     };
@@ -1501,8 +1583,18 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
     }
 
     pushItem(this->tokenEmbeddingWeight, this->tokenEmbeddingState, gradients.tokenEmbedding);
-    applyMuonBlockWeights();
-    this->adam.updateMany(items.data(), static_cast<int>(items.size()), effectiveGradientScale);
+
+    // Overlap Muon NS (often dominant) with Adam aux updates on a second stream.
+    if (this->preferMuon) {
+        this->ensureTrainStream();
+        const cudaStream_t previous = CudaMatmul::setActiveStream(this->trainStream);
+        applyMuonBlockWeights();
+        CudaMatmul::setActiveStream(previous);
+        this->adam.updateMany(items.data(), static_cast<int>(items.size()), effectiveGradientScale);
+        CudaMatmul::throwIfCudaFailed(cudaStreamSynchronize(this->trainStream), "applyGradients muon stream sync");
+    } else {
+        this->adam.updateMany(items.data(), static_cast<int>(items.size()), effectiveGradientScale);
+    }
     syncFusedMirrors();
 
     if (CudaAmp::lossScalingActive())
@@ -1685,14 +1777,22 @@ void CudaLanguageModel::train(const LanguageModelDataset& trainDataset, const La
             ? lossHost.at(0, 0) / static_cast<float>(processedExampleCount)
             : 0.0f;
         const double tokensPerSecond = epochSeconds > 0.0 ? static_cast<double>(processedPredictionCount) / epochSeconds : 0.0;
-        std::printf("  Epoch %-3d  trainLoss=%.6f  sec=%.2f  tokens/s=%.0f  backend=cuda", epoch, averageTrainLoss, epochSeconds, tokensPerSecond);
+        const float trainPpl = std::exp((std::min)(averageTrainLoss, 20.0f));
+        std::printf(
+            "  Epoch %-3d  trainLoss=%.6f  trainPpl=%.2f  sec=%.2f  tokens/s=%.0f  backend=cuda",
+            epoch,
+            averageTrainLoss,
+            trainPpl,
+            epochSeconds,
+            tokensPerSecond);
 
         if (CudaAmp::lossScalingActive())
             std::printf("  ampScale=%.0f", CudaAmp::lossScaler.scale);
 
         if (!testDataset.examples.empty()) {
             const float testLoss = this->averageLoss(testDataset);
-            std::printf("  testLoss=%.6f", testLoss);
+            const float testPpl = std::exp((std::min)(testLoss, 20.0f));
+            std::printf("  testLoss=%.6f  testPpl=%.2f", testLoss, testPpl);
         }
 
         if (packCount > 0) {
@@ -1771,14 +1871,22 @@ void CudaLanguageModel::train(LanguageModelChunkSource& source, int epochs, int 
             ? lossHost.at(0, 0) / static_cast<float>(processedExampleCount)
             : 0.0f;
         const double tokensPerSecond = epochSeconds > 0.0 ? static_cast<double>(processedPredictionCount) / epochSeconds : 0.0;
-        std::printf("  Epoch %-3d  trainLoss=%.6f  sec=%.2f  tokens/s=%.0f  backend=cuda-stream", epoch, averageTrainLoss, epochSeconds, tokensPerSecond);
+        const float trainPpl = std::exp((std::min)(averageTrainLoss, 20.0f));
+        std::printf(
+            "  Epoch %-3d  trainLoss=%.6f  trainPpl=%.2f  sec=%.2f  tokens/s=%.0f  backend=cuda-stream",
+            epoch,
+            averageTrainLoss,
+            trainPpl,
+            epochSeconds,
+            tokensPerSecond);
 
         if (CudaAmp::lossScalingActive())
             std::printf("  ampScale=%.0f", CudaAmp::lossScaler.scale);
 
         if (!testDataset.examples.empty()) {
             const float testLoss = this->averageLoss(testDataset);
-            std::printf("  testLoss=%.6f", testLoss);
+            const float testPpl = std::exp((std::min)(testLoss, 20.0f));
+            std::printf("  testLoss=%.6f  testPpl=%.2f", testLoss, testPpl);
         }
 
         if (packCount > 0) {
@@ -1898,6 +2006,101 @@ void CudaLanguageModel::runTrainSmokeDemo(int vocabularySize, int embeddingDim, 
     SmokeLog::result("LanguageModel train", "vocab=%d embed=%d seq=%d pack=%d  loss cpu=%.4f gpu=%.4f  gradDiff=%.2e  packLossDiff=%.2e packGradDiff=%.2e  tokens/s=%.0f",
         vocabularySize, embeddingDim, sequenceLength, packBatchSize, hostLoss, deviceLoss, maximumDifference, std::fabs(packedLoss - sequentialLoss), packedDifference, tokensPerSecond);
     CudaAmp::preferMixedPrecision = previousAmp;
+    CudaAdam::preferInt8Moments = previousInt8;
+}
+
+void CudaLanguageModel::runMuonTrainSmokeDemo(int vocabularySize, int embeddingDim, int sequenceLength, int blockCount, int headCount) {
+    if (!CudaMatmul::isAvailable()) {
+        SmokeLog::skip("Muon train");
+        return;
+    }
+    if (vocabularySize <= 0 || embeddingDim <= 0 || sequenceLength <= 0 || blockCount <= 0 || headCount <= 0)
+        throw std::invalid_argument("CudaLanguageModel::runMuonTrainSmokeDemo invalid dims");
+    if (embeddingDim % headCount != 0)
+        throw std::invalid_argument("CudaLanguageModel::runMuonTrainSmokeDemo embed must divide heads");
+
+    const bool previousAmp = CudaAmp::preferMixedPrecision;
+    const bool previousLossScale = CudaAmp::useLossScaling;
+    const bool previousInt8 = CudaAdam::preferInt8Moments;
+    CudaAmp::preferMixedPrecision = false;
+    CudaAmp::useLossScaling = false;
+    CudaAdam::preferInt8Moments = false;
+
+    LanguageModel host(vocabularySize, embeddingDim, sequenceLength, Adam(0.001f), blockCount, headCount);
+    auto device = std::make_unique<CudaLanguageModel>();
+    device->uploadFrom(host);
+    device->adam = CudaAdam(0.001f);
+    device->muon.learningRate = 0.001f;
+    device->preferTrainGraph = false;
+    device->setPreferMuon(true);
+    device->setActivationCheckpointMode(ActivationCheckpointMode::Selective);
+    for (CudaTransformerBlock& block : device->blocks)
+        block.attention.preferFlashAttention = false;
+
+    device->maxPackedColumns = (std::max)(sequenceLength * 8, sequenceLength);
+    device->ensureTrainState();
+
+    const int packBatchSize = (std::max)(1, (std::min)(4, device->maxPackedColumns / sequenceLength));
+    std::vector<LanguageModelExample> examples(static_cast<size_t>(packBatchSize));
+    unsigned rng = 911u;
+    for (int exampleIndex = 0; exampleIndex < packBatchSize; ++exampleIndex) {
+        examples[static_cast<size_t>(exampleIndex)].inputTokenIds.resize(static_cast<size_t>(sequenceLength));
+        examples[static_cast<size_t>(exampleIndex)].targetTokenIds.resize(static_cast<size_t>(sequenceLength));
+        for (size_t index = 0; index < static_cast<size_t>(sequenceLength); ++index) {
+            rng = rng * 1664525u + 1013904223u;
+            examples[static_cast<size_t>(exampleIndex)].inputTokenIds[index] = static_cast<int>(rng % static_cast<unsigned>(vocabularySize));
+            rng = rng * 1664525u + 1013904223u;
+            examples[static_cast<size_t>(exampleIndex)].targetTokenIds[index] = static_cast<int>(rng % static_cast<unsigned>(vocabularySize));
+        }
+    }
+    std::vector<const LanguageModelExample*> packPointers(static_cast<size_t>(packBatchSize));
+    for (int exampleIndex = 0; exampleIndex < packBatchSize; ++exampleIndex)
+        packPointers[static_cast<size_t>(exampleIndex)] = &examples[static_cast<size_t>(exampleIndex)];
+
+    auto runLoss = [&]() -> float {
+        device->epochLossSum.ensureSize(1, 1);
+        CudaOps::zeroInPlace(device->epochLossSum);
+        device->trainGradients.zeroInPlace();
+        device->accumulatePackedExamples(packPointers.data(), packBatchSize, device->trainGradients);
+        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "Muon train smoke loss sync");
+        return device->epochLossSum.download().at(0, 0) / static_cast<float>(packBatchSize);
+    };
+
+    const float lossBefore = runLoss();
+    const int stepCount = 8;
+    for (int step = 0; step < stepCount; ++step) {
+        device->trainGradients.zeroInPlace();
+        device->accumulatePackedExamples(packPointers.data(), packBatchSize, device->trainGradients);
+        device->applyGradients(device->trainGradients, 1.0f / static_cast<float>(packBatchSize));
+    }
+    CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "Muon train smoke step sync");
+    const float lossAfter = runLoss();
+
+    bool anyNonFinite = !std::isfinite(lossBefore) || !std::isfinite(lossAfter);
+    Matrix embed = device->tokenEmbeddingWeight.download();
+    for (float value : embed.data) {
+        if (!std::isfinite(value)) {
+            anyNonFinite = true;
+            break;
+        }
+    }
+
+    SmokeLog::result(
+        "Muon train",
+        "vocab=%d embed=%d seq=%d blocks=%d pack=%d steps=%d  loss0=%.4f lossN=%.4f  finite=%s muon=%s",
+        vocabularySize,
+        embeddingDim,
+        sequenceLength,
+        blockCount,
+        packBatchSize,
+        stepCount,
+        lossBefore,
+        lossAfter,
+        anyNonFinite ? "no" : "yes",
+        device->preferMuon ? "on" : "off");
+
+    CudaAmp::preferMixedPrecision = previousAmp;
+    CudaAmp::useLossScaling = previousLossScale;
     CudaAdam::preferInt8Moments = previousInt8;
 }
 
