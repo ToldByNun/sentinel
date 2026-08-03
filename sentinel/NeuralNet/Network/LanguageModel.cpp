@@ -483,8 +483,12 @@ void LanguageModel::setCudaPreferCpuAdamOffload(bool enabled) {
     CudaAdam::preferCpuOffload = enabled;
     CudaAdam::preferFp16GpuWeights = enabled;
     CudaAdam::preferHostGradients = enabled;
+    // Host-SGD is a 4B-probe path; never leave it sticky when toggling cpuAdam.
+    if (!enabled)
+        CudaAdam::preferHostSgd = false;
     if (enabled) {
         CudaAdam::preferInt8Moments = false;
+        CudaAdam::preferHostSgd = false;
         CudaAmp::preferMixedPrecision = true;
         // CUDA graphs are not yet reliable with FP16 working weights / host-grad offload.
         this->device->preferTrainGraph = false;
