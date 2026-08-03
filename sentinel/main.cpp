@@ -50,6 +50,7 @@ int main() {
     const bool runQkvCheck = false;
     const bool runPackBudgetBench = false;
     const bool runScaleProfile = false;
+    const bool runScale4BVramProbe = false;
     const bool runArrowCorpusSmoke = false;
     const bool runBpeBench = false;
     const bool runCkptParity = false;
@@ -1002,6 +1003,21 @@ int main() {
             CudaAdam::preferCpuOffload = previousCpu;
         } catch (const std::exception& ex) {
             SmokeLog::result("pack budget", "FAILED: %s", ex.what());
+            return 1;
+        }
+        return 0;
+    }
+
+    if (runScale4BVramProbe) {
+        SmokeLog::section("scale-4B");
+        if (!CudaMatmul::isAvailable()) {
+            SmokeLog::skip("scale-4B VRAM probe (no CUDA)");
+            return 1;
+        }
+        try {
+            CudaLanguageModel::runScale4BVramProbeDemo();
+        } catch (const std::exception& ex) {
+            SmokeLog::result("scale-4B VRAM probe", "FAILED: %s", ex.what());
             return 1;
         }
         return 0;
