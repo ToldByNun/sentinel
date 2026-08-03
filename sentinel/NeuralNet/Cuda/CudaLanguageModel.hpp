@@ -378,6 +378,9 @@ public:
 
     void ensureTrainWorkspaces();
 
+    /// <summary>free column-scaled train workspaces (not weights / grads / optimizer)</summary>
+    void releasePackedTrainWorkspaces();
+
     /// <summary>estimated device bytes of train workspaces that scale with one packed column</summary>
     size_t bytesPerPackedColumn() const;
 

@@ -308,8 +308,8 @@ int main() {
             model.setCudaPreferCpuAdamOffload(false);
             model.setCudaPreferInt8AdamMoments(true);
             model.setCudaPreferFlashAttention(true);
-            model.enableCudaTrain(); // preferMuon=true (Muon hidden 2D + Adam aux)
-            model.setCudaPreferMuon(true);
+            model.setCudaPreferMuon(true); // before enableCudaTrain so pack budget sees Muon pending bytes
+            model.enableCudaTrain();
             model.enableActivationCheckpointing(true);
             model.setCudaPreferTrainGraph(true);
             model.applyCudaVramPackBudget(0.55f);
