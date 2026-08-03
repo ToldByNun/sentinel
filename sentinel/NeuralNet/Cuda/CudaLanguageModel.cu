@@ -2,6 +2,7 @@
 
 #include "CudaAdam.hpp"
 #include "CudaAmp.hpp"
+#include "CudaFlashAttention.hpp"
 #include "CudaOps.hpp"
 #include "../Utils/SmokeLog.hpp"
 
@@ -2765,7 +2766,7 @@ void CudaLanguageModel::runTrainCpuAdamOffloadSmokeDemo(int vocabularySize, int 
         CudaLanguageModel fp16Device = CudaLanguageModel::createFrom(fp16Host);
         fp16Device.preferTrainGraph = false;
         for (CudaTransformerBlock& block : fp16Device.blocks)
-            block.attention.preferFlashAttention = false;
+            block.attention.preferFlashAttention = true;
         fp16Device.adam = CudaAdam(0.001f);
         fp16Device.ensureTrainState();
         for (int step = 0; step < 4; ++step) {
@@ -2774,6 +2775,8 @@ void CudaLanguageModel::runTrainCpuAdamOffloadSmokeDemo(int vocabularySize, int 
             fp16Device.applyGradients(fp16Device.trainGradients, 1.0f / static_cast<float>(packBatchSize));
         }
         CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "fp16 host-grads smoke synchronize");
+        if (!fp16Device.blocks.empty() && !fp16Device.blocks[0].attention.usedFlashAttention)
+            throw std::runtime_error("fp16 host-grads smoke expected flash attention");
         LanguageModel downloaded(vocabularySize, embeddingDim, sequenceLength, Adam(0.001f), blockCount, headCount);
         fp16Device.downloadTo(downloaded);
         float masterNorm = 0.0f;
@@ -2781,7 +2784,7 @@ void CudaLanguageModel::runTrainCpuAdamOffloadSmokeDemo(int vocabularySize, int 
             masterNorm += value * value;
         SmokeLog::result(
             "LanguageModel train FP16 GPU + host grads + CPU Adam",
-            "vocab=%d embed=%d steps=4  embedMasterL2=%.4f  finite=%s  download=ok",
+            "vocab=%d embed=%d steps=4  embedMasterL2=%.4f  finite=%s  download=ok flash=on",
             vocabularySize, embeddingDim, std::sqrt(masterNorm),
             std::isfinite(masterNorm) ? "yes" : "no");
         CudaAmp::clearMasterWeights();
@@ -3165,7 +3168,9 @@ void CudaLanguageModel::uploadFromFp16CpuOffload(LanguageModel& host) {
         block.attention.maximumPositionCount = hostBlock.attention.rotaryEmbedding.maximumPositionCount;
         block.attention.windowSize = hostBlock.attention.windowSize;
         block.attention.globalTokenCount = hostBlock.attention.globalTokenCount;
-        block.attention.preferFlashAttention = false;
+        block.attention.preferFlashAttention =
+            block.attention.headDimension > 0
+            && block.attention.headDimension <= CudaFlashAttention::maxHeadDimension;
         {
             Matrix hostCos(static_cast<size_t>(block.attention.maximumPositionCount), static_cast<size_t>(block.attention.pairCount), 0.0f);
             Matrix hostSin(static_cast<size_t>(block.attention.maximumPositionCount), static_cast<size_t>(block.attention.pairCount), 0.0f);
@@ -3730,7 +3735,7 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
     SmokeLog::section("scale-4B train-step");
     SmokeLog::result(
         "shape",
-        "vocab=%d embed=%d blocks=%d heads=%d pos=%d seq=%d  mode=fp16w+cpuAdam+hostGrads+ckpt=sel flash=off",
+        "vocab=%d embed=%d blocks=%d heads=%d pos=%d seq=%d  mode=fp16w+hostGrads+ckpt=sel flash=on opt=SGD",
         vocab, embed, blocks, heads, pos, seq);
 
     auto memSnapshot = [](const char* label) {
@@ -3787,8 +3792,12 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
         SmokeLog::note("streaming FP16 upload (moves host weights → masters)…");
         const auto uploadStart = std::chrono::steady_clock::now();
         device.uploadFromFp16CpuOffload(host);
+        for (CudaTransformerBlock& block : device.blocks) {
+            block.attention.preferFlashAttention = true;
+            block.attention.releaseDenseAttentionScratch();
+        }
         const double uploadSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - uploadStart).count();
-        SmokeLog::result("upload", "sec=%.1f", uploadSec);
+        SmokeLog::result("upload", "sec=%.1f  headDim=%d flashMax=%d", uploadSec, embed / heads, CudaFlashAttention::maxHeadDimension);
         memSnapshot("after upload");
 
         device.ensureTrainState();
@@ -3808,14 +3817,25 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
 
         SmokeLog::note("running 1 packed train step (accumulate + applyGradients)…");
         const size_t freeBeforeStep = memSnapshot("before step");
-        const auto stepStart = std::chrono::steady_clock::now();
         device.zeroAccumulatedGradients();
         device.epochLossSum.ensureSize(1, 1);
         CudaOps::zeroInPlace(device.epochLossSum);
+
+        const auto accumStart = std::chrono::steady_clock::now();
         device.accumulatePackedExamples(&packPtr, 1, device.trainGradients);
+        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "4B accumulate synchronize");
+        const double accumSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - accumStart).count();
+        if (device.blocks.empty() || !device.blocks[0].attention.usedFlashAttention)
+            throw std::runtime_error("4B train-step expected flash attention (usedFlashAttention=false)");
+        SmokeLog::result("accumulate", "sec=%.2f  tokens/s=%.0f  flash=on", accumSec, accumSec > 0.0 ? static_cast<double>(seq) / accumSec : 0.0);
+
+        const auto applyStart = std::chrono::steady_clock::now();
         device.applyGradients(device.trainGradients, 1.0f);
-        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "4B train-step synchronize");
-        const double stepSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - stepStart).count();
+        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "4B applyGradients synchronize");
+        const double applySec = std::chrono::duration<double>(std::chrono::steady_clock::now() - applyStart).count();
+        SmokeLog::result("applyGradients", "sec=%.2f  opt=SGD(host)", applySec);
+
+        const double stepSec = accumSec + applySec;
         size_t freeAfterStep = 0;
         size_t totalAfterStep = 0;
         CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeAfterStep, &totalAfterStep), "4B after-step memGetInfo");

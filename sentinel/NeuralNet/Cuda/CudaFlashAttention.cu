@@ -889,10 +889,15 @@ void validateMultiHeadShape(const CudaMatrix& query, const CudaMatrix& key, cons
         throw std::invalid_argument(std::string(operationName) + " sequenceLength mismatch");
 }
 
-size_t forwardSharedBytes(int headDim, int tileBr, int tileBc) {
+size_t forwardSharedBytesHalf(int headDim, int tileBr, int tileBc) {
     const size_t halfElements = static_cast<size_t>((tileBr + 2 * tileBc) * headDim);
     const size_t floatElements = static_cast<size_t>(tileBr * tileBc);
     return halfElements * sizeof(__half) + floatElements * sizeof(float);
+}
+
+size_t forwardSharedBytesFloat(int headDim, int tileBr, int tileBc) {
+    // CudaFlashAttentionForwardEntry keeps Q/K/V tiles in float shared memory.
+    return static_cast<size_t>((tileBr + 2 * tileBc) * headDim + tileBr * tileBc) * sizeof(float);
 }
 
 size_t backwardKeySharedBytes(int headDim, int tileBr, int tileBc) {
@@ -959,32 +964,45 @@ void CudaFlashAttention::forwardMultiHead(const CudaMatrix& query, const CudaMat
     const int queryTileCount = (columnCount + tileBr - 1) / tileBr;
     const dim3 grid(static_cast<unsigned>(queryTileCount), static_cast<unsigned>(headCount), static_cast<unsigned>(packCount));
     const int threadCount = chooseThreadCount(tileBr, tileBc);
-    const size_t sharedBytes = forwardSharedBytes(headDimension, tileBr, tileBc);
     const int causalFlag = causal ? 1 : 0;
 
     if (headDimension == 16 && tileBr == 64 && tileBc == 64) {
+        const size_t sharedBytes = forwardSharedBytesHalf(headDimension, tileBr, tileBc);
         ensureDynamicShared(CudaFlashAttentionForwardFixedEntry<16, 64, 64>, sharedBytes);
         CudaFlashAttentionForwardFixedEntry<16, 64, 64><<<grid, threadCount, sharedBytes, CudaMatmul::activeStream()>>>(
             query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, out.buffer.deviceData, logSumExp.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
     } else if (headDimension == 16 && tileBr == 32 && tileBc == 32) {
+        const size_t sharedBytes = forwardSharedBytesHalf(headDimension, tileBr, tileBc);
         ensureDynamicShared(CudaFlashAttentionForwardFixedEntry<16, 32, 32>, sharedBytes);
         CudaFlashAttentionForwardFixedEntry<16, 32, 32><<<grid, threadCount, sharedBytes, CudaMatmul::activeStream()>>>(
             query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, out.buffer.deviceData, logSumExp.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
     } else if (headDimension == 64 && tileBr == 64 && tileBc == 64) {
+        const size_t sharedBytes = forwardSharedBytesHalf(headDimension, tileBr, tileBc);
         ensureDynamicShared(CudaFlashAttentionForwardFixedEntry<64, 64, 64>, sharedBytes);
         CudaFlashAttentionForwardFixedEntry<64, 64, 64><<<grid, threadCount, sharedBytes, CudaMatmul::activeStream()>>>(
             query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, out.buffer.deviceData, logSumExp.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
     } else if (headDimension == 64 && tileBr == 32 && tileBc == 32) {
+        const size_t sharedBytes = forwardSharedBytesHalf(headDimension, tileBr, tileBc);
         ensureDynamicShared(CudaFlashAttentionForwardFixedEntry<64, 32, 32>, sharedBytes);
         CudaFlashAttentionForwardFixedEntry<64, 32, 32><<<grid, threadCount, sharedBytes, CudaMatmul::activeStream()>>>(
             query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, out.buffer.deviceData, logSumExp.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
     } else if (headDimension == 64 && tileBr == 16 && tileBc == 16) {
+        const size_t sharedBytes = forwardSharedBytesHalf(headDimension, tileBr, tileBc);
         ensureDynamicShared(CudaFlashAttentionForwardFixedEntry<64, 16, 16>, sharedBytes);
         CudaFlashAttentionForwardFixedEntry<64, 16, 16><<<grid, threadCount, sharedBytes, CudaMatmul::activeStream()>>>(
             query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, out.buffer.deviceData, logSumExp.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
     } else {
+        // Shrink float shared tiles until they fit device opt-in limit.
+        while (tileBr > 8 && forwardSharedBytesFloat(headDimension, tileBr, tileBc) > deviceMaxDynamicSharedBytes()) {
+            tileBr /= 2;
+            tileBc /= 2;
+        }
+        const int fallbackTileCount = (columnCount + tileBr - 1) / tileBr;
+        const dim3 fallbackGrid(static_cast<unsigned>(fallbackTileCount), static_cast<unsigned>(headCount), static_cast<unsigned>(packCount));
+        const int fallbackThreads = chooseThreadCount(tileBr, tileBc);
+        const size_t sharedBytes = forwardSharedBytesFloat(headDimension, tileBr, tileBc);
         ensureDynamicShared(CudaFlashAttentionForwardEntry, sharedBytes);
-        CudaFlashAttentionForwardEntry<<<grid, threadCount, sharedBytes, CudaMatmul::activeStream()>>>(
+        CudaFlashAttentionForwardEntry<<<fallbackGrid, fallbackThreads, sharedBytes, CudaMatmul::activeStream()>>>(
             query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, out.buffer.deviceData, logSumExp.buffer.deviceData, headDimension, strideColumns, columnStart, columnCount, scale, causalFlag, tileBr, tileBc);
     }
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaFlashAttentionForwardEntry launch");
