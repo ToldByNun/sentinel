@@ -17,6 +17,7 @@ public:
     float maxScale;
     int growthInterval;
     int successfulSteps;
+    int overflowCount;
 
     CudaLossScaler();
 

@@ -79,9 +79,10 @@ void CudaAmp::resetLossScaler() {
 }
 
 CudaLossScaler::CudaLossScaler()
-    : scale(64.0f), growthFactor(2.0f), backoffFactor(0.5f), minScale(1.0f), maxScale(16777216.0f), growthInterval(2000), successfulSteps(0) {}
+    : scale(1024.0f), growthFactor(2.0f), backoffFactor(0.5f), minScale(1.0f), maxScale(16777216.0f), growthInterval(2000), successfulSteps(0), overflowCount(0) {}
 
 void CudaLossScaler::updateOnOverflow() {
+    ++this->overflowCount;
     this->successfulSteps = 0;
     this->scale *= this->backoffFactor;
     if (this->scale < this->minScale)
