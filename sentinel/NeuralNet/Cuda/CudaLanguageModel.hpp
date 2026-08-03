@@ -368,6 +368,10 @@ public:
 
     /// <summary>non-default stream for optional CUDA Graph packed microsteps</summary>
     cudaStream_t trainStream;
+    /// <summary>non-blocking stream for deferred host-grad D2H (preferHostSgd pipeline)</summary>
+    cudaStream_t hostGradCopyStream;
+    cudaEvent_t hostGradComputeEvent;
+    cudaEvent_t hostGradD2hEvent;
     cudaGraph_t trainGraph;
     cudaGraphExec_t trainGraphExec;
     int trainGraphSegmentLength;
@@ -564,6 +568,9 @@ public:
 
     /// <summary>create non-blocking trainStream once</summary>
     void ensureTrainStream();
+
+    /// <summary>create host-grad copy stream + events for deferred D2H/SGD pipeline</summary>
+    void ensureHostGradCopyPipeline();
 
 
 

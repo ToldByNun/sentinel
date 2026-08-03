@@ -118,6 +118,10 @@ void CudaTransformerBlock::forwardSelectiveTrain(const CudaMatrix& input, CudaMa
 }
 
 void CudaTransformerBlock::releaseTrainActivationScratch() {
+    this->releaseTrainActivationScratch(false);
+}
+
+void CudaTransformerBlock::releaseTrainActivationScratch(bool keepDeferredHostWeightGrads) {
     this->attention.releaseActivationScratch();
     this->attention.qkvWeightGradient.free();
     this->feedForward.releaseActivationScratch();
@@ -136,17 +140,19 @@ void CudaTransformerBlock::releaseTrainActivationScratch() {
     this->attentionInputGradient.free();
     this->inputFromAttention.free();
 
-    this->feedForwardGateWeightGradient.free();
+    if (!keepDeferredHostWeightGrads) {
+        this->feedForwardGateWeightGradient.free();
+        this->feedForwardUpWeightGradient.free();
+        this->feedForwardDownWeightGradient.free();
+        this->queryWeightGradient.free();
+        this->keyWeightGradient.free();
+        this->valueWeightGradient.free();
+        this->attentionOutputWeightGradient.free();
+    }
     this->feedForwardGateBiasGradient.free();
-    this->feedForwardUpWeightGradient.free();
     this->feedForwardUpBiasGradient.free();
-    this->feedForwardDownWeightGradient.free();
     this->feedForwardDownBiasGradient.free();
     this->feedForwardNormGammaGradient.free();
-    this->queryWeightGradient.free();
-    this->keyWeightGradient.free();
-    this->valueWeightGradient.free();
-    this->attentionOutputWeightGradient.free();
     this->attentionNormGammaGradient.free();
 }
 
@@ -181,9 +187,17 @@ void CudaTransformerBlock::decode(const CudaMatrix& input, CudaKvCache& cache, C
     CudaOps::addInto(this->afterAttention, this->feedForwardOutput, out);
 }
 
-void CudaTransformerBlock::backward(const CudaMatrix& outputGradient, CudaMatrix& inputGradient, CudaTransformerBlockGradients& gradients, CudaTransformerBlockHostWeightGrads* hostWeightGrads) {
+void CudaTransformerBlock::backward(
+    const CudaMatrix& outputGradient,
+    CudaMatrix& inputGradient,
+    CudaTransformerBlockGradients& gradients,
+    CudaTransformerBlockHostWeightGrads* hostWeightGrads,
+    bool deferHostWeightDownload
+) {
     if (outputGradient.empty()) throw std::invalid_argument("CudaTransformerBlock::backward empty outputGradient");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaTransformerBlock::backward no CUDA device");
+    if (deferHostWeightDownload && hostWeightGrads == nullptr)
+        throw std::invalid_argument("CudaTransformerBlock::backward deferHostWeightDownload requires hostWeightGrads");
 
     this->feedForward.backward(outputGradient, this->feedForwardInputGradient, this->feedForwardGateWeightGradient, this->feedForwardGateBiasGradient, this->feedForwardUpWeightGradient, this->feedForwardUpBiasGradient, this->feedForwardDownWeightGradient, this->feedForwardDownBiasGradient);
     // afterAttentionGrad = outputGrad + d(FFN-RMSNorm)/d(afterAttention)
@@ -210,7 +224,11 @@ void CudaTransformerBlock::backward(const CudaMatrix& outputGradient, CudaMatrix
         }
     };
 
-    if (hostWeightGrads != nullptr) {
+    if (hostWeightGrads != nullptr && deferHostWeightDownload) {
+        // Large weight grads stay on device for async D2H; fused QKV/gateUp copies already materialized.
+        this->attention.qkvWeightGradient.free();
+        this->feedForward.gateUpWeightGradient.free();
+    } else if (hostWeightGrads != nullptr) {
         accumulateWeight(hostWeightGrads->feedForwardDownWeight, this->feedForwardDownWeightGradient, gradients.feedForwardDownWeight);
         accumulateWeight(hostWeightGrads->feedForwardUpWeight, this->feedForwardUpWeightGradient, gradients.feedForwardUpWeight);
         accumulateWeight(hostWeightGrads->feedForwardGateWeight, this->feedForwardGateWeightGradient, gradients.feedForwardGateWeight);
@@ -234,8 +252,10 @@ void CudaTransformerBlock::backward(const CudaMatrix& outputGradient, CudaMatrix
     CudaOps::addInPlace(gradients.attentionNormGamma, this->attentionNormGammaGradient);
 
     if (hostWeightGrads != nullptr) {
-        this->attention.qkvWeightGradient.free();
-        this->feedForward.gateUpWeightGradient.free();
+        if (!deferHostWeightDownload) {
+            this->attention.qkvWeightGradient.free();
+            this->feedForward.gateUpWeightGradient.free();
+        }
         this->feedForwardDownBiasGradient.free();
         this->feedForwardUpBiasGradient.free();
         this->feedForwardGateBiasGradient.free();
@@ -243,7 +263,46 @@ void CudaTransformerBlock::backward(const CudaMatrix& outputGradient, CudaMatrix
         this->attentionNormGammaGradient.free();
     }
 
-    this->releaseTrainActivationScratch();
+    this->releaseTrainActivationScratch(deferHostWeightDownload);
+}
+
+void CudaTransformerBlock::enqueueDeferredHostWeightGradDownloads(
+    CudaTransformerBlockHostWeightGrads& hostWeightGrads,
+    cudaStream_t copyStream,
+    cudaEvent_t gradsReadyOnCompute
+) {
+    if (copyStream == nullptr) throw std::invalid_argument("enqueueDeferredHostWeightGradDownloads null copyStream");
+    if (gradsReadyOnCompute == nullptr) throw std::invalid_argument("enqueueDeferredHostWeightGradDownloads null event");
+    if (hostWeightGrads.queryWeight == nullptr || hostWeightGrads.keyWeight == nullptr || hostWeightGrads.valueWeight == nullptr
+        || hostWeightGrads.attentionOutputWeight == nullptr || hostWeightGrads.feedForwardGateWeight == nullptr
+        || hostWeightGrads.feedForwardUpWeight == nullptr || hostWeightGrads.feedForwardDownWeight == nullptr)
+        throw std::invalid_argument("enqueueDeferredHostWeightGradDownloads missing host grads");
+
+    CudaMatmul::throwIfCudaFailed(
+        cudaStreamWaitEvent(copyStream, gradsReadyOnCompute, 0),
+        "enqueueDeferredHostWeightGradDownloads wait compute");
+
+    auto enqueueOne = [&](Matrix* host, CudaMatrix& device) {
+        if (device.empty()) throw std::logic_error("enqueueDeferredHostWeightGradDownloads empty device grad");
+        CudaOps::downloadIntoHostAsync(*host, device, copyStream);
+    };
+    enqueueOne(hostWeightGrads.feedForwardDownWeight, this->feedForwardDownWeightGradient);
+    enqueueOne(hostWeightGrads.feedForwardUpWeight, this->feedForwardUpWeightGradient);
+    enqueueOne(hostWeightGrads.feedForwardGateWeight, this->feedForwardGateWeightGradient);
+    enqueueOne(hostWeightGrads.attentionOutputWeight, this->attentionOutputWeightGradient);
+    enqueueOne(hostWeightGrads.valueWeight, this->valueWeightGradient);
+    enqueueOne(hostWeightGrads.keyWeight, this->keyWeightGradient);
+    enqueueOne(hostWeightGrads.queryWeight, this->queryWeightGradient);
+}
+
+void CudaTransformerBlock::releaseDeferredHostWeightGradDevice() {
+    this->feedForwardDownWeightGradient.free();
+    this->feedForwardUpWeightGradient.free();
+    this->feedForwardGateWeightGradient.free();
+    this->attentionOutputWeightGradient.free();
+    this->valueWeightGradient.free();
+    this->keyWeightGradient.free();
+    this->queryWeightGradient.free();
 }
 
 void CudaTransformerBlock::backwardSelective(
@@ -252,11 +311,14 @@ void CudaTransformerBlock::backwardSelective(
     CudaTransformerBlockGradients& gradients,
     const CudaMatrix& blockInput,
     int segmentLength,
-    CudaTransformerBlockHostWeightGrads* hostWeightGrads
+    CudaTransformerBlockHostWeightGrads* hostWeightGrads,
+    bool deferHostWeightDownload
 ) {
     if (outputGradient.empty()) throw std::invalid_argument("CudaTransformerBlock::backwardSelective empty outputGradient");
     if (blockInput.empty()) throw std::invalid_argument("CudaTransformerBlock::backwardSelective empty blockInput");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaTransformerBlock::backwardSelective no CUDA device");
+    if (deferHostWeightDownload && hostWeightGrads == nullptr)
+        throw std::invalid_argument("CudaTransformerBlock::backwardSelective deferHostWeightDownload requires hostWeightGrads");
 
     // FFN path from kept activations (no SwiGLU recompute).
     this->feedForward.backward(outputGradient, this->feedForwardInputGradient, this->feedForwardGateWeightGradient, this->feedForwardGateBiasGradient, this->feedForwardUpWeightGradient, this->feedForwardUpBiasGradient, this->feedForwardDownWeightGradient, this->feedForwardDownBiasGradient);
@@ -284,7 +346,10 @@ void CudaTransformerBlock::backwardSelective(
         }
     };
 
-    if (hostWeightGrads != nullptr) {
+    if (hostWeightGrads != nullptr && deferHostWeightDownload) {
+        this->attention.qkvWeightGradient.free();
+        this->feedForward.gateUpWeightGradient.free();
+    } else if (hostWeightGrads != nullptr) {
         accumulateWeight(hostWeightGrads->feedForwardDownWeight, this->feedForwardDownWeightGradient, gradients.feedForwardDownWeight);
         accumulateWeight(hostWeightGrads->feedForwardUpWeight, this->feedForwardUpWeightGradient, gradients.feedForwardUpWeight);
         accumulateWeight(hostWeightGrads->feedForwardGateWeight, this->feedForwardGateWeightGradient, gradients.feedForwardGateWeight);
@@ -308,8 +373,10 @@ void CudaTransformerBlock::backwardSelective(
     CudaOps::addInPlace(gradients.attentionNormGamma, this->attentionNormGammaGradient);
 
     if (hostWeightGrads != nullptr) {
-        this->attention.qkvWeightGradient.free();
-        this->feedForward.gateUpWeightGradient.free();
+        if (!deferHostWeightDownload) {
+            this->attention.qkvWeightGradient.free();
+            this->feedForward.gateUpWeightGradient.free();
+        }
         this->feedForwardDownBiasGradient.free();
         this->feedForwardUpBiasGradient.free();
         this->feedForwardGateBiasGradient.free();
@@ -317,8 +384,9 @@ void CudaTransformerBlock::backwardSelective(
         this->attentionNormGammaGradient.free();
     }
 
-    this->releaseTrainActivationScratch();
+    this->releaseTrainActivationScratch(deferHostWeightDownload);
 }
+
 void CudaTransformerBlock::runSmokeDemo(int embeddingDim, int headCount, int sequenceLength, int maximumPositionCount) {
     if (!CudaMatmul::isAvailable()) {
         SmokeLog::skip("TransformerBlock fwd");

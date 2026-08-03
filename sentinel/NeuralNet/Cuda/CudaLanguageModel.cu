@@ -40,6 +40,9 @@ CudaLanguageModel::CudaLanguageModel()
       muon(0.001f),
       trainStateReady(false),
       trainStream(nullptr),
+      hostGradCopyStream(nullptr),
+      hostGradComputeEvent(nullptr),
+      hostGradD2hEvent(nullptr),
       trainGraph(nullptr),
       trainGraphExec(nullptr),
       trainGraphSegmentLength(0),
@@ -100,6 +103,21 @@ void CudaLanguageModel::ensureTrainStream() {
     CudaMatmul::throwIfCudaFailed(cudaStreamCreateWithFlags(&this->trainStream, cudaStreamNonBlocking), "cudaStreamCreate trainStream");
 }
 
+void CudaLanguageModel::ensureHostGradCopyPipeline() {
+    if (this->hostGradCopyStream == nullptr)
+        CudaMatmul::throwIfCudaFailed(
+            cudaStreamCreateWithFlags(&this->hostGradCopyStream, cudaStreamNonBlocking),
+            "cudaStreamCreate hostGradCopyStream");
+    if (this->hostGradComputeEvent == nullptr)
+        CudaMatmul::throwIfCudaFailed(
+            cudaEventCreateWithFlags(&this->hostGradComputeEvent, cudaEventDisableTiming),
+            "cudaEventCreate hostGradComputeEvent");
+    if (this->hostGradD2hEvent == nullptr)
+        CudaMatmul::throwIfCudaFailed(
+            cudaEventCreateWithFlags(&this->hostGradD2hEvent, cudaEventDisableTiming),
+            "cudaEventCreate hostGradD2hEvent");
+}
+
 void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLength, int exampleCount, CudaLanguageModelGradients& gradients) {
     auto memTrace = [this](const char* label) {
         if (!this->preferTrainMemTrace) return;
@@ -115,9 +133,12 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
     };
 
     const bool phaseTrace = this->preferTrainPhaseTrace;
+    const bool hostLarge = CudaAdam::preferHostGradients;
+    const bool pipelineHostSgd = hostLarge && CudaAdam::preferHostSgd;
     if (phaseTrace) {
         this->trainPhaseTimers.reset();
-        CudaOps::downloadAddIntoHostSecondsSink = &this->trainPhaseTimers.d2hSec;
+        // Pipeline times D2H wait in flushPendingHostSgd; avoid double-count via download sink.
+        CudaOps::downloadAddIntoHostSecondsSink = pipelineHostSgd ? nullptr : &this->trainPhaseTimers.d2hSec;
     }
 
     {
@@ -145,14 +166,41 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
         }
     }
 
-    const bool hostLarge = CudaAdam::preferHostGradients;
     if (hostLarge && this->hostBlockAdamStates.size() != this->blocks.size())
         this->hostBlockAdamStates.resize(this->blocks.size());
+
+    if (pipelineHostSgd)
+        this->ensureHostGradCopyPipeline();
 
     const int midBlock = static_cast<int>(this->blocks.size()) / 2;
     const double d2hBeforeLoop = this->trainPhaseTimers.d2hSec;
     const double sgdBeforeLoop = this->trainPhaseTimers.sgdSec;
     const auto bwdLoopStart = std::chrono::steady_clock::now();
+
+    int pendingHostSgdBlock = -1;
+    auto flushPendingHostSgd = [&]() {
+        if (pendingHostSgdBlock < 0) return;
+        const auto d2hWaitStart = std::chrono::steady_clock::now();
+        CudaMatmul::throwIfCudaFailed(
+            cudaEventSynchronize(this->hostGradD2hEvent),
+            "runPackedTrainDevice hostGrad D2H sync");
+        if (phaseTrace)
+            this->trainPhaseTimers.d2hSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - d2hWaitStart).count();
+
+        CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[static_cast<size_t>(pendingHostSgdBlock)];
+        CudaOps::unregisterHostMatrix(hosts.queryWeightGrad);
+        CudaOps::unregisterHostMatrix(hosts.keyWeightGrad);
+        CudaOps::unregisterHostMatrix(hosts.valueWeightGrad);
+        CudaOps::unregisterHostMatrix(hosts.attentionOutputWeightGrad);
+        CudaOps::unregisterHostMatrix(hosts.feedForwardGateWeightGrad);
+        CudaOps::unregisterHostMatrix(hosts.feedForwardUpWeightGrad);
+        CudaOps::unregisterHostMatrix(hosts.feedForwardDownWeightGrad);
+
+        this->blocks[static_cast<size_t>(pendingHostSgdBlock)].releaseDeferredHostWeightGradDevice();
+        this->applyHostSgdForBlockAndFree(static_cast<size_t>(pendingHostSgdBlock), 1.0f);
+        pendingHostSgdBlock = -1;
+    };
+
     for (int blockIndex = static_cast<int>(this->blocks.size()) - 1; blockIndex >= 0; --blockIndex) {
         CudaTransformerBlock& block = this->blocks[static_cast<size_t>(blockIndex)];
         CudaTransformerBlockHostWeightGrads hostGrads{};
@@ -170,6 +218,7 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
             hostGradsPtr = &hostGrads;
         }
 
+        const bool deferDownload = pipelineHostSgd && hostGradsPtr != nullptr;
         if (this->activationCheckpointMode == ActivationCheckpointMode::Selective) {
             const CudaMatrix* blockInput = nullptr;
             if (this->useHalfActivationCheckpoints()) {
@@ -187,7 +236,8 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
                 gradients.blocks[static_cast<size_t>(blockIndex)],
                 *blockInput,
                 segmentLength,
-                hostGradsPtr);
+                hostGradsPtr,
+                deferDownload);
         } else if (this->activationCheckpointMode == ActivationCheckpointMode::Full) {
             if (this->useHalfActivationCheckpoints()) {
                 CudaAmp::castToFloat(
@@ -204,13 +254,37 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
                     this->normalized,
                     segmentLength);
             }
-            block.backward(this->hiddenGradient, this->blockInputGradientScratch, gradients.blocks[static_cast<size_t>(blockIndex)], hostGradsPtr);
+            block.backward(
+                this->hiddenGradient,
+                this->blockInputGradientScratch,
+                gradients.blocks[static_cast<size_t>(blockIndex)],
+                hostGradsPtr,
+                deferDownload);
         } else {
-            block.backward(this->hiddenGradient, this->blockInputGradientScratch, gradients.blocks[static_cast<size_t>(blockIndex)], hostGradsPtr);
+            block.backward(
+                this->hiddenGradient,
+                this->blockInputGradientScratch,
+                gradients.blocks[static_cast<size_t>(blockIndex)],
+                hostGradsPtr,
+                deferDownload);
         }
 
-        if (hostLarge && CudaAdam::preferHostSgd)
+        if (deferDownload) {
+            CudaMatmul::throwIfCudaFailed(
+                cudaEventRecord(this->hostGradComputeEvent, CudaMatmul::activeStream()),
+                "runPackedTrainDevice record hostGradComputeEvent");
+            block.enqueueDeferredHostWeightGradDownloads(
+                hostGrads,
+                this->hostGradCopyStream,
+                this->hostGradComputeEvent);
+            CudaMatmul::throwIfCudaFailed(
+                cudaEventRecord(this->hostGradD2hEvent, this->hostGradCopyStream),
+                "runPackedTrainDevice record hostGradD2hEvent");
+            flushPendingHostSgd(); // previous block: wait D2H + SGD while this D2H (+ next GPU) run
+            pendingHostSgdBlock = blockIndex;
+        } else if (hostLarge && CudaAdam::preferHostSgd) {
             this->applyHostSgdForBlockAndFree(static_cast<size_t>(blockIndex), 1.0f);
+        }
 
         std::swap(this->hiddenGradient, this->blockInputGradientScratch);
 
@@ -219,6 +293,8 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
             memTrace("mid backward");
         }
     }
+
+    flushPendingHostSgd();
 
     {
         CudaOps::embeddingScatterAddInto(gradients.tokenEmbedding, this->tokenIdsBuffer, tokenCount, this->hiddenGradient);
