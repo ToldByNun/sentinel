@@ -376,13 +376,15 @@ public:
 
 
     /// <summary>upload all host LM parameters once</summary>
-
     void uploadFrom(const LanguageModel& host);
 
-
+    /// <summary>
+    /// Stream into FP16 working weights + host Adam masters (moves host matrices).
+    /// Avoids full FP32 GPU residency; requires preferCpuOffload + preferFp16GpuWeights + AMP.
+    /// </summary>
+    void uploadFromFp16CpuOffload(LanguageModel& host);
 
     /// <summary>create device LM from host LM</summary>
-
     static CudaLanguageModel createFrom(const LanguageModel& host);
 
 
@@ -611,6 +613,12 @@ public:
     /// ~4B-shape VRAM probe: log detailed byte buckets for current train layouts, then cudaMalloc fit check
     /// </summary>
     static void runScale4BVramProbeDemo();
+
+    /// <summary>
+    /// ~4B real alloc + one packed train step (fp16w + cpuAdam + hostGrads + selective ckpt).
+    /// Streams weights to avoid peak FP32 residency; reports VRAM before/after step.
+    /// </summary>
+    static void runScale4BTrainStepProbeDemo();
 
     /// <summary>
     /// consumer VRAM proof: larger LM (d&gt;=256), auto pack budget, loss scale, timed packed epoch

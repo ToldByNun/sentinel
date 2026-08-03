@@ -120,6 +120,9 @@ public:
     /// <summary>set shape and ensure device capacity</summary>
     void ensureSize(size_t rowCount, size_t columnCount);
 
+    /// <summary>set rows/cols without allocating device storage</summary>
+    void ensureShape(size_t rowCount, size_t columnCount);
+
     /// <summary>release device memory and clear shape</summary>
     void free();
 
