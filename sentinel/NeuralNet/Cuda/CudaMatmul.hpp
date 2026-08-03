@@ -96,6 +96,8 @@ public:
     size_t rows;
     size_t cols;
     CudaDeviceBuffer buffer;
+    /// <summary>CudaAmp FP16 working-weight slot; -1 = not bound (FP32 device storage)</summary>
+    int ampWeightSlot;
 
     CudaMatrix();
     CudaMatrix(const CudaMatrix&) = delete;
@@ -105,6 +107,9 @@ public:
 
     /// <summary>true if rows or cols is zero</summary>
     bool empty() const;
+
+    /// <summary>true when FP32 device buffer is allocated</summary>
+    bool hasDeviceStorage() const;
 
     /// <summary>rows * cols</summary>
     size_t elementCount() const;
@@ -117,6 +122,9 @@ public:
 
     /// <summary>release device memory and clear shape</summary>
     void free();
+
+    /// <summary>free FP32 device buffer but keep rows/cols (FP16 working-weight mode)</summary>
+    void releaseDeviceKeepShape();
 
     /// <summary>copy host matrix to device growing capacity if needed</summary>
     void upload(const Matrix& host);

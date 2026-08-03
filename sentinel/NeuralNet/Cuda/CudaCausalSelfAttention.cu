@@ -110,6 +110,8 @@ void CudaCausalSelfAttention::syncFusedQkvWeight() {
         throw std::invalid_argument("CudaCausalSelfAttention::syncFusedQkvWeight embed mismatch");
     if (this->queryWeight.rows != this->keyWeight.rows || this->queryWeight.rows != this->valueWeight.rows)
         throw std::invalid_argument("CudaCausalSelfAttention::syncFusedQkvWeight projection rows mismatch");
+    if (this->qkvWeight.ampWeightSlot >= 0)
+        return; // FP16 working fused mirror owned by LM host-master rebuild
 
     this->qkvWeight.ensureSize(this->queryWeight.rows * 3ull, this->queryWeight.cols);
     const size_t sliceBytes = this->queryWeight.byteCount();

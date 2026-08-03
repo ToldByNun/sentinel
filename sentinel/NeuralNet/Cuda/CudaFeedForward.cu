@@ -35,6 +35,14 @@ void CudaFeedForward::syncFusedGateUpWeight() {
         throw std::invalid_argument("CudaFeedForward::syncFusedGateUpWeight embed mismatch");
     if (this->gateWeight.rows != this->upWeight.rows)
         throw std::invalid_argument("CudaFeedForward::syncFusedGateUpWeight hidden mismatch");
+    if (this->gateUpWeight.ampWeightSlot >= 0) {
+        if (!this->gateBias.empty() && !this->upBias.empty()) {
+            this->gateUpBias.ensureSize(this->gateBias.rows + this->upBias.rows, 1);
+            CudaMatmul::memcpyDevice(this->gateUpBias.buffer.deviceData, this->gateBias.buffer.deviceData, this->gateBias.byteCount());
+            CudaMatmul::memcpyDevice(this->gateUpBias.buffer.deviceData + this->gateBias.elementCount(), this->upBias.buffer.deviceData, this->upBias.byteCount());
+        }
+        return;
+    }
 
     this->gateUpWeight.ensureSize(this->gateWeight.rows + this->upWeight.rows, this->gateWeight.cols);
     const size_t gateBytes = this->gateWeight.byteCount();
@@ -66,17 +74,19 @@ void CudaFeedForward::forward(const CudaMatrix& input, CudaMatrix& out) {
 
     // Prefer GEMM+bias epilogue; on fallback keep bias inside SwiGLU (one kernel, no extra launch)
     this->gateUpPreActivation.ensureSize(this->gateUpWeight.rows, input.cols);
-    const bool gateUpEpilogue =
-        CudaAmp::launchCublasLtMatmulFp16(
-            this->gateUpWeight.buffer.deviceData, input.buffer.deviceData, this->gateUpPreActivation.buffer.deviceData,
-            static_cast<int>(this->gateUpWeight.rows), static_cast<int>(input.cols), static_cast<int>(this->gateUpWeight.cols),
-            false, false, nullptr, this->gateUpBias.buffer.deviceData)
-        || CudaMatmul::launchCublasLtMatmul(
-            this->gateUpWeight.buffer.deviceData, input.buffer.deviceData, this->gateUpPreActivation.buffer.deviceData,
-            static_cast<int>(this->gateUpWeight.rows), static_cast<int>(input.cols), static_cast<int>(this->gateUpWeight.cols),
-            false, false, nullptr, this->gateUpBias.buffer.deviceData);
-
-    if (gateUpEpilogue) {
+    if (this->gateUpWeight.ampWeightSlot >= 0) {
+        if (this->gateUpBias.empty())
+            CudaMatrix::multiplyInto(this->gateUpWeight, input, this->gateUpPreActivation);
+        else
+            CudaMatrix::multiplyBiasInto(this->gateUpWeight, input, this->gateUpBias, this->gateUpPreActivation);
+        CudaOps::swigluFromStacked(
+            this->gateUpPreActivation,
+            this->gatePreActivation,
+            this->up,
+            this->gateActivated,
+            this->hidden);
+    } else if (this->gateUpBias.empty()) {
+        CudaMatrix::multiplyInto(this->gateUpWeight, input, this->gateUpPreActivation);
         CudaOps::swigluFromStacked(
             this->gateUpPreActivation,
             this->gatePreActivation,
@@ -84,15 +94,34 @@ void CudaFeedForward::forward(const CudaMatrix& input, CudaMatrix& out) {
             this->gateActivated,
             this->hidden);
     } else {
-        CudaMatrix::multiplyInto(this->gateUpWeight, input, this->gateUpPreActivation);
-        CudaOps::swigluFromStackedPreBias(
-            this->gateUpPreActivation,
-            this->gateBias,
-            this->upBias,
-            this->gatePreActivation,
-            this->up,
-            this->gateActivated,
-            this->hidden);
+        const bool gateUpEpilogue =
+            CudaAmp::launchCublasLtMatmulFp16(
+                this->gateUpWeight.buffer.deviceData, input.buffer.deviceData, this->gateUpPreActivation.buffer.deviceData,
+                static_cast<int>(this->gateUpWeight.rows), static_cast<int>(input.cols), static_cast<int>(this->gateUpWeight.cols),
+                false, false, nullptr, this->gateUpBias.buffer.deviceData)
+            || CudaMatmul::launchCublasLtMatmul(
+                this->gateUpWeight.buffer.deviceData, input.buffer.deviceData, this->gateUpPreActivation.buffer.deviceData,
+                static_cast<int>(this->gateUpWeight.rows), static_cast<int>(input.cols), static_cast<int>(this->gateUpWeight.cols),
+                false, false, nullptr, this->gateUpBias.buffer.deviceData);
+
+        if (gateUpEpilogue) {
+            CudaOps::swigluFromStacked(
+                this->gateUpPreActivation,
+                this->gatePreActivation,
+                this->up,
+                this->gateActivated,
+                this->hidden);
+        } else {
+            CudaMatrix::multiplyInto(this->gateUpWeight, input, this->gateUpPreActivation);
+            CudaOps::swigluFromStackedPreBias(
+                this->gateUpPreActivation,
+                this->gateBias,
+                this->upBias,
+                this->gatePreActivation,
+                this->up,
+                this->gateActivated,
+                this->hidden);
+        }
     }
 
     CudaMatrix::multiplyBiasInto(this->downWeight, this->hidden, this->downBias, out);

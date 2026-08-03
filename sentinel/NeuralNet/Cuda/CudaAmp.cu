@@ -16,6 +16,8 @@ bool CudaAmp::useLossScaling = false;
 CudaLossScaler CudaAmp::lossScaler = CudaLossScaler();
 CudaDeviceBuffer CudaAmp::halfScratchLeft = CudaDeviceBuffer();
 CudaDeviceBuffer CudaAmp::halfScratchRight = CudaDeviceBuffer();
+CudaDeviceBuffer CudaAmp::floatScratchLeft = CudaDeviceBuffer();
+CudaDeviceBuffer CudaAmp::floatScratchRight = CudaDeviceBuffer();
 CudaDeviceBuffer CudaAmp::nonFiniteFlag = CudaDeviceBuffer();
 CudaAmp::MasterWeightHalf CudaAmp::masterWeights[CudaAmp::maxMasterWeights];
 int CudaAmp::masterWeightCount = 0;
@@ -31,6 +33,7 @@ void CudaAmp::registerMasterWeight(const float* deviceData, size_t elementCount)
         if (entry.deviceData == deviceData) {
             entry.elementCount = elementCount;
             entry.valid = false;
+            entry.fp16Working = false;
             return;
         }
     }
@@ -39,11 +42,75 @@ void CudaAmp::registerMasterWeight(const float* deviceData, size_t elementCount)
     entry.deviceData = deviceData;
     entry.elementCount = elementCount;
     entry.valid = false;
+    entry.fp16Working = false;
+}
+
+void CudaAmp::bindFp16WorkingWeight(CudaMatrix& matrix) {
+    if (matrix.empty()) throw std::invalid_argument("CudaAmp::bindFp16WorkingWeight empty matrix");
+    if (!matrix.hasDeviceStorage()) throw std::invalid_argument("CudaAmp::bindFp16WorkingWeight needs FP32 device storage to cast");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaAmp::bindFp16WorkingWeight no CUDA device");
+
+    int slot = matrix.ampWeightSlot;
+    if (slot < 0) {
+        if (CudaAmp::masterWeightCount >= CudaAmp::maxMasterWeights)
+            throw std::runtime_error("CudaAmp::bindFp16WorkingWeight master weight table full");
+        slot = CudaAmp::masterWeightCount++;
+        matrix.ampWeightSlot = slot;
+        MasterWeightHalf& entry = CudaAmp::masterWeights[slot];
+        entry.deviceData = nullptr;
+        entry.elementCount = matrix.elementCount();
+        entry.valid = false;
+        entry.fp16Working = true;
+    }
+
+    MasterWeightHalf& entry = CudaAmp::masterWeights[slot];
+    entry.elementCount = matrix.elementCount();
+    entry.fp16Working = true;
+    CudaAmp::castFloatBufferToHalf(matrix.buffer.deviceData, entry.elementCount, entry.half);
+    entry.valid = true;
+    entry.deviceData = nullptr;
+    matrix.releaseDeviceKeepShape();
+}
+
+void CudaAmp::uploadHostMasterToFp16Working(CudaMatrix& matrix, const float* hostMaster) {
+    if (matrix.empty()) throw std::invalid_argument("CudaAmp::uploadHostMasterToFp16Working empty matrix");
+    if (hostMaster == nullptr) throw std::invalid_argument("CudaAmp::uploadHostMasterToFp16Working null host");
+    if (matrix.ampWeightSlot < 0 || matrix.ampWeightSlot >= CudaAmp::masterWeightCount)
+        throw std::logic_error("CudaAmp::uploadHostMasterToFp16Working matrix not bound");
+    MasterWeightHalf& entry = CudaAmp::masterWeights[matrix.ampWeightSlot];
+    if (!entry.fp16Working) throw std::logic_error("CudaAmp::uploadHostMasterToFp16Working not fp16 working");
+    entry.half.ensureCapacity(entry.elementCount * sizeof(__half));
+
+    // Staging via existing float scratch cast path: H2D float temp then cast, or direct H2D half.
+    // Direct: host float -> device float scratch -> half (reuse left scratch as float staging).
+    CudaAmp::halfScratchLeft.ensureCapacity(entry.elementCount * sizeof(float));
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpyAsync(
+            CudaAmp::halfScratchLeft.deviceData,
+            hostMaster,
+            entry.elementCount * sizeof(float),
+            cudaMemcpyHostToDevice,
+            CudaMatmul::activeStream()),
+        "CudaAmp::uploadHostMasterToFp16Working H2D");
+    CudaAmp::castFloatBufferToHalf(CudaAmp::halfScratchLeft.deviceData, entry.elementCount, entry.half);
+    entry.valid = true;
+}
+
+const void* CudaAmp::fp16WorkingWeightOrNull(const CudaMatrix& matrix) {
+    if (matrix.ampWeightSlot < 0 || matrix.ampWeightSlot >= CudaAmp::masterWeightCount)
+        return nullptr;
+    const MasterWeightHalf& entry = CudaAmp::masterWeights[matrix.ampWeightSlot];
+    if (!entry.fp16Working || !entry.valid || entry.half.deviceData == nullptr)
+        return nullptr;
+    return entry.half.deviceData;
 }
 
 void CudaAmp::invalidateMasterWeightHalves() {
-    for (int index = 0; index < CudaAmp::masterWeightCount; ++index)
-        CudaAmp::masterWeights[index].valid = false;
+    for (int index = 0; index < CudaAmp::masterWeightCount; ++index) {
+        MasterWeightHalf& entry = CudaAmp::masterWeights[index];
+        if (entry.fp16Working) continue; // working weights stay valid until explicit upload
+        entry.valid = false;
+    }
 }
 
 void CudaAmp::clearMasterWeights() {
@@ -52,6 +119,7 @@ void CudaAmp::clearMasterWeights() {
         CudaAmp::masterWeights[index].deviceData = nullptr;
         CudaAmp::masterWeights[index].elementCount = 0;
         CudaAmp::masterWeights[index].valid = false;
+        CudaAmp::masterWeights[index].fp16Working = false;
     }
     CudaAmp::masterWeightCount = 0;
 }
@@ -60,6 +128,7 @@ const void* CudaAmp::masterWeightHalfOrNull(const float* deviceData, size_t elem
     if (deviceData == nullptr || elementCount == 0) return nullptr;
     for (int index = 0; index < CudaAmp::masterWeightCount; ++index) {
         MasterWeightHalf& entry = CudaAmp::masterWeights[index];
+        if (entry.fp16Working) continue;
         if (entry.deviceData != deviceData || entry.elementCount != elementCount) continue;
         if (!entry.valid) {
             try {
@@ -196,6 +265,20 @@ static void launchCastHalfToFloat(const __half* source, float* destination, int 
     const int blocks = (elementCount + threads - 1) / threads;
     CudaAmpCastHalfToFloatEntry<<<blocks, threads, 0, CudaMatmul::activeStream()>>>(source, destination, elementCount);
     throwIfCudaFailedAmp(cudaGetLastError(), "CudaAmpCastHalfToFloatEntry launch");
+}
+
+const float* CudaAmp::resolveFp32Operand(const CudaMatrix& matrix, CudaDeviceBuffer& floatScratch) {
+    if (matrix.hasDeviceStorage())
+        return matrix.buffer.deviceData;
+    const void* half = CudaAmp::fp16WorkingWeightOrNull(matrix);
+    if (half == nullptr)
+        return nullptr;
+    floatScratch.ensureCapacity(matrix.elementCount() * sizeof(float));
+    launchCastHalfToFloat(
+        reinterpret_cast<const __half*>(half),
+        reinterpret_cast<float*>(floatScratch.deviceData),
+        static_cast<int>(matrix.elementCount()));
+    return reinterpret_cast<const float*>(floatScratch.deviceData);
 }
 
 void CudaAmp::castToHalf(const CudaMatrix& source, CudaHalfMatrix& destination) {
@@ -552,6 +635,50 @@ bool CudaAmp::launchCublasLtMatmulFp16(const float* deviceLeft, const float* dev
         const void* leftHalf = cachedLeft != nullptr ? cachedLeft : CudaAmp::halfScratchLeft.deviceData;
         const void* rightHalf = cachedRight != nullptr ? cachedRight : CudaAmp::halfScratchRight.deviceData;
         return launchCublasLtMatmulFp16Halves(leftHalf, rightHalf, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, kernelMilliseconds, deviceBiasOrNull);
+    } catch (...) {
+        return false;
+    }
+}
+
+bool CudaAmp::launchCublasLtMatmulFp16Matrices(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& out, bool transposeLeft, bool transposeRight, double* kernelMilliseconds, const float* deviceBiasOrNull) {
+    if (!CudaAmp::preferMixedPrecision) return false;
+    if (left.empty() || right.empty() || out.empty()) return false;
+
+    const int rowCount = static_cast<int>(transposeLeft ? left.cols : left.rows);
+    const int sharedCount = static_cast<int>(transposeLeft ? left.rows : left.cols);
+    const int columnCount = static_cast<int>(transposeRight ? right.rows : right.cols);
+
+    const void* leftWorking = CudaAmp::fp16WorkingWeightOrNull(left);
+    const void* rightWorking = CudaAmp::fp16WorkingWeightOrNull(right);
+    // Keep the large-GEMM gate even for working weights; tiny shapes fall back to FP32 cast path.
+    if (sharedCount < 256 || rowCount < 32 || columnCount < 32) return false;
+
+    try {
+        const void* leftHalf = leftWorking;
+        const void* rightHalf = rightWorking;
+
+        if (leftHalf == nullptr) {
+            if (!left.hasDeviceStorage()) return false;
+            const size_t leftElements = left.elementCount();
+            leftHalf = CudaAmp::masterWeightHalfOrNull(left.buffer.deviceData, leftElements);
+            if (leftHalf == nullptr) {
+                CudaAmp::castFloatBufferToHalf(left.buffer.deviceData, leftElements, CudaAmp::halfScratchLeft);
+                leftHalf = CudaAmp::halfScratchLeft.deviceData;
+            }
+        }
+        if (rightHalf == nullptr) {
+            if (!right.hasDeviceStorage()) return false;
+            const size_t rightElements = right.elementCount();
+            rightHalf = CudaAmp::masterWeightHalfOrNull(right.buffer.deviceData, rightElements);
+            if (rightHalf == nullptr) {
+                CudaAmp::castFloatBufferToHalf(right.buffer.deviceData, rightElements, CudaAmp::halfScratchRight);
+                rightHalf = CudaAmp::halfScratchRight.deviceData;
+            }
+        }
+
+        return launchCublasLtMatmulFp16Halves(
+            leftHalf, rightHalf, out.buffer.deviceData,
+            rowCount, columnCount, sharedCount, transposeLeft, transposeRight, kernelMilliseconds, deviceBiasOrNull);
     } catch (...) {
         return false;
     }

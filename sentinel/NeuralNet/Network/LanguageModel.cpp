@@ -470,12 +470,21 @@ void LanguageModel::setCudaPreferCpuAdamOffload(bool enabled) {
     if (this->device == nullptr) this->enableCuda();
     if (this->device == nullptr) return;
     CudaAdam::preferCpuOffload = enabled;
-    if (enabled)
+    CudaAdam::preferFp16GpuWeights = enabled;
+    if (enabled) {
         CudaAdam::preferInt8Moments = false;
+        CudaAmp::preferMixedPrecision = true;
+        if (this->device->preferMuon) {
+            this->device->preferMuon = false;
+            std::cout << "LanguageModel::setCudaPreferCpuAdamOffload: disabling Muon (FP16 GPU weights)\n";
+        }
+    }
     this->device->trainStateReady = false;
     if (this->deviceTrainEnabled)
         this->device->ensureTrainState();
     std::cout << "LanguageModel::setCudaPreferCpuAdamOffload: " << (enabled ? "on" : "off")
+              << "  fp16GpuWeights=" << (CudaAdam::preferFp16GpuWeights ? "on" : "off")
+              << "  amp=" << (CudaAmp::preferMixedPrecision ? "on" : "off")
               << "  int8 adam " << (CudaAdam::preferInt8Moments ? "on" : "off") << '\n';
 }
 
