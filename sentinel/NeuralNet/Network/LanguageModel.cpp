@@ -781,7 +781,9 @@ std::vector<int> LanguageModel::generate(const std::vector<int>& promptTokenIds,
 
 namespace {
 constexpr char kCheckpointMagic[4] = { 'S', 'N', 'L', 'M' };
-constexpr std::int32_t kCheckpointVersion = 2;
+constexpr std::int32_t kCheckpointVersion = 3;
+constexpr std::int32_t kOptimizerKindAdam = 0;
+constexpr std::int32_t kOptimizerKindMuonAdam = 1;
 
 void writePod(std::ostream& out, const void* data, size_t byteCount) {
     out.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(byteCount));
@@ -839,6 +841,16 @@ AdamState readAdamState(std::istream& in) {
     state.secondMoment = readMatrix(in);
     return state;
 }
+
+void writeMuonState(std::ostream& out, const MuonState& state) {
+    writeMatrix(out, state.momentum);
+}
+
+MuonState readMuonState(std::istream& in) {
+    MuonState state;
+    state.momentum = readMatrix(in);
+    return state;
+}
 }
 
 void LanguageModel::saveCheckpoint(const std::string& path, bool includeOptimizer) {
@@ -871,6 +883,11 @@ void LanguageModel::saveCheckpoint(const std::string& path, bool includeOptimize
     writeI32(out, this->optimizer.timeStep);
     writeI32(out, includeOptimizer ? 1 : 0);
     writeI32(out, this->tieEmbeddingProjection ? 1 : 0);
+    const bool useMuonOptimizer = includeOptimizer
+        && this->cudaTrainEnabled()
+        && this->device != nullptr
+        && this->device->preferMuon;
+    writeI32(out, useMuonOptimizer ? kOptimizerKindMuonAdam : kOptimizerKindAdam);
 
     writeMatrix(out, this->tokenEmbedding.weight);
     for (const TransformerBlock& block : this->blocks) {
@@ -895,17 +912,27 @@ void LanguageModel::saveCheckpoint(const std::string& path, bool includeOptimize
     if (includeOptimizer) {
         writeAdamState(out, this->tokenEmbeddingState);
         for (const TransformerBlock& block : this->blocks) {
-            writeAdamState(out, block.queryWeightState);
-            writeAdamState(out, block.keyWeightState);
-            writeAdamState(out, block.valueWeightState);
-            writeAdamState(out, block.attentionOutputWeightState);
+            if (useMuonOptimizer) {
+                writeMuonState(out, block.queryWeightMuon);
+                writeMuonState(out, block.keyWeightMuon);
+                writeMuonState(out, block.valueWeightMuon);
+                writeMuonState(out, block.attentionOutputWeightMuon);
+                writeMuonState(out, block.feedForwardGateWeightMuon);
+                writeMuonState(out, block.feedForwardUpWeightMuon);
+                writeMuonState(out, block.feedForwardDownWeightMuon);
+            } else {
+                writeAdamState(out, block.queryWeightState);
+                writeAdamState(out, block.keyWeightState);
+                writeAdamState(out, block.valueWeightState);
+                writeAdamState(out, block.attentionOutputWeightState);
+                writeAdamState(out, block.feedForwardGateWeightState);
+                writeAdamState(out, block.feedForwardUpWeightState);
+                writeAdamState(out, block.feedForwardDownWeightState);
+            }
             writeAdamState(out, block.attentionNormGammaState);
             writeAdamState(out, block.feedForwardNormGammaState);
-            writeAdamState(out, block.feedForwardGateWeightState);
             writeAdamState(out, block.feedForwardGateBiasState);
-            writeAdamState(out, block.feedForwardUpWeightState);
             writeAdamState(out, block.feedForwardUpBiasState);
-            writeAdamState(out, block.feedForwardDownWeightState);
             writeAdamState(out, block.feedForwardDownBiasState);
         }
         writeAdamState(out, this->finalNormGammaState);
@@ -929,7 +956,7 @@ void LanguageModel::loadCheckpoint(const std::string& path) {
         throw std::runtime_error("LanguageModel::loadCheckpoint bad magic");
 
     const std::int32_t version = readI32(in);
-    if (version != 1 && version != 2)
+    if (version != 1 && version != 2 && version != 3)
         throw std::runtime_error("LanguageModel::loadCheckpoint unsupported version");
 
     const std::int32_t vocabularySize = readI32(in);
@@ -951,6 +978,10 @@ void LanguageModel::loadCheckpoint(const std::string& path) {
     this->optimizer.timeStep = readI32(in);
     const bool includeOptimizer = readI32(in) != 0;
     const bool tieWeights = version >= 2 ? (readI32(in) != 0) : false;
+    const std::int32_t optimizerKind = version >= 3 ? readI32(in) : kOptimizerKindAdam;
+    if (optimizerKind != kOptimizerKindAdam && optimizerKind != kOptimizerKindMuonAdam)
+        throw std::runtime_error("LanguageModel::loadCheckpoint unknown optimizer kind");
+    const bool useMuonOptimizer = optimizerKind == kOptimizerKindMuonAdam;
 
     this->tokenEmbedding.weight = readMatrix(in);
     expectMatrixShape(this->tokenEmbedding.weight, static_cast<size_t>(vocabularySize), static_cast<size_t>(embeddingDim), "tokenEmbedding");
@@ -983,18 +1014,65 @@ void LanguageModel::loadCheckpoint(const std::string& path) {
     if (includeOptimizer) {
         this->tokenEmbeddingState = readAdamState(in);
         for (TransformerBlock& block : this->blocks) {
-            block.queryWeightState = readAdamState(in);
-            block.keyWeightState = readAdamState(in);
-            block.valueWeightState = readAdamState(in);
-            block.attentionOutputWeightState = readAdamState(in);
-            block.attentionNormGammaState = readAdamState(in);
-            block.feedForwardNormGammaState = readAdamState(in);
-            block.feedForwardGateWeightState = readAdamState(in);
-            block.feedForwardGateBiasState = readAdamState(in);
-            block.feedForwardUpWeightState = readAdamState(in);
-            block.feedForwardUpBiasState = readAdamState(in);
-            block.feedForwardDownWeightState = readAdamState(in);
-            block.feedForwardDownBiasState = readAdamState(in);
+            if (version >= 3) {
+                if (useMuonOptimizer) {
+                    block.queryWeightMuon = readMuonState(in);
+                    block.keyWeightMuon = readMuonState(in);
+                    block.valueWeightMuon = readMuonState(in);
+                    block.attentionOutputWeightMuon = readMuonState(in);
+                    block.feedForwardGateWeightMuon = readMuonState(in);
+                    block.feedForwardUpWeightMuon = readMuonState(in);
+                    block.feedForwardDownWeightMuon = readMuonState(in);
+                    block.queryWeightState = AdamState{};
+                    block.keyWeightState = AdamState{};
+                    block.valueWeightState = AdamState{};
+                    block.attentionOutputWeightState = AdamState{};
+                    block.feedForwardGateWeightState = AdamState{};
+                    block.feedForwardUpWeightState = AdamState{};
+                    block.feedForwardDownWeightState = AdamState{};
+                } else {
+                    block.queryWeightState = readAdamState(in);
+                    block.keyWeightState = readAdamState(in);
+                    block.valueWeightState = readAdamState(in);
+                    block.attentionOutputWeightState = readAdamState(in);
+                    block.feedForwardGateWeightState = readAdamState(in);
+                    block.feedForwardUpWeightState = readAdamState(in);
+                    block.feedForwardDownWeightState = readAdamState(in);
+                    block.queryWeightMuon = MuonState{};
+                    block.keyWeightMuon = MuonState{};
+                    block.valueWeightMuon = MuonState{};
+                    block.attentionOutputWeightMuon = MuonState{};
+                    block.feedForwardGateWeightMuon = MuonState{};
+                    block.feedForwardUpWeightMuon = MuonState{};
+                    block.feedForwardDownWeightMuon = MuonState{};
+                }
+                block.attentionNormGammaState = readAdamState(in);
+                block.feedForwardNormGammaState = readAdamState(in);
+                block.feedForwardGateBiasState = readAdamState(in);
+                block.feedForwardUpBiasState = readAdamState(in);
+                block.feedForwardDownBiasState = readAdamState(in);
+            } else {
+                // v1/v2 layout: Q K V O attnNorm ffnNorm gateW gateB upW upB downW downB
+                block.queryWeightState = readAdamState(in);
+                block.keyWeightState = readAdamState(in);
+                block.valueWeightState = readAdamState(in);
+                block.attentionOutputWeightState = readAdamState(in);
+                block.attentionNormGammaState = readAdamState(in);
+                block.feedForwardNormGammaState = readAdamState(in);
+                block.feedForwardGateWeightState = readAdamState(in);
+                block.feedForwardGateBiasState = readAdamState(in);
+                block.feedForwardUpWeightState = readAdamState(in);
+                block.feedForwardUpBiasState = readAdamState(in);
+                block.feedForwardDownWeightState = readAdamState(in);
+                block.feedForwardDownBiasState = readAdamState(in);
+                block.queryWeightMuon = MuonState{};
+                block.keyWeightMuon = MuonState{};
+                block.valueWeightMuon = MuonState{};
+                block.attentionOutputWeightMuon = MuonState{};
+                block.feedForwardGateWeightMuon = MuonState{};
+                block.feedForwardUpWeightMuon = MuonState{};
+                block.feedForwardDownWeightMuon = MuonState{};
+            }
         }
         this->finalNormGammaState = readAdamState(in);
         if (!tieWeights)
@@ -1004,8 +1082,11 @@ void LanguageModel::loadCheckpoint(const std::string& path) {
 
     if (this->device != nullptr) {
         this->device->uploadFrom(*this);
-        if (this->deviceTrainEnabled && includeOptimizer)
+        if (this->deviceTrainEnabled && includeOptimizer) {
+            this->device->setPreferMuon(useMuonOptimizer);
+            this->device->trainStateReady = false;
             this->device->uploadOptimizerFrom(*this);
+        }
         this->deviceStale = false;
     }
 }
