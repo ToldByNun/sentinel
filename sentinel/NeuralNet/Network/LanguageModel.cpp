@@ -485,18 +485,14 @@ void LanguageModel::setCudaPreferCpuAdamOffload(bool enabled) {
     if (enabled) {
         CudaAdam::preferInt8Moments = false;
         CudaAmp::preferMixedPrecision = true;
-        // CUDA graphs + Flash are not yet reliable with FP16 working weights / host-grad offload.
+        // CUDA graphs are not yet reliable with FP16 working weights / host-grad offload.
         this->device->preferTrainGraph = false;
         this->device->releaseTrainGraph();
-        for (CudaTransformerBlock& block : this->device->blocks) {
-            block.attention.preferFlashAttention = false;
-            block.attention.releaseFlashAttentionScratch();
-        }
         if (this->device->preferMuon) {
             this->device->preferMuon = false;
             std::cout << "LanguageModel::setCudaPreferCpuAdamOffload: disabling Muon (FP16 GPU weights)\n";
         }
-        std::cout << "LanguageModel::setCudaPreferCpuAdamOffload: disabling Flash + CUDA Graph for FP16 working weights\n";
+        std::cout << "LanguageModel::setCudaPreferCpuAdamOffload: disabling CUDA Graph for FP16 working weights\n";
     }
     this->device->trainStateReady = false;
     if (this->deviceTrainEnabled) {
@@ -515,10 +511,6 @@ void LanguageModel::setCudaPreferCpuAdamOffload(bool enabled) {
 void LanguageModel::setCudaPreferFlashAttention(bool enabled) {
     if (this->device == nullptr) this->enableCuda();
     if (this->device == nullptr) return;
-    if (enabled && CudaAdam::preferFp16GpuWeights) {
-        std::cout << "LanguageModel::setCudaPreferFlashAttention: keeping flash off (FP16 working weights)\n";
-        enabled = false;
-    }
     for (CudaTransformerBlock& block : this->device->blocks) {
         block.attention.preferFlashAttention = enabled;
         if (enabled)

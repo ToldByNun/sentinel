@@ -1072,6 +1072,8 @@ int main() {
             return 1;
         }
         try {
+            SmokeLog::note("preflight: FP16 + host grads + flash smoke");
+            CudaLanguageModel::runTrainCpuAdamOffloadSmokeDemo(2000, 128, 64, 2, 4);
             CudaLanguageModel::runScale4BTrainStepProbeDemo();
         } catch (const std::exception& ex) {
             SmokeLog::result("scale-4B train-step", "FAILED: %s", ex.what());
