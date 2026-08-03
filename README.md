@@ -1,13 +1,15 @@
 # Sentinel
 
-C++/CUDA framework for **full-train** causal LMs (no LoRA): CPU/OpenMP plus a device train path with packed batches, flash attention, FP16 AMP, int8 Adam / Muon, and selective activation checkpointing.
+C++/CUDA framework for **full-train** causal LMs (no LoRA): CPU/OpenMP plus a device train path with packed batches, flash attention, FP16 AMP, int8 Adam / Muon, selective activation checkpointing, and a consumer-GPU **~4B offload** path (FP16 GPU weights + host masters/grads + host SGD).
 
 ## Requirements
 
 - Windows, Visual Studio 2022+ (`v145`)
 - CUDA Toolkit (project targets **v13.3**)
 - NVIDIA GPU — vcxproj currently builds `sm_120` (RTX 50-series); change `CodeGeneration` for other arches (intended floor: Turing `sm_75`+)
-- Data (optional for demos): `SERA-Data/sera_best_subset` (HF Arrow) and/or `*.jsonl`
+- Data (not included): `SERA-Data/sera_best_subset` (HF Arrow) and/or `*.jsonl`
+
+
 
 ## Build & run
 
@@ -17,18 +19,34 @@ cd sentinel
 ..\x64\Release\sentinel.exe
 ```
 
-Working directory must be `sentinel\` (relative `../SERA-Data/...`). Flags in `main.cpp` gate smokes, benches, and the SERA train demo (default: Arrow corpus, ~8×768).
+Working directory must be `sentinel\` (relative `../SERA-Data/...`). Flags in `main.cpp` gate demos:
+
+
+| Flag                     | Purpose                                                         |
+| ------------------------ | --------------------------------------------------------------- |
+| `runSmallSuite`          | Smokes + parities + speed 768 + ~100M probe (no corpus / no 4B) |
+| `runScale100M`           | Full multi-epoch ~100M train on `sera_scale.jsonl`              |
+| `runMuonThroughputProbe` | Adam vs Muon × ckpt tok/s table                                 |
+| `runScale4BTrainStep`    | One packed ~4B train step (FP16w + host SGD)                    |
+| `runSpeedBench` / others | Focused benches                                                 |
+
+
+Default SERA demo (when suite flags are off): Arrow corpus, ~8×768.
 
 ## Layout
 
-| Path | Role |
-|------|------|
-| `NeuralNet/Network/` | `LanguageModel`, host train, `.snlm` checkpoints |
-| `NeuralNet/Cuda/` | Device mirror, flash attn, AMP, Adam, packed train |
-| `NeuralNet/Layers/` | Attention, SwiGLU FFN, RMSNorm, embedding, … |
-| `NeuralNet/Data/` | `TextRowReader`, JSONL + from-scratch Arrow IPC reader, chunk source |
-| `NeuralNet/Tokenizer/` | BPE (freq-based train, ranked encode) |
-| `main.cpp` | Smokes / scale harness / SERA demo |
+
+| Path                   | Role                                                                 |
+| ---------------------- | -------------------------------------------------------------------- |
+| `NeuralNet/Network/`   | `LanguageModel`, host train, `.snlm` checkpoints                     |
+| `NeuralNet/Cuda/`      | Device mirror, flash attn, AMP, Adam, Muon, packed train, 4B offload |
+| `NeuralNet/Layers/`    | Attention, SwiGLU FFN, RMSNorm, embedding, …                         |
+| `NeuralNet/Data/`      | `TextRowReader`, JSONL + from-scratch Arrow IPC reader, chunk source |
+| `NeuralNet/Tokenizer/` | BPE (freq-based train, ranked encode)                                |
+| `main.cpp`             | Smokes / scale harness / SERA demo                                   |
+
+
+
 
 ## Data
 
@@ -41,9 +59,11 @@ source.materialize();   // one corpus+BPE pass → cached token ids
 model.train(source, epochs, logEvery, batchSize, gradAccum);
 ```
 
-- **JSONL** (`.jsonl`) or **HF Arrow** (`.arrow` / `save_to_disk` dir with `data-*.arrow`; `cache-*` skipped)
+- **JSONL** (`.jsonl`) or **HF Arrow** (`.arrow` / `save_to_disk` dir with `data-*.arrow`; `cache-`* skipped)
 - Path auto-detect via `createTextRowReader` — no Apache Arrow C++ dependency (custom IPC stream reader)
 - Progress logs for sample / BPE / materialize (`SmokeLog::progress`)
+
+
 
 ## Training
 
@@ -55,16 +75,19 @@ model.setCudaPreferFlashAttention(true);
 model.train(source, epochs, 1, batchSize, gradAccum);
 ```
 
-| Knob | Default / notes |
-|------|-----------------|
-| Pack budget | `applyVramPackBudget` from free VRAM; override `setCudaMaxPackedColumns` |
-| Flash attention | Prefer on for train/forward |
-| AMP | FP16 GEMMs + saturated FP16 block-input checkpoints; loss scale when embed≥256 |
-| Adam | Int8 moments on; or `setCudaPreferCpuAdamOffload(true)` (host `m`/`v`) |
-| Muon | `setCudaPreferMuon(true)` — Newton–Schulz on 2D hidden weights; Adam on embed / norms / biases / head |
-| Weight tying | On — LM head shares token embedding |
-| Activation ckpt | `Off` / `Full` / **`Selective`** (default): keep FFN acts, recompute Attn; `enableActivationCheckpointing(bool)` maps true→Selective, false→Off |
-| CUDA graphs | Used when checkpointing is **Off** and shapes are stable |
+
+| Knob                | Default / notes                                                                                                                                                  |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pack budget         | `applyVramPackBudget` (default **40%** of usable free VRAM, **≥20%** display floor, slack 1.4×, cap **4096** cols). Override with `setCudaMaxPackedColumns`.     |
+| Flash attention     | Prefer on for train/forward                                                                                                                                      |
+| AMP                 | FP16 GEMMs + saturated FP16 block-input checkpoints; loss scale when embed≥256                                                                                   |
+| Adam                | Int8 moments on GPU; or `setCudaPreferCpuAdamOffload(true)` (host `m`/`v`)                                                                                       |
+| Muon                | `setCudaPreferMuon(true)` — Newton–Schulz on 2D hidden weights; Adam on embed / norms / biases / head                                                            |
+| Large-model offload | `preferFp16GpuWeights` + `preferHostGradients` + `preferHostSgd` — FP16 weights on GPU, FP32 masters/grads on host, SGD (no Adam `m`/`v`). Used by the 4B probe. |
+| Weight tying        | On — LM head shares token embedding                                                                                                                              |
+| Activation ckpt     | `Off` / `Full` / `Selective` (default): keep FFN acts, recompute Attn; `enableActivationCheckpointing(bool)` maps true→Selective, false→Off                      |
+| CUDA graphs         | Only when checkpointing is **Off** and shapes are stable (`preferTrainGraph`)                                                                                    |
+
 
 ```cpp
 model.setActivationCheckpointMode(ActivationCheckpointMode::Selective); // or Full / Off
@@ -74,29 +97,82 @@ model.loadCheckpoint("run.snlm");
 
 Checkpoint file: `SNLM` (weights + optional Adam; int8 moments stored as FP32).
 
-## Consumer VRAM proof (RTX 5070 Ti 16 GB)
+## Measured throughput (RTX 5070 Ti 16 GB)
 
-`runScale100M` — full train, no LoRA:
+Numbers below are **fresh synthetic packed-train probes** (`probeCudaPackedTrainTokensPerSecond`, seq=256) unless noted. Desktop WDDM / pack budget matter — re-measure after big train-path changes (`runMuonThroughputProbe`, `runSmallSuite`).
 
-| | |
-|---|---|
-| Model | **97.32M** (tied), vocab 16k, d=768, L=12, H=12, maxTok=512 |
-| Flags | ckpt + FP16 AMP + int8 Adam + flash + graph |
-| After setup | free **~13 GiB** / 15.9 GiB; `maxPackCols`≈3840 |
-| Probe / epoch | **~21.8k** tok/s (seq=256) · epoch **~19.0k** tok/s (~603 s) |
-| Data | ~38k train / 512 test / ~11.4M positions |
+### ~60M — 8×768 (speed path)
 
-### Adam vs Muon × checkpoint (probe, seq=256)
 
-Fresh one-shot models, same shape as above, FP16 AMP + int8 Adam + flash, auto pack budget (`runMuonThroughputProbe`):
+|       |                                                                    |
+| ----- | ------------------------------------------------------------------ |
+| Shape | vocab 4k, d=768, L=8, H=12, maxPos=512                             |
+| Flags | Selective ckpt, FP16 AMP, int8 Adam, flash, auto pack (~4096 cols) |
+| Probe | **~20k** tok/s                                                     |
 
-| Optimizer | ckpt | tok/s | vs Adam Off |
-|-----------|------|------:|------------:|
-| Adam | Off | **~24.3k** | 100% |
-| Adam | Selective | **~19.0k** | ~78% |
-| Muon | Off | **~19.1k** | ~78% |
-| Muon | Selective | **~16.8k** | ~69% |
 
-Muon ≈ Adam+Selective when ckpt is Off; Selective costs ~20% on both. README epoch ~21.8k is Adam + Selective (same ballpark as the Adam Selective row).
 
-Smaller smoke: `CudaLanguageModel::runConsumerVramDemo()` (~8k/256/4L, ~66k tok/s packed).
+
+### ~97M — 12×768 (consumer VRAM proof)
+
+`runScale100M` — full multi-epoch train on `sera_scale.jsonl` (tied embed, no LoRA). Headline probe below matches Adam + Selective @ fixed pack (not Muon).
+
+
+|                                |                                                                                                                                                                    |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Model                          | **~97M** (tied), vocab 16k, d=768, L=12, H=12, maxTok=512                                                                                                          |
+| Flags                          | Selective ckpt, FP16 AMP, int8 Adam, flash                                                                                                                         |
+| Pack                           | Forced `maxPackCols=3840` (auto budget is more conservative ≈2.5–2.7k cols)                                                                                        |
+| Probe (Adam + Selective @3840) | **~12.5k** tok/s                                                                                                                                                   |
+| Historical note                | An earlier run hit **~21.8k** probe / **~19k** epoch tok/s before safer pack-budget defaults and later train-path work; treat **~12.5k** as current Adam baseline. |
+
+
+
+
+#### Adam vs Muon × checkpoint (same 12×768 shape)
+
+Fresh one-shot models (`runMuonThroughputProbe`), FP16 AMP + int8 Adam + flash, graphs off:
+
+
+| Optimizer | ckpt      | pack         | tok/s      |
+| --------- | --------- | ------------ | ---------- |
+| Adam      | Off       | auto (~1856) | ~9.4k      |
+| Adam      | Selective | auto (~2688) | ~10.7k     |
+| Adam      | Selective | **3840**     | **~12.5k** |
+| Muon      | Off       | auto (~1856) | ~8.2k      |
+| Muon      | Selective | auto (~2624) | ~8.7k      |
+| Muon      | Selective | **3840**     | ~11.2k     |
+
+
+Muon adds Newton–Schulz cost on hidden weights; comparing a Muon probe to an old Adam README number looks like a 2× “regression” even when Adam is unchanged.
+
+Full SERA epoch numbers still need `sera_scale.jsonl` + `runScale100M=true`.
+
+### ~4B — FP16 GPU + host SGD (fits 16 GB)
+
+`runScale4BTrainStep` — one packed train step (not multi-epoch):
+
+
+|            |                                                                                               |
+| ---------- | --------------------------------------------------------------------------------------------- |
+| Shape      | vocab 32k, d=3072, L=34, H=48, maxPos=2048, seq=512, **pack=8** (4096 tokens)                 |
+| Mode       | FP16 GPU weights, host FP32 masters + grads, **host SGD** (no Adam moments), Full ckpt, flash |
+| Host RAM   | ~15 GiB masters+grads (Adam `m`/`v` would roughly double that)                                |
+| Full step  | **~320–330** tok/s (accumulate alone ~380–420)                                                |
+| Bottleneck | Full-ckpt bwd recompute + end-of-step H2D; async Grad-D2H is mostly overlapped                |
+
+
+Target ≥600 tok/s full-step is not yet reached on this offload+Full-ckpt path.
+
+Smaller smoke: `CudaLanguageModel::runConsumerVramDemo()` (~8k/256/4L).
+
+## Verify
+
+```bat
+:: in main.cpp: runSmallSuite = true  (other scale flags false)
+msbuild sentinel\sentinel.vcxproj /p:Configuration=Release /p:Platform=x64
+cd sentinel
+..\x64\Release\sentinel.exe
+```
+
+Expect smokes/parities OK, **speed 768 ~20k** tok/s, **scale-100M probe ~12k** (Adam @3840).

@@ -58,7 +58,7 @@ int main() {
     const bool runMuonSmoke = false;
     const bool runCpuAdamOffloadSmoke = false;
     // One-shot: smokes + parities + small speed + cpuAdam (no 4B / no full SERA train).
-    const bool runSmallSuite = true;
+    const bool runSmallSuite = false;
 
     // Arrow HF disk layout (sera_best_subset) via from-scratch ArrowChunkReader; JSONL still works
     const bool useArrowCorpus = true;
@@ -256,8 +256,8 @@ int main() {
             CudaLanguageModel::runTrainProfileDemo(1000, 64, 48, 2, 4, false, 256);
         });
         run("scale-100M probe", []() {
-            // Synthetic ~100M throughput smoke (no corpus required).
-            const int vocab = 8000;
+            // Synthetic ~100M throughput smoke (no corpus). Adam baseline matches README headline.
+            const int vocab = 16000;
             const int embed = 768;
             const int blocks = 12;
             const int heads = 12;
@@ -267,14 +267,15 @@ int main() {
             model.setCudaPreferCpuAdamOffload(false);
             model.setCudaPreferInt8AdamMoments(true);
             model.setCudaPreferFlashAttention(true);
-            model.setCudaPreferMuon(true);
+            model.setCudaPreferMuon(false);
             model.enableCudaTrain();
-            model.enableActivationCheckpointing(true);
-            model.applyCudaVramPackBudget();
+            model.setActivationCheckpointMode(ActivationCheckpointMode::Selective);
+            model.setCudaPreferTrainGraph(false);
+            model.setCudaMaxPackedColumns(3840);
             const double tokensPerSecond = model.probeCudaPackedTrainTokensPerSecond(256, 2, 4);
             SmokeLog::result(
                 "scale-100M probe",
-                "params=%.2fM  maxPackCols=%d  tokens/s=%.0f",
+                "params=%.2fM  adam+selective@3840  maxPackCols=%d  tokens/s=%.0f",
                 static_cast<double>(model.parameterElementCount()) / 1.0e6,
                 model.cudaMaxPackedColumns(),
                 tokensPerSecond);
@@ -352,6 +353,17 @@ int main() {
             const int probeSeq = 256;
 
             auto oneShot = [&](const char* label, bool muon, ActivationCheckpointMode ckpt, int forcedPackCols) {
+                CudaAmp::clearMasterWeights();
+                CudaAmp::preferMixedPrecision = true;
+                CudaAmp::useLossScaling = true;
+                CudaAmp::resetLossScaler();
+                CudaAdam::preferCpuOffload = false;
+                CudaAdam::preferFp16GpuWeights = false;
+                CudaAdam::preferHostGradients = false;
+                CudaAdam::preferHostSgd = false;
+                CudaAdam::preferInt8Moments = true;
+                cudaGetLastError();
+
                 LanguageModel model(vocab, embed, pos, Adam(0.001f), blocks, heads);
                 model.enableCuda();
                 model.setCudaPreferCpuAdamOffload(false);
@@ -360,7 +372,8 @@ int main() {
                 model.enableCudaTrain();
                 model.setCudaPreferMuon(muon);
                 model.setActivationCheckpointMode(ckpt);
-                model.setCudaPreferTrainGraph(true);
+                // Graph capture is brittle across one-shot model rebuilds; measure without it.
+                model.setCudaPreferTrainGraph(false);
                 if (forcedPackCols > 0)
                     model.setCudaMaxPackedColumns(forcedPackCols);
                 else
@@ -381,10 +394,33 @@ int main() {
                     tok);
             };
 
+            // Fresh one-shot models (destroy between configs so VRAM budget stays honest).
             oneShot("adam ckpt-off auto", false, ActivationCheckpointMode::Off, 0);
             oneShot("adam selective auto", false, ActivationCheckpointMode::Selective, 0);
+            oneShot("adam selective @3840", false, ActivationCheckpointMode::Selective, 3840);
             oneShot("muon selective auto", true, ActivationCheckpointMode::Selective, 0);
             oneShot("muon ckpt-off auto", true, ActivationCheckpointMode::Off, 0);
+            oneShot("muon selective @3840", true, ActivationCheckpointMode::Selective, 3840);
+
+            // 8×768 reference (same shape as runSpeedBench / small-suite speed 768).
+            {
+                LanguageModel model(4000, 768, 512, Adam(0.001f), 8, 12);
+                model.enableCuda();
+                model.setCudaPreferCpuAdamOffload(false);
+                model.setCudaPreferInt8AdamMoments(true);
+                model.setCudaPreferFlashAttention(true);
+                model.enableCudaTrain();
+                model.setCudaPreferMuon(false);
+                model.setActivationCheckpointMode(ActivationCheckpointMode::Selective);
+                model.applyCudaVramPackBudget();
+                const double tok = model.probeCudaPackedTrainTokensPerSecond(256, 2, 8);
+                SmokeLog::result(
+                    "speed 8x768 selective",
+                    "params=%.2fM  maxPackCols=%d  tokens/s=%.0f",
+                    static_cast<double>(model.parameterElementCount()) / 1.0e6,
+                    model.cudaMaxPackedColumns(),
+                    tok);
+            }
             return 0;
         } catch (const std::exception& ex) {
             SmokeLog::result("toks-regression", "FAILED: %s", ex.what());
