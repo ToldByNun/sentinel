@@ -159,7 +159,13 @@ void LanguageModel::applyCudaVramPackBudget(float freeFraction, size_t safetyRes
 void LanguageModel::setCudaPreferTrainGraph(bool enabled) {
     if (this->device == nullptr) this->enableCuda();
     if (this->device == nullptr) return;
+    if (enabled && CudaAdam::preferFp16GpuWeights) {
+        std::cout << "LanguageModel::setCudaPreferTrainGraph: keeping graphs off (FP16 working weights)\n";
+        enabled = false;
+    }
     this->device->preferTrainGraph = enabled;
+    if (!enabled)
+        this->device->releaseTrainGraph();
 }
 
 double LanguageModel::probeCudaPackedTrainTokensPerSecond(int sequenceLength, int warmupSteps, int timedSteps) {
@@ -371,6 +377,9 @@ void LanguageModel::enableCudaTrain() {
         CudaAdam::preferInt8Moments = false;
     else
         CudaAdam::preferInt8Moments = true;
+    // Materialize FP16/host-grad layout first so pack budget sees residual VRAM correctly.
+    this->device->trainStateReady = false;
+    this->device->ensureTrainState();
     this->device->applyVramPackBudget();
     this->device->trainStateReady = false;
     this->device->ensureTrainState();
@@ -382,6 +391,7 @@ void LanguageModel::enableCudaTrain() {
               << ", lossScale=" << (CudaAmp::useLossScaling ? "on" : "off")
               << ", int8 adam " << (CudaAdam::preferInt8Moments ? "on" : "off")
               << ", cpuAdam=" << (CudaAdam::preferCpuOffload ? "on" : "off")
+              << ", hostGrads=" << (CudaAdam::preferHostGradients ? "on" : "off")
               << ", halfCkpt=" << (this->device->useHalfActivationCheckpoints() ? "on" : "off")
               << ", tieEmbed=" << (this->tieEmbeddingProjection ? "on" : "off")
               << ", maxPackCols=" << this->device->maxPackedColumns << ")\n";
@@ -475,14 +485,26 @@ void LanguageModel::setCudaPreferCpuAdamOffload(bool enabled) {
     if (enabled) {
         CudaAdam::preferInt8Moments = false;
         CudaAmp::preferMixedPrecision = true;
+        // CUDA graphs + Flash are not yet reliable with FP16 working weights / host-grad offload.
+        this->device->preferTrainGraph = false;
+        this->device->releaseTrainGraph();
+        for (CudaTransformerBlock& block : this->device->blocks) {
+            block.attention.preferFlashAttention = false;
+            block.attention.releaseFlashAttentionScratch();
+        }
         if (this->device->preferMuon) {
             this->device->preferMuon = false;
             std::cout << "LanguageModel::setCudaPreferCpuAdamOffload: disabling Muon (FP16 GPU weights)\n";
         }
+        std::cout << "LanguageModel::setCudaPreferCpuAdamOffload: disabling Flash + CUDA Graph for FP16 working weights\n";
     }
     this->device->trainStateReady = false;
-    if (this->deviceTrainEnabled)
+    if (this->deviceTrainEnabled) {
         this->device->ensureTrainState();
+        this->device->applyVramPackBudget();
+        this->device->trainStateReady = false;
+        this->device->ensureTrainState();
+    }
     std::cout << "LanguageModel::setCudaPreferCpuAdamOffload: " << (enabled ? "on" : "off")
               << "  fp16GpuWeights=" << (CudaAdam::preferFp16GpuWeights ? "on" : "off")
               << "  hostGrads=" << (CudaAdam::preferHostGradients ? "on" : "off")
@@ -493,6 +515,10 @@ void LanguageModel::setCudaPreferCpuAdamOffload(bool enabled) {
 void LanguageModel::setCudaPreferFlashAttention(bool enabled) {
     if (this->device == nullptr) this->enableCuda();
     if (this->device == nullptr) return;
+    if (enabled && CudaAdam::preferFp16GpuWeights) {
+        std::cout << "LanguageModel::setCudaPreferFlashAttention: keeping flash off (FP16 working weights)\n";
+        enabled = false;
+    }
     for (CudaTransformerBlock& block : this->device->blocks) {
         block.attention.preferFlashAttention = enabled;
         if (enabled)
@@ -720,8 +746,12 @@ void LanguageModel::train(const LanguageModelDataset& trainDataset, const Langua
         this->syncDeviceIfStale();
         this->device->adam = CudaAdam(this->optimizer.learningRate, this->optimizer.beta1, this->optimizer.beta2, this->optimizer.epsilon);
         this->device->adam.timeStep = this->optimizer.timeStep;
-        this->device->train(trainDataset, testDataset, epochs, logEveryEpochs, batchSize, gradientAccumulationSteps);
-        this->device->downloadTo(*this);
+        try {
+            this->device->train(trainDataset, testDataset, epochs, logEveryEpochs, batchSize, gradientAccumulationSteps);
+            this->device->downloadTo(*this);
+        } catch (const std::exception& ex) {
+            throw std::runtime_error(std::string("LanguageModel::train cuda path failed: ") + ex.what());
+        }
         this->optimizer.timeStep = this->device->adam.timeStep;
         this->deviceStale = false;
         return;
@@ -774,8 +804,12 @@ void LanguageModel::train(LanguageModelChunkSource& source, int epochs, int logE
         this->syncDeviceIfStale();
         this->device->adam = CudaAdam(this->optimizer.learningRate, this->optimizer.beta1, this->optimizer.beta2, this->optimizer.epsilon);
         this->device->adam.timeStep = this->optimizer.timeStep;
-        this->device->train(source, epochs, logEveryEpochs, batchSize, gradientAccumulationSteps);
-        this->device->downloadTo(*this);
+        try {
+            this->device->train(source, epochs, logEveryEpochs, batchSize, gradientAccumulationSteps);
+            this->device->downloadTo(*this);
+        } catch (const std::exception& ex) {
+            throw std::runtime_error(std::string("LanguageModel::train cuda path failed: ") + ex.what());
+        }
         this->optimizer.timeStep = this->device->adam.timeStep;
         this->deviceStale = false;
         return;
