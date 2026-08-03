@@ -401,6 +401,15 @@ void CudaLanguageModel::materializeFp16GpuWorkingWeights() {
     if (!CudaAdam::preferCpuOffload || !CudaAdam::preferFp16GpuWeights)
         throw std::logic_error("CudaLanguageModel::materializeFp16GpuWorkingWeights requires cpu offload + fp16 weights");
 
+    // Idempotent: applyVramPackBudget → ensureTrainState again must not re-seed after FP32 buffers are freed.
+    if (!this->blocks.empty()
+        && this->blocks[0].attention.qkvWeight.ampWeightSlot >= 0
+        && !this->hostTokenEmbeddingMaster.empty()
+        && this->hostBlockAdamStates.size() == this->blocks.size()
+        && !this->hostBlockAdamStates[0].queryWeightMaster.empty()) {
+        return;
+    }
+
     auto seedMaster = [](CudaMatrix& deviceWeight, Matrix& hostMaster) {
         if (deviceWeight.empty()) throw std::invalid_argument("materializeFp16GpuWorkingWeights empty weight");
         if (!deviceWeight.hasDeviceStorage())
@@ -660,6 +669,22 @@ size_t CudaLanguageModel::estimatePendingTrainStaticBytes() const {
             + matrixBytes(block.attention.valueWeight);
     }
 
+    // Host-grad offload: only embed / bias / gamma / (optional untied LM head) stay on GPU.
+    if (CudaAdam::preferHostGradients) {
+        gradientBytes = matrixBytes(this->tokenEmbeddingWeight)
+            + matrixBytes(this->finalNorm.gamma)
+            + matrixBytes(this->projectionBias);
+        if (!this->tieEmbeddingProjection)
+            gradientBytes += matrixBytes(this->projectionWeight);
+        for (const CudaTransformerBlock& block : this->blocks) {
+            gradientBytes += matrixBytes(block.attentionNorm.gamma)
+                + matrixBytes(block.feedForwardNorm.gamma)
+                + matrixBytes(block.feedForward.gateBias)
+                + matrixBytes(block.feedForward.upBias)
+                + matrixBytes(block.feedForward.downBias);
+        }
+    }
+
     size_t muonWeightBytes = 0;
     size_t adamWeightBytes = 0;
     adamWeightBytes += matrixBytes(this->tokenEmbeddingWeight);
@@ -722,8 +747,9 @@ size_t CudaLanguageModel::estimatePendingTrainStaticBytes() const {
             pending += 2ull * adamWeightBytes;
     }
 
-    // Sticky FP16 master-weight mirrors for AMP GEMMs.
-    if (CudaAmp::preferMixedPrecision)
+    // Sticky FP16 AMP mirrors only when weights stay FP32 on GPU.
+    // preferFp16GpuWeights already stores working weights as FP16 (no extra mirror table).
+    if (CudaAmp::preferMixedPrecision && !CudaAdam::preferFp16GpuWeights)
         pending += parameterBytes / 2ull;
 
     return pending;
@@ -1678,10 +1704,50 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
         // unscale first so overflow checks and Adam/Muon see true grad magnitudes
         const float inverseLossScale = 1.0f / CudaAmp::lossScaler.scale;
         gradients.scaleInPlace(inverseLossScale);
-        if (CudaAmp::gradientsHaveNonFinite(gradients)) {
+        if (CudaAdam::preferHostGradients) {
+            auto scaleHost = [inverseLossScale](Matrix& grad) {
+                if (!grad.empty())
+                    Matrix::scaleInPlace(grad, inverseLossScale);
+            };
+            for (CudaTransformerBlockHostAdamStates& hosts : this->hostBlockAdamStates) {
+                scaleHost(hosts.queryWeightGrad);
+                scaleHost(hosts.keyWeightGrad);
+                scaleHost(hosts.valueWeightGrad);
+                scaleHost(hosts.attentionOutputWeightGrad);
+                scaleHost(hosts.feedForwardGateWeightGrad);
+                scaleHost(hosts.feedForwardUpWeightGrad);
+                scaleHost(hosts.feedForwardDownWeightGrad);
+            }
+            scaleHost(this->hostProjectionWeightGrad);
+        }
+        bool overflow = CudaAmp::gradientsHaveNonFinite(gradients);
+        if (!overflow && CudaAdam::preferHostGradients) {
+            auto hostHasNonFinite = [](const Matrix& grad) -> bool {
+                for (float value : grad.data) {
+                    if (!std::isfinite(value)) return true;
+                }
+                return false;
+            };
+            for (const CudaTransformerBlockHostAdamStates& hosts : this->hostBlockAdamStates) {
+                if (hostHasNonFinite(hosts.queryWeightGrad)
+                    || hostHasNonFinite(hosts.keyWeightGrad)
+                    || hostHasNonFinite(hosts.valueWeightGrad)
+                    || hostHasNonFinite(hosts.attentionOutputWeightGrad)
+                    || hostHasNonFinite(hosts.feedForwardGateWeightGrad)
+                    || hostHasNonFinite(hosts.feedForwardUpWeightGrad)
+                    || hostHasNonFinite(hosts.feedForwardDownWeightGrad)) {
+                    overflow = true;
+                    break;
+                }
+            }
+            if (!overflow)
+                overflow = hostHasNonFinite(this->hostProjectionWeightGrad);
+        }
+        if (overflow) {
             CudaAmp::lossScaler.updateOnOverflow();
             // Critical: leave Inf/NaN grads in the buffer and every later microbatch stays poisoned.
             gradients.zeroInPlace();
+            this->zeroHostWeightGradients();
             this->adamWindowTokenIds.clear();
             return;
         }
@@ -2697,6 +2763,9 @@ void CudaLanguageModel::runTrainCpuAdamOffloadSmokeDemo(int vocabularySize, int 
 
         LanguageModel fp16Host(vocabularySize, embeddingDim, sequenceLength, Adam(0.001f), blockCount, headCount);
         CudaLanguageModel fp16Device = CudaLanguageModel::createFrom(fp16Host);
+        fp16Device.preferTrainGraph = false;
+        for (CudaTransformerBlock& block : fp16Device.blocks)
+            block.attention.preferFlashAttention = false;
         fp16Device.adam = CudaAdam(0.001f);
         fp16Device.ensureTrainState();
         for (int step = 0; step < 4; ++step) {
@@ -2705,12 +2774,14 @@ void CudaLanguageModel::runTrainCpuAdamOffloadSmokeDemo(int vocabularySize, int 
             fp16Device.applyGradients(fp16Device.trainGradients, 1.0f / static_cast<float>(packBatchSize));
         }
         CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "fp16 host-grads smoke synchronize");
+        LanguageModel downloaded(vocabularySize, embeddingDim, sequenceLength, Adam(0.001f), blockCount, headCount);
+        fp16Device.downloadTo(downloaded);
         float masterNorm = 0.0f;
         for (float value : fp16Device.hostTokenEmbeddingMaster.data)
             masterNorm += value * value;
         SmokeLog::result(
             "LanguageModel train FP16 GPU + host grads + CPU Adam",
-            "vocab=%d embed=%d steps=4  embedMasterL2=%.4f  finite=%s",
+            "vocab=%d embed=%d steps=4  embedMasterL2=%.4f  finite=%s  download=ok",
             vocabularySize, embeddingDim, std::sqrt(masterNorm),
             std::isfinite(masterNorm) ? "yes" : "no");
         CudaAmp::clearMasterWeights();

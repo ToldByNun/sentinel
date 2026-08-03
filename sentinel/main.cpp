@@ -55,6 +55,7 @@ int main() {
     const bool runBpeBench = false;
     const bool runCkptParity = false;
     const bool runMuonSmoke = false;
+    const bool runCpuAdamOffloadSmoke = false;
 
     // Arrow HF disk layout (sera_best_subset) via from-scratch ArrowChunkReader; JSONL still works
     const bool useArrowCorpus = true;
@@ -75,7 +76,7 @@ int main() {
     const int tokenizerVocabSize = 4000;
     const int tokenizerSampleRows = 2000;
     const int testReservoirCap = 512;
-    const bool preferCpuAdamOffload = false;
+    const bool preferCpuAdamOffload = true;
     const bool useCheckpointing = false;
 
     if (runMuonSmoke) {
@@ -89,6 +90,46 @@ int main() {
         CudaMuon::runSmokeDemo(48, 64);
         CudaLanguageModel::runMuonTrainSmokeDemo(128, 64, 32, 2, 4);
         return 0;
+    }
+
+    if (runCpuAdamOffloadSmoke) {
+        SmokeLog::section("cpu-adam-offload");
+        if (!CudaMatmul::isAvailable()) {
+            SmokeLog::skip("cpu-adam-offload (no CUDA)");
+            return 1;
+        }
+        try {
+            CudaLanguageModel::runTrainCpuAdamOffloadSmokeDemo(2000, 128, 64, 2, 4);
+
+            // Mirror SERA wiring: LanguageModel enableCuda → cpuAdam → train → flash request
+            LanguageModel model(512, 256, 64, Adam(0.001f), 2, 4);
+            model.enableCuda();
+            model.setCudaPreferCpuAdamOffload(true);
+            model.enableCudaTrain();
+            model.enableActivationCheckpointing(false);
+            model.setCudaPreferFlashAttention(true);
+            std::vector<LanguageModelExample> examples(4);
+            unsigned rng = 91u;
+            for (LanguageModelExample& example : examples) {
+                example.inputTokenIds.resize(64);
+                example.targetTokenIds.resize(64);
+                for (size_t i = 0; i < 64; ++i) {
+                    rng = rng * 1664525u + 1013904223u;
+                    example.inputTokenIds[i] = static_cast<int>(rng % 512u);
+                    rng = rng * 1664525u + 1013904223u;
+                    example.targetTokenIds[i] = static_cast<int>(rng % 512u);
+                }
+            }
+            LanguageModelDataset tiny;
+            tiny.examples = examples;
+            LanguageModelDataset emptyTest;
+            model.train(tiny, emptyTest, 1, 1, 4, 1);
+            SmokeLog::result("LanguageModel cpuAdam offload train", "ok epochs=1 batch=4");
+            return 0;
+        } catch (const std::exception& ex) {
+            SmokeLog::result("cpu-adam-offload", "FAILED: %s", ex.what());
+            return 1;
+        }
     }
 
     if (runMuonThroughputProbe) {

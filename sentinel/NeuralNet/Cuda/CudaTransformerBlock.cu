@@ -51,32 +51,32 @@ void CudaTransformerBlockGradients::zeroInPlace() {
 }
 
 void CudaTransformerBlockGradients::addInPlace(const CudaTransformerBlockGradients& other) {
-    CudaOps::addInPlace(this->queryWeight, other.queryWeight);
-    CudaOps::addInPlace(this->keyWeight, other.keyWeight);
-    CudaOps::addInPlace(this->valueWeight, other.valueWeight);
-    CudaOps::addInPlace(this->attentionOutputWeight, other.attentionOutputWeight);
+    if (!this->queryWeight.empty()) CudaOps::addInPlace(this->queryWeight, other.queryWeight);
+    if (!this->keyWeight.empty()) CudaOps::addInPlace(this->keyWeight, other.keyWeight);
+    if (!this->valueWeight.empty()) CudaOps::addInPlace(this->valueWeight, other.valueWeight);
+    if (!this->attentionOutputWeight.empty()) CudaOps::addInPlace(this->attentionOutputWeight, other.attentionOutputWeight);
     CudaOps::addInPlace(this->attentionNormGamma, other.attentionNormGamma);
     CudaOps::addInPlace(this->feedForwardNormGamma, other.feedForwardNormGamma);
-    CudaOps::addInPlace(this->feedForwardGateWeight, other.feedForwardGateWeight);
+    if (!this->feedForwardGateWeight.empty()) CudaOps::addInPlace(this->feedForwardGateWeight, other.feedForwardGateWeight);
     CudaOps::addInPlace(this->feedForwardGateBias, other.feedForwardGateBias);
-    CudaOps::addInPlace(this->feedForwardUpWeight, other.feedForwardUpWeight);
+    if (!this->feedForwardUpWeight.empty()) CudaOps::addInPlace(this->feedForwardUpWeight, other.feedForwardUpWeight);
     CudaOps::addInPlace(this->feedForwardUpBias, other.feedForwardUpBias);
-    CudaOps::addInPlace(this->feedForwardDownWeight, other.feedForwardDownWeight);
+    if (!this->feedForwardDownWeight.empty()) CudaOps::addInPlace(this->feedForwardDownWeight, other.feedForwardDownWeight);
     CudaOps::addInPlace(this->feedForwardDownBias, other.feedForwardDownBias);
 }
 
 void CudaTransformerBlockGradients::scaleInPlace(float scalar) {
-    CudaOps::scaleInPlace(this->queryWeight, scalar);
-    CudaOps::scaleInPlace(this->keyWeight, scalar);
-    CudaOps::scaleInPlace(this->valueWeight, scalar);
-    CudaOps::scaleInPlace(this->attentionOutputWeight, scalar);
+    if (!this->queryWeight.empty()) CudaOps::scaleInPlace(this->queryWeight, scalar);
+    if (!this->keyWeight.empty()) CudaOps::scaleInPlace(this->keyWeight, scalar);
+    if (!this->valueWeight.empty()) CudaOps::scaleInPlace(this->valueWeight, scalar);
+    if (!this->attentionOutputWeight.empty()) CudaOps::scaleInPlace(this->attentionOutputWeight, scalar);
     CudaOps::scaleInPlace(this->attentionNormGamma, scalar);
     CudaOps::scaleInPlace(this->feedForwardNormGamma, scalar);
-    CudaOps::scaleInPlace(this->feedForwardGateWeight, scalar);
+    if (!this->feedForwardGateWeight.empty()) CudaOps::scaleInPlace(this->feedForwardGateWeight, scalar);
     CudaOps::scaleInPlace(this->feedForwardGateBias, scalar);
-    CudaOps::scaleInPlace(this->feedForwardUpWeight, scalar);
+    if (!this->feedForwardUpWeight.empty()) CudaOps::scaleInPlace(this->feedForwardUpWeight, scalar);
     CudaOps::scaleInPlace(this->feedForwardUpBias, scalar);
-    CudaOps::scaleInPlace(this->feedForwardDownWeight, scalar);
+    if (!this->feedForwardDownWeight.empty()) CudaOps::scaleInPlace(this->feedForwardDownWeight, scalar);
     CudaOps::scaleInPlace(this->feedForwardDownBias, scalar);
 }
 
