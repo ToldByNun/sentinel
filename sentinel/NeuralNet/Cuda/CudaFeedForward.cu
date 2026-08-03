@@ -63,6 +63,23 @@ CudaFeedForward CudaFeedForward::createFrom(const FeedForward& host) {
     return device;
 }
 
+void CudaFeedForward::releaseActivationScratch() {
+    this->gateUpPreActivation.free();
+    this->gateUpHiddenGradient.free();
+    this->gateUpWeightGradient.free();
+    this->gatePreActivation.free();
+    this->gateActivated.free();
+    this->up.free();
+    this->hidden.free();
+    this->output.free();
+    this->inputCache.free();
+    this->hiddenGradient.free();
+    this->upGradient.free();
+    this->gateGradient.free();
+    this->siluDerivative.free();
+    this->temp.free();
+}
+
 void CudaFeedForward::forward(const CudaMatrix& input, CudaMatrix& out) {
     if (input.empty()) throw std::invalid_argument("CudaFeedForward::forward empty input");
     if (this->gateWeight.empty()) throw std::logic_error("CudaFeedForward::forward weights not uploaded");

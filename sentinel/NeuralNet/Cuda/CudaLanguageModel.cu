@@ -34,6 +34,7 @@ CudaLanguageModel::CudaLanguageModel()
       activationCheckpointMode(ActivationCheckpointMode::Selective),
       preferTrainGraph(true),
       preferMuon(false),
+      preferTrainMemTrace(false),
       adam(0.001f),
       muon(0.001f),
       trainStateReady(false),
@@ -99,7 +100,22 @@ void CudaLanguageModel::ensureTrainStream() {
 }
 
 void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLength, int exampleCount, CudaLanguageModelGradients& gradients) {
+    auto memTrace = [this](const char* label) {
+        if (!this->preferTrainMemTrace) return;
+        size_t freeBytes = 0;
+        size_t totalBytes = 0;
+        if (cudaMemGetInfo(&freeBytes, &totalBytes) != cudaSuccess) return;
+        SmokeLog::result(
+            label,
+            "used=%.0f  free=%.0f  total=%.0f MiB",
+            static_cast<double>(totalBytes - freeBytes) / (1024.0 * 1024.0),
+            static_cast<double>(freeBytes) / (1024.0 * 1024.0),
+            static_cast<double>(totalBytes) / (1024.0 * 1024.0));
+    };
+
     this->forwardTrunkFromDevice(tokenCount, segmentLength);
+    CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "runPackedTrainDevice after forwardTrunk");
+    memTrace("after forwardTrunk");
 
     if (this->epochLossSum.rows != 1 || this->epochLossSum.cols != 1)
         this->epochLossSum.ensureSize(1, 1);
@@ -113,11 +129,13 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
     if (hostLarge && this->hostBlockAdamStates.size() != this->blocks.size())
         this->hostBlockAdamStates.resize(this->blocks.size());
 
+    const int midBlock = static_cast<int>(this->blocks.size()) / 2;
     for (int blockIndex = static_cast<int>(this->blocks.size()) - 1; blockIndex >= 0; --blockIndex) {
         CudaTransformerBlock& block = this->blocks[static_cast<size_t>(blockIndex)];
         CudaTransformerBlockHostWeightGrads hostGrads{};
         CudaTransformerBlockHostWeightGrads* hostGradsPtr = nullptr;
         if (hostLarge) {
+            this->ensureHostWeightGradsForBlock(static_cast<size_t>(blockIndex));
             CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[static_cast<size_t>(blockIndex)];
             hostGrads.queryWeight = &hosts.queryWeightGrad;
             hostGrads.keyWeight = &hosts.keyWeightGrad;
@@ -168,7 +186,15 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
             block.backward(this->hiddenGradient, this->blockInputGradientScratch, gradients.blocks[static_cast<size_t>(blockIndex)], hostGradsPtr);
         }
 
+        if (hostLarge && CudaAdam::preferHostSgd)
+            this->applyHostSgdForBlockAndFree(static_cast<size_t>(blockIndex), 1.0f);
+
         std::swap(this->hiddenGradient, this->blockInputGradientScratch);
+
+        if (blockIndex == midBlock) {
+            CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "runPackedTrainDevice mid backward");
+            memTrace("mid backward");
+        }
     }
 
     CudaOps::embeddingScatterAddInto(gradients.tokenEmbedding, this->tokenIdsBuffer, tokenCount, this->hiddenGradient);
@@ -380,20 +406,12 @@ void CudaLanguageModel::ensureTrainState() {
     if (CudaAdam::preferHostGradients) {
         if (this->hostBlockAdamStates.size() != this->blocks.size())
             this->hostBlockAdamStates.resize(this->blocks.size());
-        for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
-            const CudaTransformerBlock& block = this->blocks[blockIndex];
-            CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[blockIndex];
-            auto ensureHostGrad = [](Matrix& grad, size_t rows, size_t cols) {
-                grad.ensureSize(rows, cols);
-                grad.fill(0.0f);
-            };
-            ensureHostGrad(hosts.queryWeightGrad, block.attention.queryWeight.rows, block.attention.queryWeight.cols);
-            ensureHostGrad(hosts.keyWeightGrad, block.attention.keyWeight.rows, block.attention.keyWeight.cols);
-            ensureHostGrad(hosts.valueWeightGrad, block.attention.valueWeight.rows, block.attention.valueWeight.cols);
-            ensureHostGrad(hosts.attentionOutputWeightGrad, block.attention.outputWeight.rows, block.attention.outputWeight.cols);
-            ensureHostGrad(hosts.feedForwardGateWeightGrad, block.feedForward.gateWeight.rows, block.feedForward.gateWeight.cols);
-            ensureHostGrad(hosts.feedForwardUpWeightGrad, block.feedForward.upWeight.rows, block.feedForward.upWeight.cols);
-            ensureHostGrad(hosts.feedForwardDownWeightGrad, block.feedForward.downWeight.rows, block.feedForward.downWeight.cols);
+        // preferHostSgd: allocate per-block during bwd and free immediately after SGD (keeps host RAM ~masters only).
+        if (!CudaAdam::preferHostSgd) {
+            for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex)
+                this->ensureHostWeightGradsForBlock(blockIndex);
+        } else {
+            this->releaseHostWeightGradients();
         }
     }
 
@@ -615,12 +633,15 @@ size_t CudaLanguageModel::bytesPerPackedColumn() const {
     }
 
     // Column scratch footprint depends on checkpoint mode:
-    // Off/Full: every block may hold Attn+FFN acts after forward (L * (attn+ffn)).
+    // Off: every block may hold Attn+FFN acts after forward (L * (attn+ffn)).
+    // Full: releaseTrainActivationScratch after each fwd → peak ~1 layer (attn+ffn).
     // Selective: FFN kept for all blocks; Attn QKV/Flash released after each block
     //   (peak ~1 Attn workspace during fwd/recompute).
     if (this->activationCheckpointMode == ActivationCheckpointMode::Selective) {
         bytes += blockCount * ffnScratchPerBlock;
         bytes += attnScratchPerBlock;
+    } else if (this->activationCheckpointMode == ActivationCheckpointMode::Full) {
+        bytes += attnScratchPerBlock + ffnScratchPerBlock;
     } else {
         bytes += blockCount * (attnScratchPerBlock + ffnScratchPerBlock);
     }
@@ -787,22 +808,8 @@ void CudaLanguageModel::releasePackedTrainWorkspaces() {
     this->adamWindowTokenIdsBuffer.free();
     this->releaseActivationCheckpoints();
 
-    for (CudaTransformerBlock& block : this->blocks) {
-        block.attention.releaseActivationScratch();
-        block.feedForward.gateUpPreActivation.free();
-        block.feedForward.gateUpHiddenGradient.free();
-        block.feedForward.gatePreActivation.free();
-        block.feedForward.gateActivated.free();
-        block.feedForward.up.free();
-        block.feedForward.hidden.free();
-        block.feedForward.output.free();
-        block.feedForward.inputCache.free();
-        block.feedForward.hiddenGradient.free();
-        block.feedForward.upGradient.free();
-        block.feedForward.gateGradient.free();
-        block.feedForward.siluDerivative.free();
-        block.feedForward.temp.free();
-    }
+    for (CudaTransformerBlock& block : this->blocks)
+        block.releaseTrainActivationScratch();
 }
 
 int CudaLanguageModel::maxPackExamplesForSegment(int segmentLength) const {
@@ -1501,8 +1508,12 @@ void CudaLanguageModel::forwardTrunkFromDevice(size_t tokenCount, int segmentLen
         }
         if (this->activationCheckpointMode == ActivationCheckpointMode::Selective)
             this->blocks[blockIndex].forwardSelectiveTrain(this->hidden, this->normalized, segmentLength);
-        else
+        else {
             this->blocks[blockIndex].forward(this->hidden, this->normalized, segmentLength);
+            // Full ckpt: block input is saved; drop layer scratch (recomputed on bwd).
+            if (this->activationCheckpointMode == ActivationCheckpointMode::Full)
+                this->blocks[blockIndex].releaseTrainActivationScratch();
+        }
         CudaMatrix swapBuffer = std::move(this->hidden);
         this->hidden = std::move(this->normalized);
         this->normalized = std::move(swapBuffer);
@@ -1524,6 +1535,171 @@ void CudaLanguageModel::zeroHostWeightGradients() {
     }
     if (!this->hostProjectionWeightGrad.empty())
         this->hostProjectionWeightGrad.fill(0.0f);
+}
+
+void CudaLanguageModel::releaseHostWeightGradients() {
+    for (CudaTransformerBlockHostAdamStates& hosts : this->hostBlockAdamStates) {
+        hosts.queryWeightGrad = Matrix();
+        hosts.keyWeightGrad = Matrix();
+        hosts.valueWeightGrad = Matrix();
+        hosts.attentionOutputWeightGrad = Matrix();
+        hosts.feedForwardGateWeightGrad = Matrix();
+        hosts.feedForwardUpWeightGrad = Matrix();
+        hosts.feedForwardDownWeightGrad = Matrix();
+    }
+    this->hostProjectionWeightGrad = Matrix();
+}
+
+size_t CudaLanguageModel::estimateHostMasterAndGradBytes() const {
+    auto matrixBytes = [](const Matrix& matrix) -> size_t {
+        return matrix.data.size() * sizeof(float);
+    };
+    size_t bytes = 0;
+    bytes += matrixBytes(this->hostTokenEmbeddingMaster);
+    bytes += matrixBytes(this->hostFinalNormGammaMaster);
+    bytes += matrixBytes(this->hostProjectionWeightMaster);
+    bytes += matrixBytes(this->hostProjectionBiasMaster);
+    bytes += matrixBytes(this->hostProjectionWeightGrad);
+    for (const CudaTransformerBlockHostAdamStates& hosts : this->hostBlockAdamStates) {
+        bytes += matrixBytes(hosts.queryWeightMaster);
+        bytes += matrixBytes(hosts.keyWeightMaster);
+        bytes += matrixBytes(hosts.valueWeightMaster);
+        bytes += matrixBytes(hosts.attentionOutputWeightMaster);
+        bytes += matrixBytes(hosts.feedForwardGateWeightMaster);
+        bytes += matrixBytes(hosts.feedForwardUpWeightMaster);
+        bytes += matrixBytes(hosts.feedForwardDownWeightMaster);
+        bytes += matrixBytes(hosts.attentionNormGammaMaster);
+        bytes += matrixBytes(hosts.feedForwardNormGammaMaster);
+        bytes += matrixBytes(hosts.feedForwardGateBiasMaster);
+        bytes += matrixBytes(hosts.feedForwardUpBiasMaster);
+        bytes += matrixBytes(hosts.feedForwardDownBiasMaster);
+        bytes += matrixBytes(hosts.queryWeightGrad);
+        bytes += matrixBytes(hosts.keyWeightGrad);
+        bytes += matrixBytes(hosts.valueWeightGrad);
+        bytes += matrixBytes(hosts.attentionOutputWeightGrad);
+        bytes += matrixBytes(hosts.feedForwardGateWeightGrad);
+        bytes += matrixBytes(hosts.feedForwardUpWeightGrad);
+        bytes += matrixBytes(hosts.feedForwardDownWeightGrad);
+    }
+    return bytes;
+}
+
+static void ensureHostGradMatrix(Matrix& grad, size_t rows, size_t cols) {
+    grad.ensureSize(rows, cols);
+    grad.fill(0.0f);
+}
+
+static void releaseHostGradMatrix(Matrix& grad) {
+    grad = Matrix();
+}
+
+static void applyHostSgdInPlace(Matrix& master, const Matrix& grad, float stepScale) {
+    if (master.empty() || grad.empty()) return;
+    if (master.data.size() != grad.data.size())
+        throw std::invalid_argument("applyHostSgdInPlace size mismatch");
+    float* masterData = master.data.data();
+    const float* gradData = grad.data.data();
+    const ptrdiff_t n = static_cast<ptrdiff_t>(master.data.size());
+#if defined(_OPENMP)
+    #pragma omp parallel for schedule(static)
+#endif
+    for (ptrdiff_t index = 0; index < n; ++index)
+        masterData[index] -= stepScale * gradData[index];
+}
+
+void CudaLanguageModel::ensureHostWeightGradsForBlock(size_t blockIndex) {
+    if (!CudaAdam::preferHostGradients) return;
+    if (blockIndex >= this->blocks.size()) throw std::out_of_range("ensureHostWeightGradsForBlock");
+    if (this->hostBlockAdamStates.size() != this->blocks.size())
+        this->hostBlockAdamStates.resize(this->blocks.size());
+    const CudaTransformerBlock& block = this->blocks[blockIndex];
+    CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[blockIndex];
+    ensureHostGradMatrix(hosts.queryWeightGrad, block.attention.queryWeight.rows, block.attention.queryWeight.cols);
+    ensureHostGradMatrix(hosts.keyWeightGrad, block.attention.keyWeight.rows, block.attention.keyWeight.cols);
+    ensureHostGradMatrix(hosts.valueWeightGrad, block.attention.valueWeight.rows, block.attention.valueWeight.cols);
+    ensureHostGradMatrix(hosts.attentionOutputWeightGrad, block.attention.outputWeight.rows, block.attention.outputWeight.cols);
+    ensureHostGradMatrix(hosts.feedForwardGateWeightGrad, block.feedForward.gateWeight.rows, block.feedForward.gateWeight.cols);
+    ensureHostGradMatrix(hosts.feedForwardUpWeightGrad, block.feedForward.upWeight.rows, block.feedForward.upWeight.cols);
+    ensureHostGradMatrix(hosts.feedForwardDownWeightGrad, block.feedForward.downWeight.rows, block.feedForward.downWeight.cols);
+}
+
+void CudaLanguageModel::releaseHostWeightGradsForBlock(size_t blockIndex) {
+    if (blockIndex >= this->hostBlockAdamStates.size()) return;
+    CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[blockIndex];
+    releaseHostGradMatrix(hosts.queryWeightGrad);
+    releaseHostGradMatrix(hosts.keyWeightGrad);
+    releaseHostGradMatrix(hosts.valueWeightGrad);
+    releaseHostGradMatrix(hosts.attentionOutputWeightGrad);
+    releaseHostGradMatrix(hosts.feedForwardGateWeightGrad);
+    releaseHostGradMatrix(hosts.feedForwardUpWeightGrad);
+    releaseHostGradMatrix(hosts.feedForwardDownWeightGrad);
+}
+
+void CudaLanguageModel::applyHostSgdForBlockAndFree(size_t blockIndex, float gradientScale) {
+    if (!CudaAdam::preferHostSgd || !CudaAdam::preferHostGradients) return;
+    if (blockIndex >= this->blocks.size() || blockIndex >= this->hostBlockAdamStates.size())
+        throw std::out_of_range("applyHostSgdForBlockAndFree");
+
+    float invLoss = 1.0f;
+    if (CudaAmp::lossScalingActive()) {
+        const float scale = CudaAmp::lossScaler.scale;
+        if (!(scale > 0.0f) || !std::isfinite(scale)) return;
+        invLoss = 1.0f / scale;
+    }
+    const float stepScale = this->adam.learningRate * gradientScale * invLoss;
+
+    auto finite = [](const Matrix& matrix) -> bool {
+        for (float value : matrix.data) {
+            if (!std::isfinite(value)) return false;
+        }
+        return true;
+    };
+
+    CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[blockIndex];
+    if (!finite(hosts.queryWeightGrad) || !finite(hosts.keyWeightGrad) || !finite(hosts.valueWeightGrad)
+        || !finite(hosts.attentionOutputWeightGrad) || !finite(hosts.feedForwardGateWeightGrad)
+        || !finite(hosts.feedForwardUpWeightGrad) || !finite(hosts.feedForwardDownWeightGrad)) {
+        this->releaseHostWeightGradsForBlock(blockIndex);
+        if (CudaAmp::lossScalingActive())
+            CudaAmp::lossScaler.updateOnOverflow();
+        return;
+    }
+
+    applyHostSgdInPlace(hosts.queryWeightMaster, hosts.queryWeightGrad, stepScale);
+    applyHostSgdInPlace(hosts.keyWeightMaster, hosts.keyWeightGrad, stepScale);
+    applyHostSgdInPlace(hosts.valueWeightMaster, hosts.valueWeightGrad, stepScale);
+    applyHostSgdInPlace(hosts.attentionOutputWeightMaster, hosts.attentionOutputWeightGrad, stepScale);
+    applyHostSgdInPlace(hosts.feedForwardGateWeightMaster, hosts.feedForwardGateWeightGrad, stepScale);
+    applyHostSgdInPlace(hosts.feedForwardUpWeightMaster, hosts.feedForwardUpWeightGrad, stepScale);
+    applyHostSgdInPlace(hosts.feedForwardDownWeightMaster, hosts.feedForwardDownWeightGrad, stepScale);
+
+    CudaTransformerBlock& block = this->blocks[blockIndex];
+    if (block.attention.outputWeight.ampWeightSlot >= 0)
+        CudaAmp::uploadHostMasterToFp16Working(block.attention.outputWeight, hosts.attentionOutputWeightMaster.data.data());
+    if (block.feedForward.downWeight.ampWeightSlot >= 0)
+        CudaAmp::uploadHostMasterToFp16Working(block.feedForward.downWeight, hosts.feedForwardDownWeightMaster.data.data());
+
+    // Rebuild fused FP16 mirrors for this block only.
+    {
+        thread_local std::vector<float> qkvPack;
+        thread_local std::vector<float> gateUpPack;
+        const size_t slice = hosts.queryWeightMaster.data.size();
+        qkvPack.resize(slice * 3ull);
+        std::memcpy(qkvPack.data(), hosts.queryWeightMaster.data.data(), slice * sizeof(float));
+        std::memcpy(qkvPack.data() + slice, hosts.keyWeightMaster.data.data(), slice * sizeof(float));
+        std::memcpy(qkvPack.data() + 2ull * slice, hosts.valueWeightMaster.data.data(), slice * sizeof(float));
+        CudaAmp::uploadHostMasterToFp16Working(block.attention.qkvWeight, qkvPack.data());
+
+        const size_t gateSlice = hosts.feedForwardGateWeightMaster.data.size();
+        const size_t upSlice = hosts.feedForwardUpWeightMaster.data.size();
+        gateUpPack.resize(gateSlice + upSlice);
+        std::memcpy(gateUpPack.data(), hosts.feedForwardGateWeightMaster.data.data(), gateSlice * sizeof(float));
+        std::memcpy(gateUpPack.data() + gateSlice, hosts.feedForwardUpWeightMaster.data.data(), upSlice * sizeof(float));
+        CudaAmp::uploadHostMasterToFp16Working(block.feedForward.gateUpWeight, gateUpPack.data());
+        block.feedForward.syncFusedGateUpWeight();
+    }
+
+    this->releaseHostWeightGradsForBlock(blockIndex);
 }
 
 void CudaLanguageModel::zeroAccumulatedGradients() {
@@ -1843,7 +2019,9 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
         auto pushOffload = [&offloadItems](CudaMatrix& parameter, AdamState& state, CudaMatrix* deviceGradient, Matrix* hostMaster, Matrix* hostGradient) {
             if (parameter.elementCount() == 0) throw std::invalid_argument("CudaLanguageModel::applyGradients empty parameter");
             if (hostGradient != nullptr) {
-                if (hostGradient->empty() || hostGradient->data.size() != parameter.elementCount())
+                // preferHostSgd may have already applied+freed large grads during bwd.
+                if (hostGradient->empty()) return;
+                if (hostGradient->data.size() != parameter.elementCount())
                     throw std::invalid_argument("CudaLanguageModel::applyGradients hostGradient size mismatch");
             } else {
                 if (deviceGradient == nullptr || deviceGradient->elementCount() != parameter.elementCount())
@@ -1889,6 +2067,7 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
         applyMuonBlockWeights();
         this->adam.updateCpuOffloadedMany(offloadItems.data(), static_cast<int>(offloadItems.size()), effectiveGradientScale);
         syncFusedMirrors();
+        this->releaseHostWeightGradients();
 
         if (CudaAmp::lossScalingActive())
             CudaAmp::lossScaler.updateOnSuccess();
@@ -3261,6 +3440,40 @@ void CudaLanguageModel::uploadFromFp16CpuOffload(LanguageModel& host) {
         }
     }
 
+    // Drop leftover host Adam/Muon moments (weights already moved). Large models otherwise keep ~2x params in RAM.
+    auto clearAdam = [](AdamState& state) {
+        state.firstMoment = Matrix();
+        state.secondMoment = Matrix();
+    };
+    auto clearMuon = [](MuonState& state) {
+        state.momentum = Matrix();
+    };
+    clearAdam(host.tokenEmbeddingState);
+    clearAdam(host.finalNormGammaState);
+    clearAdam(host.projectionWeightState);
+    clearAdam(host.projectionBiasState);
+    for (TransformerBlock& hostBlock : host.blocks) {
+        clearAdam(hostBlock.queryWeightState);
+        clearAdam(hostBlock.keyWeightState);
+        clearAdam(hostBlock.valueWeightState);
+        clearAdam(hostBlock.attentionOutputWeightState);
+        clearAdam(hostBlock.attentionNormGammaState);
+        clearAdam(hostBlock.feedForwardNormGammaState);
+        clearAdam(hostBlock.feedForwardGateWeightState);
+        clearAdam(hostBlock.feedForwardGateBiasState);
+        clearAdam(hostBlock.feedForwardUpWeightState);
+        clearAdam(hostBlock.feedForwardUpBiasState);
+        clearAdam(hostBlock.feedForwardDownWeightState);
+        clearAdam(hostBlock.feedForwardDownBiasState);
+        clearMuon(hostBlock.queryWeightMuon);
+        clearMuon(hostBlock.keyWeightMuon);
+        clearMuon(hostBlock.valueWeightMuon);
+        clearMuon(hostBlock.attentionOutputWeightMuon);
+        clearMuon(hostBlock.feedForwardGateWeightMuon);
+        clearMuon(hostBlock.feedForwardUpWeightMuon);
+        clearMuon(hostBlock.feedForwardDownWeightMuon);
+    }
+
     this->trainStateReady = false;
 }
 
@@ -3528,6 +3741,8 @@ CudaLanguageModelVramBreakdown CudaLanguageModel::estimateVramBreakdown(
     if (checkpointMode == ActivationCheckpointMode::Selective) {
         perColumn += layerCount * ffnScratch;
         perColumn += attnScratch;
+    } else if (checkpointMode == ActivationCheckpointMode::Full) {
+        perColumn += attnScratch + ffnScratch;
     } else {
         perColumn += layerCount * (attnScratch + ffnScratch);
     }
@@ -3745,7 +3960,7 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
     SmokeLog::section("scale-4B train-step");
     SmokeLog::result(
         "shape",
-        "vocab=%d embed=%d blocks=%d heads=%d pos=%d seq=%d  mode=fp16w+hostGrads+ckpt=sel flash=on opt=SGD",
+        "vocab=%d embed=%d blocks=%d heads=%d pos=%d seq=%d  mode=fp16w+hostGrads+ckpt=full flash=on opt=SGD",
         vocab, embed, blocks, heads, pos, seq);
 
     auto memSnapshot = [](const char* label) {
@@ -3773,45 +3988,60 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
         memSnapshot("before host ctor");
         SmokeLog::note("constructing ~4B host LanguageModel (CPU)…");
         const auto ctorStart = std::chrono::steady_clock::now();
-        LanguageModel host(vocab, embed, pos, Adam(0.001f), blocks, heads);
-        const double ctorSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - ctorStart).count();
-        SmokeLog::result("host ctor", "sec=%.1f", ctorSec);
-        memSnapshot("after host ctor");
-
-        CudaAmp::preferMixedPrecision = true;
-        CudaAmp::useLossScaling = true;
-        CudaAmp::resetLossScaler();
-        CudaAdam::preferCpuOffload = true;
-        CudaAdam::preferFp16GpuWeights = true;
-        CudaAdam::preferHostGradients = true;
-        CudaAdam::preferInt8Moments = false;
-        // ~31GB host RAM cannot hold FP32 masters + host grads + Adam m/v (~2x params).
-        // SGD proves full fwd/bwd + weight update + FP16 H2D without moment buffers.
-        CudaAdam::preferHostSgd = true;
-        SmokeLog::note("optimizer=SGD on host masters (Adam moments need ~2x param host RAM)");
 
         CudaLanguageModel device;
         device.preferTrainGraph = false;
         device.preferMuon = false;
+        device.preferTrainMemTrace = true;
         device.adam = CudaAdam(0.001f);
-        device.setActivationCheckpointMode(ActivationCheckpointMode::Selective);
+        // Full + releaseTrainActivationScratch: peak ~1 layer acts (avoids Selective FFN×L spill).
+        device.setActivationCheckpointMode(ActivationCheckpointMode::Full);
         device.maxPackedColumns = seq;
         device.maxPackedColumnsManual = true;
         device.logitChunkRows = 2048;
 
-        SmokeLog::note("streaming FP16 upload (moves host weights → masters)…");
-        const auto uploadStart = std::chrono::steady_clock::now();
-        device.uploadFromFp16CpuOffload(host);
+        {
+            LanguageModel host(vocab, embed, pos, Adam(0.001f), blocks, heads);
+            const double ctorSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - ctorStart).count();
+            SmokeLog::result("host ctor", "sec=%.1f", ctorSec);
+            memSnapshot("after host ctor");
+
+            CudaAmp::preferMixedPrecision = true;
+            CudaAmp::useLossScaling = true;
+            CudaAmp::resetLossScaler();
+            CudaAdam::preferCpuOffload = true;
+            CudaAdam::preferFp16GpuWeights = true;
+            CudaAdam::preferHostGradients = true;
+            CudaAdam::preferInt8Moments = false;
+            // ~31GB host RAM cannot hold FP32 masters + host grads + Adam m/v (~2x params).
+            // SGD proves full fwd/bwd + weight update + FP16 H2D without moment buffers.
+            // Layer-wise host SGD frees each block's grads during bwd (masters-only steady RAM).
+            CudaAdam::preferHostSgd = true;
+            SmokeLog::note("optimizer=SGD on host masters (Adam moments need ~2x param host RAM)");
+
+            SmokeLog::note("streaming FP16 upload (moves host weights → masters)…");
+            const auto uploadStart = std::chrono::steady_clock::now();
+            device.uploadFromFp16CpuOffload(host);
+            const double uploadSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - uploadStart).count();
+            SmokeLog::result("upload", "sec=%.1f  headDim=%d flashMax=%d", uploadSec, embed / heads, CudaFlashAttention::maxHeadDimension);
+            memSnapshot("after upload");
+            SmokeLog::result(
+                "host offload bytes",
+                "masters+grads≈%.1f GiB (host LM dropped after this scope)",
+                static_cast<double>(device.estimateHostMasterAndGradBytes()) / (1024.0 * 1024.0 * 1024.0));
+        } // destroy emptied host LanguageModel (no Adam zombies)
+
         for (CudaTransformerBlock& block : device.blocks) {
             block.attention.preferFlashAttention = true;
             block.attention.releaseDenseAttentionScratch();
         }
-        const double uploadSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - uploadStart).count();
-        SmokeLog::result("upload", "sec=%.1f  headDim=%d flashMax=%d", uploadSec, embed / heads, CudaFlashAttention::maxHeadDimension);
-        memSnapshot("after upload");
 
         device.ensureTrainState();
         memSnapshot("after ensureTrainState");
+        SmokeLog::result(
+            "host offload bytes",
+            "masters+grads≈%.1f GiB",
+            static_cast<double>(device.estimateHostMasterAndGradBytes()) / (1024.0 * 1024.0 * 1024.0));
 
         LanguageModelExample example;
         example.inputTokenIds.resize(static_cast<size_t>(seq));
@@ -3835,15 +4065,24 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
         device.accumulatePackedExamples(&packPtr, 1, device.trainGradients);
         CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "4B accumulate synchronize");
         const double accumSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - accumStart).count();
+        memSnapshot("after accumulate");
+        SmokeLog::result(
+            "host offload bytes",
+            "masters+grads≈%.1f GiB",
+            static_cast<double>(device.estimateHostMasterAndGradBytes()) / (1024.0 * 1024.0 * 1024.0));
         if (device.blocks.empty() || !device.blocks[0].attention.usedFlashAttention)
             throw std::runtime_error("4B train-step expected flash attention (usedFlashAttention=false)");
-        SmokeLog::result("accumulate", "sec=%.2f  tokens/s=%.0f  flash=on", accumSec, accumSec > 0.0 ? static_cast<double>(seq) / accumSec : 0.0);
+        SmokeLog::result("accumulate", "sec=%.2f  tokens/s=%.0f  flash=on ckpt=full", accumSec, accumSec > 0.0 ? static_cast<double>(seq) / accumSec : 0.0);
 
         const auto applyStart = std::chrono::steady_clock::now();
         device.applyGradients(device.trainGradients, 1.0f);
         CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "4B applyGradients synchronize");
         const double applySec = std::chrono::duration<double>(std::chrono::steady_clock::now() - applyStart).count();
         SmokeLog::result("applyGradients", "sec=%.2f  opt=SGD(host)", applySec);
+        SmokeLog::result(
+            "host offload bytes",
+            "masters+grads≈%.1f GiB",
+            static_cast<double>(device.estimateHostMasterAndGradBytes()) / (1024.0 * 1024.0 * 1024.0));
 
         const double stepSec = accumSec + applySec;
         size_t freeAfterStep = 0;
@@ -3865,13 +4104,14 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
 
         SmokeLog::result(
             "4B train-step",
-            "OK  loss=%.4f finite=%s  embedMasterL2=%.2f  stepSec=%.2f  tokens/s=%.0f  usedAfter=%.0f MiB  opt=SGD(host)  stepDelta=%.0f MiB",
+            "OK  loss=%.4f finite=%s  embedMasterL2=%.2f  stepSec=%.2f  tokens/s=%.0f  usedAfter=%.0f MiB  freeAfter=%.0f MiB  opt=SGD(host)  stepDelta=%.0f MiB  ckpt=full",
             loss,
             finiteLoss ? "yes" : "no",
             masterNorm,
             stepSec,
             stepSec > 0.0 ? static_cast<double>(seq) / stepSec : 0.0,
             static_cast<double>(totalAfterStep - freeAfterStep) / (1024.0 * 1024.0),
+            static_cast<double>(freeAfterStep) / (1024.0 * 1024.0),
             static_cast<double>(static_cast<long long>(freeBeforeStep) - static_cast<long long>(freeAfterStep)) / (1024.0 * 1024.0));
     } catch (const std::exception& ex) {
         SmokeLog::result("4B train-step", "FAILED: %s", ex.what());

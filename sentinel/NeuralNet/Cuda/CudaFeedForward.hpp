@@ -52,6 +52,9 @@ public:
     /// <summary>SwiGLU forward writing into out without host copies</summary>
     void forward(const CudaMatrix& input, CudaMatrix& out);
 
+    /// <summary>free forward/backward activation scratch (weights untouched)</summary>
+    void releaseActivationScratch();
+
     /// <summary>SwiGLU backward using cached forward activations</summary>
     void backward(const CudaMatrix& outputGradient, CudaMatrix& inputGradient, CudaMatrix& gateWeightGradient, CudaMatrix& gateBiasGradient, CudaMatrix& upWeightGradient, CudaMatrix& upBiasGradient, CudaMatrix& downWeightGradient, CudaMatrix& downBiasGradient);
 

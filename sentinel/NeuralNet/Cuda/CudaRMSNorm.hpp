@@ -21,6 +21,9 @@ public:
     /// <summary>normalize by rms then scale writing into out</summary>
     void forward(const CudaMatrix& input, CudaMatrix& out) const;
 
+    /// <summary>free lastInput / lastNormalized / rms scratch (gamma untouched)</summary>
+    void releaseActivationScratch() const;
+
     /// <summary>
     /// block epilogue: residualOut = left + right, then normOut = RMSNorm(residualOut)
     /// one launch; caches lastNormalized/inverseRms for backward (lastInput shape only)

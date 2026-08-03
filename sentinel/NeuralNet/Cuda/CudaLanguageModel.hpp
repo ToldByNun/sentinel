@@ -237,6 +237,9 @@ public:
     /// <summary>Muon on hidden 2D weights; Adam on embed/norms/biases/head</summary>
     bool preferMuon;
 
+    /// <summary>log cudaMemGetInfo during packed train (4B probe)</summary>
+    bool preferTrainMemTrace;
+
     /// <summary>true when mode is Full or Selective</summary>
     bool activationCheckpointingActive() const;
 
@@ -431,6 +434,21 @@ public:
 
     /// <summary>zero host-offloaded large weight grads only</summary>
     void zeroHostWeightGradients();
+
+    /// <summary>free host-offloaded large weight grad buffers (masters untouched)</summary>
+    void releaseHostWeightGradients();
+
+    /// <summary>host FP32 masters + host large-weight grads currently resident</summary>
+    size_t estimateHostMasterAndGradBytes() const;
+
+    /// <summary>allocate one block's host large-weight grads</summary>
+    void ensureHostWeightGradsForBlock(size_t blockIndex);
+
+    /// <summary>free one block's host large-weight grads</summary>
+    void releaseHostWeightGradsForBlock(size_t blockIndex);
+
+    /// <summary>SGD on one block's host masters then free its grads (preferHostSgd)</summary>
+    void applyHostSgdForBlockAndFree(size_t blockIndex, float gradientScale = 1.0f);
 
     /// <summary>pre-allocate train activation workspaces to maxPackedColumns</summary>
 
