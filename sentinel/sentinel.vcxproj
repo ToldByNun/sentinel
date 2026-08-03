@@ -217,6 +217,7 @@
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
       <CodeGeneration>compute_120,sm_120</CodeGeneration>
+      <AdditionalOptions>-Xcompiler "/openmp" %(AdditionalOptions)</AdditionalOptions>
     </CudaCompile>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
@@ -241,6 +242,7 @@
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
       <CodeGeneration>compute_120,sm_120</CodeGeneration>
+      <AdditionalOptions>-Xcompiler "/openmp" %(AdditionalOptions)</AdditionalOptions>
     </CudaCompile>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>

@@ -3,13 +3,19 @@
 #include "CudaLanguageModel.hpp"
 #include "CudaOps.hpp"
 
+#include <algorithm>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cublasLt.h>
 #include <cmath>
+#include <cstddef>
 #include <stdexcept>
 #include <string>
 #include <utility>
+
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 
 bool CudaAmp::preferMixedPrecision = false;
 bool CudaAmp::useLossScaling = false;
@@ -21,6 +27,65 @@ CudaDeviceBuffer CudaAmp::floatScratchRight = CudaDeviceBuffer();
 CudaDeviceBuffer CudaAmp::nonFiniteFlag = CudaDeviceBuffer();
 CudaAmp::MasterWeightHalf CudaAmp::masterWeights[CudaAmp::maxMasterWeights];
 int CudaAmp::masterWeightCount = 0;
+
+namespace {
+struct PinnedHalfUploadStaging {
+    void* buffers[2] = { nullptr, nullptr };
+    size_t capacityBytes[2] = { 0, 0 };
+    cudaEvent_t readyEvents[2] = { nullptr, nullptr };
+    int turn = 0;
+
+    ~PinnedHalfUploadStaging() {
+        for (int slot = 0; slot < 2; ++slot) {
+            if (this->readyEvents[slot] != nullptr) {
+                cudaEventDestroy(this->readyEvents[slot]);
+                this->readyEvents[slot] = nullptr;
+            }
+            if (this->buffers[slot] != nullptr) {
+                cudaFreeHost(this->buffers[slot]);
+                this->buffers[slot] = nullptr;
+            }
+            this->capacityBytes[slot] = 0;
+        }
+    }
+
+    void ensureEvents() {
+        for (int slot = 0; slot < 2; ++slot) {
+            if (this->readyEvents[slot] != nullptr) continue;
+            if (cudaEventCreateWithFlags(&this->readyEvents[slot], cudaEventDisableTiming) != cudaSuccess)
+                throw std::runtime_error("PinnedHalfUploadStaging event create failed");
+        }
+    }
+
+    void* acquire(size_t bytes) {
+        this->ensureEvents();
+        const int slot = this->turn;
+        if (this->readyEvents[slot] != nullptr)
+            cudaEventSynchronize(this->readyEvents[slot]);
+        if (bytes > this->capacityBytes[slot]) {
+            if (this->buffers[slot] != nullptr) {
+                cudaFreeHost(this->buffers[slot]);
+                this->buffers[slot] = nullptr;
+            }
+            this->capacityBytes[slot] = 0;
+            if (cudaMallocHost(&this->buffers[slot], bytes) != cudaSuccess)
+                throw std::runtime_error("PinnedHalfUploadStaging cudaMallocHost failed");
+            this->capacityBytes[slot] = bytes;
+        }
+        return this->buffers[slot];
+    }
+
+    void record(cudaStream_t stream) {
+        const int slot = this->turn;
+        this->ensureEvents();
+        if (cudaEventRecord(this->readyEvents[slot], stream) != cudaSuccess)
+            throw std::runtime_error("PinnedHalfUploadStaging event record failed");
+        this->turn = 1 - this->turn;
+    }
+};
+
+thread_local PinnedHalfUploadStaging gPinnedHalfUploadStaging;
+} // namespace
 
 bool CudaAmp::lossScalingActive() {
     return CudaAmp::preferMixedPrecision && CudaAmp::useLossScaling;
@@ -79,20 +144,31 @@ void CudaAmp::uploadHostMasterToFp16Working(CudaMatrix& matrix, const float* hos
         throw std::logic_error("CudaAmp::uploadHostMasterToFp16Working matrix not bound");
     MasterWeightHalf& entry = CudaAmp::masterWeights[matrix.ampWeightSlot];
     if (!entry.fp16Working) throw std::logic_error("CudaAmp::uploadHostMasterToFp16Working not fp16 working");
-    entry.half.ensureCapacity(entry.elementCount * sizeof(__half));
 
-    // Staging via existing float scratch cast path: H2D float temp then cast, or direct H2D half.
-    // Direct: host float -> device float scratch -> half (reuse left scratch as float staging).
-    CudaAmp::halfScratchLeft.ensureCapacity(entry.elementCount * sizeof(float));
-    CudaMatmul::throwIfCudaFailed(
-        cudaMemcpyAsync(
-            CudaAmp::halfScratchLeft.deviceData,
-            hostMaster,
-            entry.elementCount * sizeof(float),
-            cudaMemcpyHostToDevice,
-            CudaMatmul::activeStream()),
-        "CudaAmp::uploadHostMasterToFp16Working H2D");
-    CudaAmp::castFloatBufferToHalf(CudaAmp::halfScratchLeft.deviceData, entry.elementCount, entry.half);
+    const size_t elementCount = entry.elementCount;
+    const size_t halfBytes = elementCount * sizeof(__half);
+    entry.half.ensureCapacity(halfBytes);
+
+    // Chunked host FP32→FP16 into a small pinned staging buffer, then H2D half.
+    // Keeps pinned RAM bounded (~8 MiB) under the 4B host-master + host-grad footprint.
+    constexpr size_t kChunkElements = 4ull * 1024ull * 1024ull; // 4M halves ≈ 8 MiB
+    cudaStream_t stream = CudaMatmul::activeStream();
+    __half* deviceHalf = reinterpret_cast<__half*>(entry.half.deviceData);
+
+    for (size_t offset = 0; offset < elementCount; offset += kChunkElements) {
+        const size_t chunk = (std::min)(kChunkElements, elementCount - offset);
+        __half* pinnedHalf = reinterpret_cast<__half*>(gPinnedHalfUploadStaging.acquire(chunk * sizeof(__half)));
+#if defined(_OPENMP)
+        #pragma omp parallel for schedule(static)
+#endif
+        for (ptrdiff_t index = 0; index < static_cast<ptrdiff_t>(chunk); ++index)
+            pinnedHalf[index] = __float2half_rn(hostMaster[offset + static_cast<size_t>(index)]);
+
+        CudaMatmul::throwIfCudaFailed(
+            cudaMemcpyAsync(deviceHalf + offset, pinnedHalf, chunk * sizeof(__half), cudaMemcpyHostToDevice, stream),
+            "CudaAmp::uploadHostMasterToFp16Working H2D half");
+        gPinnedHalfUploadStaging.record(stream);
+    }
     entry.valid = true;
 }
 

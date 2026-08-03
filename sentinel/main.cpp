@@ -51,7 +51,7 @@ int main() {
     const bool runPackBudgetBench = false;
     const bool runScaleProfile = false;
     const bool runScale4BVramProbe = false;
-    const bool runScale4BTrainStep = false;
+    const bool runScale4BTrainStep = true;
     const bool runArrowCorpusSmoke = false;
     const bool runBpeBench = false;
     const bool runCkptParity = false;
@@ -1072,8 +1072,6 @@ int main() {
             return 1;
         }
         try {
-            SmokeLog::note("preflight: FP16 + host grads + flash smoke");
-            CudaLanguageModel::runTrainCpuAdamOffloadSmokeDemo(2000, 128, 64, 2, 4);
             CudaLanguageModel::runScale4BTrainStepProbeDemo();
         } catch (const std::exception& ex) {
             SmokeLog::result("scale-4B train-step", "FAILED: %s", ex.what());
