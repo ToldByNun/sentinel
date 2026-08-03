@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <cuda_runtime.h>
@@ -482,76 +483,104 @@ void CudaAdam::updateCpuOffloadedMany(const CudaAdamCpuOffloadItem* items, int i
         hostAdam.timeStep = this->timeStep;
         gCudaAdamOffloadArena.ensureStream();
         cudaStream_t stream = gCudaAdamOffloadArena.stream;
+        const cudaStream_t previousStream = CudaMatmul::setActiveStream(stream);
 
-        for (int itemIndex = 0; itemIndex < itemCount; ++itemIndex) {
-            const CudaAdamCpuOffloadItem& item = items[itemIndex];
-            if (item.parameter == nullptr || item.hostState == nullptr)
-                throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany null item pointer");
-            if (item.parameter->empty())
-                throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany empty parameter");
-            if (item.hostMaster == nullptr)
-                throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany fp16 mode requires hostMaster");
-            if (item.hostMaster->empty() || item.hostMaster->data.size() != item.parameter->elementCount())
-                throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany hostMaster size mismatch");
+        auto restoreStream = [&]() {
+            CudaMatmul::setActiveStream(previousStream);
+        };
 
-            Matrix* gradientForUpdate = nullptr;
-            Matrix scaledGradient;
-            if (item.hostGradient != nullptr) {
-                if (item.hostGradient->empty() || item.hostGradient->data.size() != item.parameter->elementCount())
-                    throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany hostGradient size mismatch");
-                if (item.hostGradient->rows != item.parameter->rows || item.hostGradient->cols != item.parameter->cols)
-                    throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany hostGradient shape mismatch");
-                if (gradientScale != 1.0f) {
-                    scaledGradient = *item.hostGradient;
-                    Matrix::scaleInPlace(scaledGradient, gradientScale);
-                    gradientForUpdate = &scaledGradient;
+        try {
+            // Validate + optional D2H for device grads first (keeps OpenMP SGD simple).
+            std::vector<Matrix> deviceGradHosts(static_cast<size_t>(itemCount));
+            for (int itemIndex = 0; itemIndex < itemCount; ++itemIndex) {
+                const CudaAdamCpuOffloadItem& item = items[itemIndex];
+                if (item.parameter == nullptr || item.hostState == nullptr)
+                    throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany null item pointer");
+                if (item.parameter->empty())
+                    throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany empty parameter");
+                if (item.hostMaster == nullptr)
+                    throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany fp16 mode requires hostMaster");
+                if (item.hostMaster->empty() || item.hostMaster->data.size() != item.parameter->elementCount())
+                    throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany hostMaster size mismatch");
+
+                if (item.hostGradient != nullptr) {
+                    if (item.hostGradient->empty() || item.hostGradient->data.size() != item.parameter->elementCount())
+                        throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany hostGradient size mismatch");
+                    if (item.hostGradient->rows != item.parameter->rows || item.hostGradient->cols != item.parameter->cols)
+                        throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany hostGradient shape mismatch");
                 } else {
-                    gradientForUpdate = item.hostGradient;
+                    if (item.gradient == nullptr || item.gradient->empty() || item.gradient->buffer.deviceData == nullptr)
+                        throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany empty device gradient");
+                    if (item.parameter->rows != item.gradient->rows || item.parameter->cols != item.gradient->cols)
+                        throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany parameter/gradient shape mismatch");
+                    deviceGradHosts[static_cast<size_t>(itemIndex)].ensureSize(item.parameter->rows, item.parameter->cols);
+                    throwIfCudaFailedPinned(
+                        cudaMemcpyAsync(
+                            deviceGradHosts[static_cast<size_t>(itemIndex)].data.data(),
+                            item.gradient->buffer.deviceData,
+                            item.parameter->byteCount(),
+                            cudaMemcpyDeviceToHost,
+                            stream),
+                        "CudaAdam::updateCpuOffloadedMany D2H gradient (fp16)");
+                }
+            }
+            throwIfCudaFailedPinned(cudaStreamSynchronize(stream), "CudaAdam::updateCpuOffloadedMany D2H sync");
+
+            const float stepScale = this->learningRate * gradientScale;
+            if (CudaAdam::preferHostSgd) {
+                for (int itemIndex = 0; itemIndex < itemCount; ++itemIndex) {
+                    const CudaAdamCpuOffloadItem& item = items[itemIndex];
+                    float* masterData = item.hostMaster->data.data();
+                    const float* gradData = item.hostGradient != nullptr
+                        ? item.hostGradient->data.data()
+                        : deviceGradHosts[static_cast<size_t>(itemIndex)].data.data();
+                    const ptrdiff_t n = static_cast<ptrdiff_t>(item.hostMaster->data.size());
+#if defined(_OPENMP)
+                    #pragma omp parallel for schedule(static)
+#endif
+                    for (ptrdiff_t index = 0; index < n; ++index)
+                        masterData[index] -= stepScale * gradData[index];
                 }
             } else {
-                if (item.gradient == nullptr || item.gradient->empty() || item.gradient->buffer.deviceData == nullptr)
-                    throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany empty device gradient");
-                if (item.parameter->rows != item.gradient->rows || item.parameter->cols != item.gradient->cols)
-                    throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany parameter/gradient shape mismatch");
-                scaledGradient.ensureSize(item.parameter->rows, item.parameter->cols);
-                throwIfCudaFailedPinned(
-                    cudaMemcpy(
-                        scaledGradient.data.data(),
-                        item.gradient->buffer.deviceData,
-                        item.parameter->byteCount(),
-                        cudaMemcpyDeviceToHost),
-                    "CudaAdam::updateCpuOffloadedMany D2H gradient (fp16)");
-                if (gradientScale != 1.0f)
-                    Matrix::scaleInPlace(scaledGradient, gradientScale);
-                gradientForUpdate = &scaledGradient;
+                for (int itemIndex = 0; itemIndex < itemCount; ++itemIndex) {
+                    const CudaAdamCpuOffloadItem& item = items[itemIndex];
+                    Matrix* gradientForUpdate = item.hostGradient;
+                    if (gradientForUpdate == nullptr)
+                        gradientForUpdate = &deviceGradHosts[static_cast<size_t>(itemIndex)];
+                    if (gradientScale != 1.0f && item.hostGradient != nullptr) {
+                        Matrix scaled = *item.hostGradient;
+                        Matrix::scaleInPlace(scaled, gradientScale);
+                        hostAdam.update(*item.hostMaster, *item.hostState, scaled);
+                    } else if (gradientScale != 1.0f) {
+                        Matrix::scaleInPlace(*gradientForUpdate, gradientScale);
+                        hostAdam.update(*item.hostMaster, *item.hostState, *gradientForUpdate);
+                    } else {
+                        hostAdam.update(*item.hostMaster, *item.hostState, *gradientForUpdate);
+                    }
+                }
             }
 
-            if (CudaAdam::preferHostSgd) {
-                float* masterData = item.hostMaster->data.data();
-                const float* gradData = gradientForUpdate->data.data();
-                const float lr = this->learningRate;
-                const size_t n = item.hostMaster->data.size();
-                for (size_t i = 0; i < n; ++i)
-                    masterData[i] -= lr * gradData[i];
-            } else {
-                hostAdam.update(*item.hostMaster, *item.hostState, *gradientForUpdate);
+            for (int itemIndex = 0; itemIndex < itemCount; ++itemIndex) {
+                const CudaAdamCpuOffloadItem& item = items[itemIndex];
+                if (item.parameter->ampWeightSlot >= 0)
+                    CudaAmp::uploadHostMasterToFp16Working(*item.parameter, item.hostMaster->data.data());
+                else if (item.parameter->hasDeviceStorage()) {
+                    throwIfCudaFailedPinned(
+                        cudaMemcpyAsync(
+                            item.parameter->buffer.deviceData,
+                            item.hostMaster->data.data(),
+                            item.parameter->byteCount(),
+                            cudaMemcpyHostToDevice,
+                            stream),
+                        "CudaAdam::updateCpuOffloadedMany H2D fp32 parameter");
+                }
             }
-
-            if (item.parameter->ampWeightSlot >= 0)
-                CudaAmp::uploadHostMasterToFp16Working(*item.parameter, item.hostMaster->data.data());
-            else if (item.parameter->hasDeviceStorage()) {
-                throwIfCudaFailedPinned(
-                    cudaMemcpyAsync(
-                        item.parameter->buffer.deviceData,
-                        item.hostMaster->data.data(),
-                        item.parameter->byteCount(),
-                        cudaMemcpyHostToDevice,
-                        stream),
-                    "CudaAdam::updateCpuOffloadedMany H2D fp32 parameter");
-            }
-            // else: host-master-only (fused GEMM mirrors rebuilt by caller)
+            throwIfCudaFailedPinned(cudaStreamSynchronize(stream), "CudaAdam::updateCpuOffloadedMany H2D sync");
+        } catch (...) {
+            restoreStream();
+            throw;
         }
-        throwIfCudaFailedPinned(cudaStreamSynchronize(stream), "CudaAdam::updateCpuOffloadedMany H2D sync");
+        restoreStream();
         return;
     }
 

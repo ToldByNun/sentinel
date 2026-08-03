@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <cstdio>
 #include <cuda_runtime.h>
@@ -18,6 +19,10 @@
 #include <vector>
 
 #include "../Optimizers/Adam.hpp"
+
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 
 CudaLanguageModel::CudaLanguageModel()
     : maximumPositionCount(0),
@@ -1760,21 +1765,26 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
 
     auto syncFusedMirrors = [this]() {
         if (CudaAdam::preferFp16GpuWeights) {
+            // Reuse host pack buffers across steps to avoid multi-GB alloc churn.
+            static thread_local std::vector<float> qkvPack;
+            static thread_local std::vector<float> gateUpPack;
             for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
                 CudaTransformerBlock& block = this->blocks[blockIndex];
                 CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[blockIndex];
-                Matrix qkvHost(block.attention.queryWeight.rows * 3ull, block.attention.queryWeight.cols, 0.0f);
-                const size_t slice = hosts.queryWeightMaster.data.size();
-                std::memcpy(qkvHost.data.data(), hosts.queryWeightMaster.data.data(), slice * sizeof(float));
-                std::memcpy(qkvHost.data.data() + slice, hosts.keyWeightMaster.data.data(), slice * sizeof(float));
-                std::memcpy(qkvHost.data.data() + 2 * slice, hosts.valueWeightMaster.data.data(), slice * sizeof(float));
-                CudaAmp::uploadHostMasterToFp16Working(block.attention.qkvWeight, qkvHost.data.data());
 
-                Matrix gateUpHost(block.feedForward.gateWeight.rows + block.feedForward.upWeight.rows, block.feedForward.gateWeight.cols, 0.0f);
+                const size_t slice = hosts.queryWeightMaster.data.size();
+                qkvPack.resize(slice * 3ull);
+                std::memcpy(qkvPack.data(), hosts.queryWeightMaster.data.data(), slice * sizeof(float));
+                std::memcpy(qkvPack.data() + slice, hosts.keyWeightMaster.data.data(), slice * sizeof(float));
+                std::memcpy(qkvPack.data() + 2ull * slice, hosts.valueWeightMaster.data.data(), slice * sizeof(float));
+                CudaAmp::uploadHostMasterToFp16Working(block.attention.qkvWeight, qkvPack.data());
+
                 const size_t gateSlice = hosts.feedForwardGateWeightMaster.data.size();
-                std::memcpy(gateUpHost.data.data(), hosts.feedForwardGateWeightMaster.data.data(), gateSlice * sizeof(float));
-                std::memcpy(gateUpHost.data.data() + gateSlice, hosts.feedForwardUpWeightMaster.data.data(), hosts.feedForwardUpWeightMaster.data.size() * sizeof(float));
-                CudaAmp::uploadHostMasterToFp16Working(block.feedForward.gateUpWeight, gateUpHost.data.data());
+                const size_t upSlice = hosts.feedForwardUpWeightMaster.data.size();
+                gateUpPack.resize(gateSlice + upSlice);
+                std::memcpy(gateUpPack.data(), hosts.feedForwardGateWeightMaster.data.data(), gateSlice * sizeof(float));
+                std::memcpy(gateUpPack.data() + gateSlice, hosts.feedForwardUpWeightMaster.data.data(), upSlice * sizeof(float));
+                CudaAmp::uploadHostMasterToFp16Working(block.feedForward.gateUpWeight, gateUpPack.data());
                 block.feedForward.syncFusedGateUpWeight(); // bias only when fp16 slot set
             }
             return;
