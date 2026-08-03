@@ -10,33 +10,43 @@
 #include <cuda_runtime.h>
 #include <stdexcept>
 
-void CudaTransformerBlockGradients::ensureFrom(const CudaTransformerBlock& block) {
-    this->queryWeight.ensureSize(block.attention.queryWeight.rows, block.attention.queryWeight.cols);
-    this->keyWeight.ensureSize(block.attention.keyWeight.rows, block.attention.keyWeight.cols);
-    this->valueWeight.ensureSize(block.attention.valueWeight.rows, block.attention.valueWeight.cols);
-    this->attentionOutputWeight.ensureSize(block.attention.outputWeight.rows, block.attention.outputWeight.cols);
+void CudaTransformerBlockGradients::ensureFrom(const CudaTransformerBlock& block, bool largeWeightsOnHost) {
+    if (largeWeightsOnHost) {
+        this->queryWeight.free();
+        this->keyWeight.free();
+        this->valueWeight.free();
+        this->attentionOutputWeight.free();
+        this->feedForwardGateWeight.free();
+        this->feedForwardUpWeight.free();
+        this->feedForwardDownWeight.free();
+    } else {
+        this->queryWeight.ensureSize(block.attention.queryWeight.rows, block.attention.queryWeight.cols);
+        this->keyWeight.ensureSize(block.attention.keyWeight.rows, block.attention.keyWeight.cols);
+        this->valueWeight.ensureSize(block.attention.valueWeight.rows, block.attention.valueWeight.cols);
+        this->attentionOutputWeight.ensureSize(block.attention.outputWeight.rows, block.attention.outputWeight.cols);
+        this->feedForwardGateWeight.ensureSize(block.feedForward.gateWeight.rows, block.feedForward.gateWeight.cols);
+        this->feedForwardUpWeight.ensureSize(block.feedForward.upWeight.rows, block.feedForward.upWeight.cols);
+        this->feedForwardDownWeight.ensureSize(block.feedForward.downWeight.rows, block.feedForward.downWeight.cols);
+    }
     this->attentionNormGamma.ensureSize(block.attentionNorm.gamma.rows, block.attentionNorm.gamma.cols);
     this->feedForwardNormGamma.ensureSize(block.feedForwardNorm.gamma.rows, block.feedForwardNorm.gamma.cols);
-    this->feedForwardGateWeight.ensureSize(block.feedForward.gateWeight.rows, block.feedForward.gateWeight.cols);
     this->feedForwardGateBias.ensureSize(block.feedForward.gateBias.rows, block.feedForward.gateBias.cols);
-    this->feedForwardUpWeight.ensureSize(block.feedForward.upWeight.rows, block.feedForward.upWeight.cols);
     this->feedForwardUpBias.ensureSize(block.feedForward.upBias.rows, block.feedForward.upBias.cols);
-    this->feedForwardDownWeight.ensureSize(block.feedForward.downWeight.rows, block.feedForward.downWeight.cols);
     this->feedForwardDownBias.ensureSize(block.feedForward.downBias.rows, block.feedForward.downBias.cols);
 }
 
 void CudaTransformerBlockGradients::zeroInPlace() {
-    CudaOps::zeroInPlace(this->queryWeight);
-    CudaOps::zeroInPlace(this->keyWeight);
-    CudaOps::zeroInPlace(this->valueWeight);
-    CudaOps::zeroInPlace(this->attentionOutputWeight);
+    if (!this->queryWeight.empty()) CudaOps::zeroInPlace(this->queryWeight);
+    if (!this->keyWeight.empty()) CudaOps::zeroInPlace(this->keyWeight);
+    if (!this->valueWeight.empty()) CudaOps::zeroInPlace(this->valueWeight);
+    if (!this->attentionOutputWeight.empty()) CudaOps::zeroInPlace(this->attentionOutputWeight);
     CudaOps::zeroInPlace(this->attentionNormGamma);
     CudaOps::zeroInPlace(this->feedForwardNormGamma);
-    CudaOps::zeroInPlace(this->feedForwardGateWeight);
+    if (!this->feedForwardGateWeight.empty()) CudaOps::zeroInPlace(this->feedForwardGateWeight);
     CudaOps::zeroInPlace(this->feedForwardGateBias);
-    CudaOps::zeroInPlace(this->feedForwardUpWeight);
+    if (!this->feedForwardUpWeight.empty()) CudaOps::zeroInPlace(this->feedForwardUpWeight);
     CudaOps::zeroInPlace(this->feedForwardUpBias);
-    CudaOps::zeroInPlace(this->feedForwardDownWeight);
+    if (!this->feedForwardDownWeight.empty()) CudaOps::zeroInPlace(this->feedForwardDownWeight);
     CudaOps::zeroInPlace(this->feedForwardDownBias);
 }
 
@@ -138,7 +148,7 @@ void CudaTransformerBlock::decode(const CudaMatrix& input, CudaKvCache& cache, C
     CudaOps::addInto(this->afterAttention, this->feedForwardOutput, out);
 }
 
-void CudaTransformerBlock::backward(const CudaMatrix& outputGradient, CudaMatrix& inputGradient, CudaTransformerBlockGradients& gradients) {
+void CudaTransformerBlock::backward(const CudaMatrix& outputGradient, CudaMatrix& inputGradient, CudaTransformerBlockGradients& gradients, CudaTransformerBlockHostWeightGrads* hostWeightGrads) {
     if (outputGradient.empty()) throw std::invalid_argument("CudaTransformerBlock::backward empty outputGradient");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaTransformerBlock::backward no CUDA device");
 
@@ -158,18 +168,47 @@ void CudaTransformerBlock::backward(const CudaMatrix& outputGradient, CudaMatrix
         inputGradient,
         this->attentionNormGammaGradient);
 
-    CudaOps::addInPlace(gradients.feedForwardDownWeight, this->feedForwardDownWeightGradient);
+    auto accumulateWeight = [](Matrix* host, CudaMatrix& deviceWorkspace, CudaMatrix& deviceAccum) {
+        if (host != nullptr) {
+            CudaOps::downloadAddIntoHost(*host, deviceWorkspace);
+            deviceWorkspace.free();
+        } else {
+            CudaOps::addInPlace(deviceAccum, deviceWorkspace);
+        }
+    };
+
+    if (hostWeightGrads != nullptr) {
+        accumulateWeight(hostWeightGrads->feedForwardDownWeight, this->feedForwardDownWeightGradient, gradients.feedForwardDownWeight);
+        accumulateWeight(hostWeightGrads->feedForwardUpWeight, this->feedForwardUpWeightGradient, gradients.feedForwardUpWeight);
+        accumulateWeight(hostWeightGrads->feedForwardGateWeight, this->feedForwardGateWeightGradient, gradients.feedForwardGateWeight);
+        accumulateWeight(hostWeightGrads->attentionOutputWeight, this->attentionOutputWeightGradient, gradients.attentionOutputWeight);
+        accumulateWeight(hostWeightGrads->valueWeight, this->valueWeightGradient, gradients.valueWeight);
+        accumulateWeight(hostWeightGrads->keyWeight, this->keyWeightGradient, gradients.keyWeight);
+        accumulateWeight(hostWeightGrads->queryWeight, this->queryWeightGradient, gradients.queryWeight);
+    } else {
+        CudaOps::addInPlace(gradients.feedForwardDownWeight, this->feedForwardDownWeightGradient);
+        CudaOps::addInPlace(gradients.feedForwardUpWeight, this->feedForwardUpWeightGradient);
+        CudaOps::addInPlace(gradients.feedForwardGateWeight, this->feedForwardGateWeightGradient);
+        CudaOps::addInPlace(gradients.attentionOutputWeight, this->attentionOutputWeightGradient);
+        CudaOps::addInPlace(gradients.valueWeight, this->valueWeightGradient);
+        CudaOps::addInPlace(gradients.keyWeight, this->keyWeightGradient);
+        CudaOps::addInPlace(gradients.queryWeight, this->queryWeightGradient);
+    }
     CudaOps::addInPlace(gradients.feedForwardDownBias, this->feedForwardDownBiasGradient);
-    CudaOps::addInPlace(gradients.feedForwardUpWeight, this->feedForwardUpWeightGradient);
     CudaOps::addInPlace(gradients.feedForwardUpBias, this->feedForwardUpBiasGradient);
-    CudaOps::addInPlace(gradients.feedForwardGateWeight, this->feedForwardGateWeightGradient);
     CudaOps::addInPlace(gradients.feedForwardGateBias, this->feedForwardGateBiasGradient);
     CudaOps::addInPlace(gradients.feedForwardNormGamma, this->feedForwardNormGammaGradient);
-    CudaOps::addInPlace(gradients.attentionOutputWeight, this->attentionOutputWeightGradient);
-    CudaOps::addInPlace(gradients.valueWeight, this->valueWeightGradient);
-    CudaOps::addInPlace(gradients.keyWeight, this->keyWeightGradient);
-    CudaOps::addInPlace(gradients.queryWeight, this->queryWeightGradient);
     CudaOps::addInPlace(gradients.attentionNormGamma, this->attentionNormGammaGradient);
+
+    if (hostWeightGrads != nullptr) {
+        this->attention.qkvWeightGradient.free();
+        this->feedForward.gateUpWeightGradient.free();
+        this->feedForwardDownBiasGradient.free();
+        this->feedForwardUpBiasGradient.free();
+        this->feedForwardGateBiasGradient.free();
+        this->feedForwardNormGammaGradient.free();
+        this->attentionNormGammaGradient.free();
+    }
 }
 
 void CudaTransformerBlock::backwardSelective(
@@ -177,7 +216,8 @@ void CudaTransformerBlock::backwardSelective(
     CudaMatrix& inputGradient,
     CudaTransformerBlockGradients& gradients,
     const CudaMatrix& blockInput,
-    int segmentLength
+    int segmentLength,
+    CudaTransformerBlockHostWeightGrads* hostWeightGrads
 ) {
     if (outputGradient.empty()) throw std::invalid_argument("CudaTransformerBlock::backwardSelective empty outputGradient");
     if (blockInput.empty()) throw std::invalid_argument("CudaTransformerBlock::backwardSelective empty blockInput");
@@ -200,18 +240,47 @@ void CudaTransformerBlock::backwardSelective(
         inputGradient,
         this->attentionNormGammaGradient);
 
-    CudaOps::addInPlace(gradients.feedForwardDownWeight, this->feedForwardDownWeightGradient);
+    auto accumulateWeight = [](Matrix* host, CudaMatrix& deviceWorkspace, CudaMatrix& deviceAccum) {
+        if (host != nullptr) {
+            CudaOps::downloadAddIntoHost(*host, deviceWorkspace);
+            deviceWorkspace.free();
+        } else {
+            CudaOps::addInPlace(deviceAccum, deviceWorkspace);
+        }
+    };
+
+    if (hostWeightGrads != nullptr) {
+        accumulateWeight(hostWeightGrads->feedForwardDownWeight, this->feedForwardDownWeightGradient, gradients.feedForwardDownWeight);
+        accumulateWeight(hostWeightGrads->feedForwardUpWeight, this->feedForwardUpWeightGradient, gradients.feedForwardUpWeight);
+        accumulateWeight(hostWeightGrads->feedForwardGateWeight, this->feedForwardGateWeightGradient, gradients.feedForwardGateWeight);
+        accumulateWeight(hostWeightGrads->attentionOutputWeight, this->attentionOutputWeightGradient, gradients.attentionOutputWeight);
+        accumulateWeight(hostWeightGrads->valueWeight, this->valueWeightGradient, gradients.valueWeight);
+        accumulateWeight(hostWeightGrads->keyWeight, this->keyWeightGradient, gradients.keyWeight);
+        accumulateWeight(hostWeightGrads->queryWeight, this->queryWeightGradient, gradients.queryWeight);
+    } else {
+        CudaOps::addInPlace(gradients.feedForwardDownWeight, this->feedForwardDownWeightGradient);
+        CudaOps::addInPlace(gradients.feedForwardUpWeight, this->feedForwardUpWeightGradient);
+        CudaOps::addInPlace(gradients.feedForwardGateWeight, this->feedForwardGateWeightGradient);
+        CudaOps::addInPlace(gradients.attentionOutputWeight, this->attentionOutputWeightGradient);
+        CudaOps::addInPlace(gradients.valueWeight, this->valueWeightGradient);
+        CudaOps::addInPlace(gradients.keyWeight, this->keyWeightGradient);
+        CudaOps::addInPlace(gradients.queryWeight, this->queryWeightGradient);
+    }
     CudaOps::addInPlace(gradients.feedForwardDownBias, this->feedForwardDownBiasGradient);
-    CudaOps::addInPlace(gradients.feedForwardUpWeight, this->feedForwardUpWeightGradient);
     CudaOps::addInPlace(gradients.feedForwardUpBias, this->feedForwardUpBiasGradient);
-    CudaOps::addInPlace(gradients.feedForwardGateWeight, this->feedForwardGateWeightGradient);
     CudaOps::addInPlace(gradients.feedForwardGateBias, this->feedForwardGateBiasGradient);
     CudaOps::addInPlace(gradients.feedForwardNormGamma, this->feedForwardNormGammaGradient);
-    CudaOps::addInPlace(gradients.attentionOutputWeight, this->attentionOutputWeightGradient);
-    CudaOps::addInPlace(gradients.valueWeight, this->valueWeightGradient);
-    CudaOps::addInPlace(gradients.keyWeight, this->keyWeightGradient);
-    CudaOps::addInPlace(gradients.queryWeight, this->queryWeightGradient);
     CudaOps::addInPlace(gradients.attentionNormGamma, this->attentionNormGammaGradient);
+
+    if (hostWeightGrads != nullptr) {
+        this->attention.qkvWeightGradient.free();
+        this->feedForward.gateUpWeightGradient.free();
+        this->feedForwardDownBiasGradient.free();
+        this->feedForwardUpBiasGradient.free();
+        this->feedForwardGateBiasGradient.free();
+        this->feedForwardNormGammaGradient.free();
+        this->attentionNormGammaGradient.free();
+    }
 }
 void CudaTransformerBlock::runSmokeDemo(int embeddingDim, int headCount, int sequenceLength, int maximumPositionCount) {
     if (!CudaMatmul::isAvailable()) {

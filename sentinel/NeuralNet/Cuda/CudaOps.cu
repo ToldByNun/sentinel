@@ -918,6 +918,18 @@ void CudaOps::zeroInPlace(CudaMatrix& matrix) {
     CudaMatmul::memsetDevice(matrix.buffer.deviceData, 0, matrix.byteCount());
 }
 
+void CudaOps::downloadAddIntoHost(Matrix& hostTotal, const CudaMatrix& deviceDelta) {
+    if (deviceDelta.empty()) throw std::invalid_argument("CudaOps::downloadAddIntoHost empty deviceDelta");
+    if (hostTotal.empty())
+        hostTotal.ensureSize(deviceDelta.rows, deviceDelta.cols);
+    if (hostTotal.rows != deviceDelta.rows || hostTotal.cols != deviceDelta.cols)
+        throw std::invalid_argument("CudaOps::downloadAddIntoHost shape mismatch");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::downloadAddIntoHost no CUDA device");
+
+    Matrix delta = deviceDelta.download();
+    Matrix::addInPlace(hostTotal, delta);
+}
+
 void CudaOps::extractHeadInto(const CudaMatrix& full, int headIndex, int headDimension, CudaMatrix& head) {
     CudaOps::extractHeadInto(full, headIndex, headDimension, static_cast<int>(full.cols), head);
 }

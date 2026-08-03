@@ -96,6 +96,15 @@ public:
     Matrix feedForwardUpBiasMaster;
     Matrix feedForwardDownWeightMaster;
     Matrix feedForwardDownBiasMaster;
+
+    /// <summary>host-accumulated large weight grads when preferHostGradients</summary>
+    Matrix queryWeightGrad;
+    Matrix keyWeightGrad;
+    Matrix valueWeightGrad;
+    Matrix attentionOutputWeightGrad;
+    Matrix feedForwardGateWeightGrad;
+    Matrix feedForwardUpWeightGrad;
+    Matrix feedForwardDownWeightGrad;
 };
 
 
@@ -269,6 +278,9 @@ public:
     Matrix hostProjectionWeightMaster;
     Matrix hostProjectionBiasMaster;
 
+    /// <summary>host-accumulated untied projection weight grads when preferHostGradients</summary>
+    Matrix hostProjectionWeightGrad;
+
 
 
     CudaMatrix probabilities;
@@ -411,6 +423,12 @@ public:
 
     /// <summary>download FP32 masters from GPU, bind FP16 working weights, free FP32 2D weights</summary>
     void materializeFp16GpuWorkingWeights();
+
+    /// <summary>zero GPU train grads + host-offloaded weight grads</summary>
+    void zeroAccumulatedGradients();
+
+    /// <summary>zero host-offloaded large weight grads only</summary>
+    void zeroHostWeightGradients();
 
     /// <summary>pre-allocate train activation workspaces to maxPackedColumns</summary>
 
@@ -585,7 +603,8 @@ public:
         int maxPackedColumns,
         int logitChunkRows = 2048,
         size_t displaySafetyBytes = 2560ull * 1024ull * 1024ull,
-        bool preferFp16GpuWeights = false
+        bool preferFp16GpuWeights = false,
+        bool preferHostGradients = false
     );
 
     /// <summary>

@@ -1,5 +1,6 @@
 #include "CudaLanguageModel.hpp"
 
+#include "CudaAdam.hpp"
 #include "CudaAmp.hpp"
 #include "CudaOps.hpp"
 #include "../Utils/SmokeLog.hpp"
@@ -102,8 +103,25 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
     CudaOps::addInPlace(gradients.finalNormGamma, this->finalNormGammaGradient);
     std::swap(this->hiddenGradient, this->normInputGradientScratch);
 
+    const bool hostLarge = CudaAdam::preferHostGradients;
+    if (hostLarge && this->hostBlockAdamStates.size() != this->blocks.size())
+        this->hostBlockAdamStates.resize(this->blocks.size());
+
     for (int blockIndex = static_cast<int>(this->blocks.size()) - 1; blockIndex >= 0; --blockIndex) {
         CudaTransformerBlock& block = this->blocks[static_cast<size_t>(blockIndex)];
+        CudaTransformerBlockHostWeightGrads hostGrads{};
+        CudaTransformerBlockHostWeightGrads* hostGradsPtr = nullptr;
+        if (hostLarge) {
+            CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[static_cast<size_t>(blockIndex)];
+            hostGrads.queryWeight = &hosts.queryWeightGrad;
+            hostGrads.keyWeight = &hosts.keyWeightGrad;
+            hostGrads.valueWeight = &hosts.valueWeightGrad;
+            hostGrads.attentionOutputWeight = &hosts.attentionOutputWeightGrad;
+            hostGrads.feedForwardGateWeight = &hosts.feedForwardGateWeightGrad;
+            hostGrads.feedForwardUpWeight = &hosts.feedForwardUpWeightGrad;
+            hostGrads.feedForwardDownWeight = &hosts.feedForwardDownWeightGrad;
+            hostGradsPtr = &hostGrads;
+        }
 
         if (this->activationCheckpointMode == ActivationCheckpointMode::Selective) {
             const CudaMatrix* blockInput = nullptr;
@@ -121,7 +139,8 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
                 this->blockInputGradientScratch,
                 gradients.blocks[static_cast<size_t>(blockIndex)],
                 *blockInput,
-                segmentLength);
+                segmentLength,
+                hostGradsPtr);
         } else if (this->activationCheckpointMode == ActivationCheckpointMode::Full) {
             if (this->useHalfActivationCheckpoints()) {
                 CudaAmp::castToFloat(
@@ -138,9 +157,9 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
                     this->normalized,
                     segmentLength);
             }
-            block.backward(this->hiddenGradient, this->blockInputGradientScratch, gradients.blocks[static_cast<size_t>(blockIndex)]);
+            block.backward(this->hiddenGradient, this->blockInputGradientScratch, gradients.blocks[static_cast<size_t>(blockIndex)], hostGradsPtr);
         } else {
-            block.backward(this->hiddenGradient, this->blockInputGradientScratch, gradients.blocks[static_cast<size_t>(blockIndex)]);
+            block.backward(this->hiddenGradient, this->blockInputGradientScratch, gradients.blocks[static_cast<size_t>(blockIndex)], hostGradsPtr);
         }
 
         std::swap(this->hiddenGradient, this->blockInputGradientScratch);
@@ -236,10 +255,11 @@ void CudaTransformerBlockMuonStates::free() {
 }
 
 void CudaLanguageModelGradients::ensureFrom(const CudaLanguageModel& model) {
+    const bool largeWeightsOnHost = CudaAdam::preferHostGradients;
     this->tokenEmbedding.ensureSize(model.tokenEmbeddingWeight.rows, model.tokenEmbeddingWeight.cols);
     this->blocks.resize(model.blocks.size());
     for (size_t blockIndex = 0; blockIndex < model.blocks.size(); ++blockIndex)
-        this->blocks[blockIndex].ensureFrom(model.blocks[blockIndex]);
+        this->blocks[blockIndex].ensureFrom(model.blocks[blockIndex], largeWeightsOnHost);
     this->finalNormGamma.ensureSize(model.finalNorm.gamma.rows, model.finalNorm.gamma.cols);
     if (model.tieEmbeddingProjection)
         this->projectionWeight.free();
@@ -350,6 +370,26 @@ void CudaLanguageModel::ensureTrainState() {
 
     if (CudaAdam::preferCpuOffload && CudaAdam::preferFp16GpuWeights)
         this->materializeFp16GpuWorkingWeights();
+
+    if (CudaAdam::preferHostGradients) {
+        if (this->hostBlockAdamStates.size() != this->blocks.size())
+            this->hostBlockAdamStates.resize(this->blocks.size());
+        for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+            const CudaTransformerBlock& block = this->blocks[blockIndex];
+            CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[blockIndex];
+            auto ensureHostGrad = [](Matrix& grad, size_t rows, size_t cols) {
+                grad.ensureSize(rows, cols);
+                grad.fill(0.0f);
+            };
+            ensureHostGrad(hosts.queryWeightGrad, block.attention.queryWeight.rows, block.attention.queryWeight.cols);
+            ensureHostGrad(hosts.keyWeightGrad, block.attention.keyWeight.rows, block.attention.keyWeight.cols);
+            ensureHostGrad(hosts.valueWeightGrad, block.attention.valueWeight.rows, block.attention.valueWeight.cols);
+            ensureHostGrad(hosts.attentionOutputWeightGrad, block.attention.outputWeight.rows, block.attention.outputWeight.cols);
+            ensureHostGrad(hosts.feedForwardGateWeightGrad, block.feedForward.gateWeight.rows, block.feedForward.gateWeight.cols);
+            ensureHostGrad(hosts.feedForwardUpWeightGrad, block.feedForward.upWeight.rows, block.feedForward.upWeight.cols);
+            ensureHostGrad(hosts.feedForwardDownWeightGrad, block.feedForward.downWeight.rows, block.feedForward.downWeight.cols);
+        }
+    }
 
     this->ensureTrainWorkspaces();
     this->trainStateReady = true;
@@ -1439,8 +1479,29 @@ void CudaLanguageModel::forwardTrunkFromDevice(size_t tokenCount, int segmentLen
     this->finalNorm.forward(this->hidden, this->normalized);
 }
 
+void CudaLanguageModel::zeroHostWeightGradients() {
+    if (!CudaAdam::preferHostGradients) return;
+    for (CudaTransformerBlockHostAdamStates& hosts : this->hostBlockAdamStates) {
+        if (!hosts.queryWeightGrad.empty()) hosts.queryWeightGrad.fill(0.0f);
+        if (!hosts.keyWeightGrad.empty()) hosts.keyWeightGrad.fill(0.0f);
+        if (!hosts.valueWeightGrad.empty()) hosts.valueWeightGrad.fill(0.0f);
+        if (!hosts.attentionOutputWeightGrad.empty()) hosts.attentionOutputWeightGrad.fill(0.0f);
+        if (!hosts.feedForwardGateWeightGrad.empty()) hosts.feedForwardGateWeightGrad.fill(0.0f);
+        if (!hosts.feedForwardUpWeightGrad.empty()) hosts.feedForwardUpWeightGrad.fill(0.0f);
+        if (!hosts.feedForwardDownWeightGrad.empty()) hosts.feedForwardDownWeightGrad.fill(0.0f);
+    }
+    if (!this->hostProjectionWeightGrad.empty())
+        this->hostProjectionWeightGrad.fill(0.0f);
+}
+
+void CudaLanguageModel::zeroAccumulatedGradients() {
+    this->trainGradients.zeroInPlace();
+    this->zeroHostWeightGradients();
+}
+
 void CudaLanguageModel::zeroTrainGradientsAfterAdam() {
     this->trainGradients.zeroInPlaceExceptEmbedding();
+    this->zeroHostWeightGradients();
     if (this->adamWindowTokenIds.empty()) {
         CudaOps::zeroInPlace(this->trainGradients.tokenEmbedding);
         return;
@@ -1702,45 +1763,52 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
         std::vector<CudaAdamCpuOffloadItem> offloadItems;
         offloadItems.reserve(16 + this->blocks.size() * 12);
 
-        auto pushOffload = [&offloadItems](CudaMatrix& parameter, AdamState& state, CudaMatrix& gradient, Matrix* hostMaster) {
+        auto pushOffload = [&offloadItems](CudaMatrix& parameter, AdamState& state, CudaMatrix* deviceGradient, Matrix* hostMaster, Matrix* hostGradient) {
             if (parameter.elementCount() == 0) throw std::invalid_argument("CudaLanguageModel::applyGradients empty parameter");
-            if (gradient.elementCount() != parameter.elementCount())
-                throw std::invalid_argument("CudaLanguageModel::applyGradients gradient/parameter size mismatch");
+            if (hostGradient != nullptr) {
+                if (hostGradient->empty() || hostGradient->data.size() != parameter.elementCount())
+                    throw std::invalid_argument("CudaLanguageModel::applyGradients hostGradient size mismatch");
+            } else {
+                if (deviceGradient == nullptr || deviceGradient->elementCount() != parameter.elementCount())
+                    throw std::invalid_argument("CudaLanguageModel::applyGradients gradient/parameter size mismatch");
+            }
             CudaAdamCpuOffloadItem item;
             item.parameter = &parameter;
-            item.gradient = &gradient;
+            item.gradient = deviceGradient;
             item.hostState = &state;
             item.hostMaster = hostMaster;
+            item.hostGradient = hostGradient;
             offloadItems.push_back(item);
         };
 
         if (!this->tieEmbeddingProjection)
-            pushOffload(this->projectionWeight, this->hostProjectionWeightState, gradients.projectionWeight, &this->hostProjectionWeightMaster);
-        pushOffload(this->projectionBias, this->hostProjectionBiasState, gradients.projectionBias, &this->hostProjectionBiasMaster);
-        pushOffload(this->finalNorm.gamma, this->hostFinalNormGammaState, gradients.finalNormGamma, &this->hostFinalNormGammaMaster);
+            pushOffload(this->projectionWeight, this->hostProjectionWeightState, &gradients.projectionWeight, &this->hostProjectionWeightMaster, nullptr);
+        pushOffload(this->projectionBias, this->hostProjectionBiasState, &gradients.projectionBias, &this->hostProjectionBiasMaster, nullptr);
+        pushOffload(this->finalNorm.gamma, this->hostFinalNormGammaState, &gradients.finalNormGamma, &this->hostFinalNormGammaMaster, nullptr);
 
         for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
             CudaTransformerBlock& block = this->blocks[blockIndex];
             CudaTransformerBlockGradients& blockGradients = gradients.blocks[blockIndex];
             CudaTransformerBlockHostAdamStates& blockStates = this->hostBlockAdamStates[blockIndex];
+            const bool hostLarge = CudaAdam::preferHostGradients;
 
             if (!this->preferMuon) {
-                pushOffload(block.attention.queryWeight, blockStates.queryWeight, blockGradients.queryWeight, &blockStates.queryWeightMaster);
-                pushOffload(block.attention.keyWeight, blockStates.keyWeight, blockGradients.keyWeight, &blockStates.keyWeightMaster);
-                pushOffload(block.attention.valueWeight, blockStates.valueWeight, blockGradients.valueWeight, &blockStates.valueWeightMaster);
-                pushOffload(block.attention.outputWeight, blockStates.attentionOutputWeight, blockGradients.attentionOutputWeight, &blockStates.attentionOutputWeightMaster);
-                pushOffload(block.feedForward.gateWeight, blockStates.feedForwardGateWeight, blockGradients.feedForwardGateWeight, &blockStates.feedForwardGateWeightMaster);
-                pushOffload(block.feedForward.upWeight, blockStates.feedForwardUpWeight, blockGradients.feedForwardUpWeight, &blockStates.feedForwardUpWeightMaster);
-                pushOffload(block.feedForward.downWeight, blockStates.feedForwardDownWeight, blockGradients.feedForwardDownWeight, &blockStates.feedForwardDownWeightMaster);
+                pushOffload(block.attention.queryWeight, blockStates.queryWeight, hostLarge ? nullptr : &blockGradients.queryWeight, &blockStates.queryWeightMaster, hostLarge ? &blockStates.queryWeightGrad : nullptr);
+                pushOffload(block.attention.keyWeight, blockStates.keyWeight, hostLarge ? nullptr : &blockGradients.keyWeight, &blockStates.keyWeightMaster, hostLarge ? &blockStates.keyWeightGrad : nullptr);
+                pushOffload(block.attention.valueWeight, blockStates.valueWeight, hostLarge ? nullptr : &blockGradients.valueWeight, &blockStates.valueWeightMaster, hostLarge ? &blockStates.valueWeightGrad : nullptr);
+                pushOffload(block.attention.outputWeight, blockStates.attentionOutputWeight, hostLarge ? nullptr : &blockGradients.attentionOutputWeight, &blockStates.attentionOutputWeightMaster, hostLarge ? &blockStates.attentionOutputWeightGrad : nullptr);
+                pushOffload(block.feedForward.gateWeight, blockStates.feedForwardGateWeight, hostLarge ? nullptr : &blockGradients.feedForwardGateWeight, &blockStates.feedForwardGateWeightMaster, hostLarge ? &blockStates.feedForwardGateWeightGrad : nullptr);
+                pushOffload(block.feedForward.upWeight, blockStates.feedForwardUpWeight, hostLarge ? nullptr : &blockGradients.feedForwardUpWeight, &blockStates.feedForwardUpWeightMaster, hostLarge ? &blockStates.feedForwardUpWeightGrad : nullptr);
+                pushOffload(block.feedForward.downWeight, blockStates.feedForwardDownWeight, hostLarge ? nullptr : &blockGradients.feedForwardDownWeight, &blockStates.feedForwardDownWeightMaster, hostLarge ? &blockStates.feedForwardDownWeightGrad : nullptr);
             }
-            pushOffload(block.attentionNorm.gamma, blockStates.attentionNormGamma, blockGradients.attentionNormGamma, &blockStates.attentionNormGammaMaster);
-            pushOffload(block.feedForwardNorm.gamma, blockStates.feedForwardNormGamma, blockGradients.feedForwardNormGamma, &blockStates.feedForwardNormGammaMaster);
-            pushOffload(block.feedForward.gateBias, blockStates.feedForwardGateBias, blockGradients.feedForwardGateBias, &blockStates.feedForwardGateBiasMaster);
-            pushOffload(block.feedForward.upBias, blockStates.feedForwardUpBias, blockGradients.feedForwardUpBias, &blockStates.feedForwardUpBiasMaster);
-            pushOffload(block.feedForward.downBias, blockStates.feedForwardDownBias, blockGradients.feedForwardDownBias, &blockStates.feedForwardDownBiasMaster);
+            pushOffload(block.attentionNorm.gamma, blockStates.attentionNormGamma, &blockGradients.attentionNormGamma, &blockStates.attentionNormGammaMaster, nullptr);
+            pushOffload(block.feedForwardNorm.gamma, blockStates.feedForwardNormGamma, &blockGradients.feedForwardNormGamma, &blockStates.feedForwardNormGammaMaster, nullptr);
+            pushOffload(block.feedForward.gateBias, blockStates.feedForwardGateBias, &blockGradients.feedForwardGateBias, &blockStates.feedForwardGateBiasMaster, nullptr);
+            pushOffload(block.feedForward.upBias, blockStates.feedForwardUpBias, &blockGradients.feedForwardUpBias, &blockStates.feedForwardUpBiasMaster, nullptr);
+            pushOffload(block.feedForward.downBias, blockStates.feedForwardDownBias, &blockGradients.feedForwardDownBias, &blockStates.feedForwardDownBiasMaster, nullptr);
         }
 
-        pushOffload(this->tokenEmbeddingWeight, this->hostTokenEmbeddingState, gradients.tokenEmbedding, &this->hostTokenEmbeddingMaster);
+        pushOffload(this->tokenEmbeddingWeight, this->hostTokenEmbeddingState, &gradients.tokenEmbedding, &this->hostTokenEmbeddingMaster, nullptr);
         applyMuonBlockWeights();
         this->adam.updateCpuOffloadedMany(offloadItems.data(), static_cast<int>(offloadItems.size()), effectiveGradientScale);
         syncFusedMirrors();
@@ -2596,11 +2664,11 @@ void CudaLanguageModel::runTrainCpuAdamOffloadSmokeDemo(int vocabularySize, int 
     const bool previousInt8 = CudaAdam::preferInt8Moments;
     const bool previousCpuOffload = CudaAdam::preferCpuOffload;
     const bool previousFp16 = CudaAdam::preferFp16GpuWeights;
+    const bool previousHostGrads = CudaAdam::preferHostGradients;
     CudaAmp::preferMixedPrecision = false;
     CudaAdam::preferInt8Moments = false;
     CudaAdam::preferFp16GpuWeights = false;
-
-    LanguageModel host(vocabularySize, embeddingDim, sequenceLength, Adam(0.001f), blockCount, headCount);
+    CudaAdam::preferHostGradients = false;
 
     const int packBatchSize = (std::max)(1, (std::min)(8, 8192 / sequenceLength));
     std::vector<LanguageModelExample> examples(static_cast<size_t>(packBatchSize));
@@ -2619,60 +2687,12 @@ void CudaLanguageModel::runTrainCpuAdamOffloadSmokeDemo(int vocabularySize, int 
     for (int exampleIndex = 0; exampleIndex < packBatchSize; ++exampleIndex)
         packPointers[static_cast<size_t>(exampleIndex)] = &examples[static_cast<size_t>(exampleIndex)];
 
-    const int stepCount = 8;
-    size_t totalBytes = 0;
-    double gpuUsedMiB = 0.0;
-    double cpuUsedMiB = 0.0;
-
-    {
-        CudaAdam::preferCpuOffload = false;
-        CudaAdam::preferFp16GpuWeights = false;
-        CudaLanguageModel gpuDevice = CudaLanguageModel::createFrom(host);
-        gpuDevice.adam = CudaAdam(host.optimizer.learningRate, host.optimizer.beta1, host.optimizer.beta2, host.optimizer.epsilon);
-        size_t freeBefore = 0;
-        CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeBefore, &totalBytes), "cpu Adam offload memGetInfo before gpu");
-        gpuDevice.ensureTrainState();
-        for (int step = 0; step < stepCount; ++step) {
-            gpuDevice.trainGradients.zeroInPlace();
-            gpuDevice.accumulatePackedExamples(packPointers.data(), packBatchSize, gpuDevice.trainGradients);
-            gpuDevice.applyGradients(gpuDevice.trainGradients, 1.0f / static_cast<float>(packBatchSize));
-        }
-        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "cpu Adam offload gpu steps synchronize");
-        size_t freeAfter = 0;
-        CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeAfter, &totalBytes), "cpu Adam offload memGetInfo after gpu");
-        gpuUsedMiB = static_cast<double>(freeBefore - freeAfter) / (1024.0 * 1024.0);
-    }
-
-    {
-        CudaAdam::preferCpuOffload = true;
-        CudaAdam::preferFp16GpuWeights = false;
-        CudaLanguageModel cpuDevice = CudaLanguageModel::createFrom(host);
-        cpuDevice.adam = CudaAdam(host.optimizer.learningRate, host.optimizer.beta1, host.optimizer.beta2, host.optimizer.epsilon);
-        size_t freeBefore = 0;
-        CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeBefore, &totalBytes), "cpu Adam offload memGetInfo before cpu");
-        cpuDevice.ensureTrainState();
-        for (int step = 0; step < stepCount; ++step) {
-            cpuDevice.trainGradients.zeroInPlace();
-            cpuDevice.accumulatePackedExamples(packPointers.data(), packBatchSize, cpuDevice.trainGradients);
-            cpuDevice.applyGradients(cpuDevice.trainGradients, 1.0f / static_cast<float>(packBatchSize));
-        }
-        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "cpu Adam offload cpu steps synchronize");
-        size_t freeAfter = 0;
-        CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeAfter, &totalBytes), "cpu Adam offload memGetInfo after cpu");
-        cpuUsedMiB = static_cast<double>(freeBefore - freeAfter) / (1024.0 * 1024.0);
-    }
-
-    SmokeLog::result(
-        "LanguageModel train CPU Adam offload",
-        "vocab=%d embed=%d seq=%d steps=%d  usedMiB gpu=%.1f cpu=%.1f saved=%.1f",
-        vocabularySize, embeddingDim, sequenceLength, stepCount,
-        gpuUsedMiB, cpuUsedMiB, gpuUsedMiB - cpuUsedMiB);
-
-    // FP16 GPU working weights + FP32 CPU Adam masters
+    // FP16 GPU working + host weight grads + FP32 CPU Adam
     {
         CudaAmp::preferMixedPrecision = true;
         CudaAdam::preferCpuOffload = true;
         CudaAdam::preferFp16GpuWeights = true;
+        CudaAdam::preferHostGradients = true;
         CudaAdam::preferInt8Moments = false;
 
         LanguageModel fp16Host(vocabularySize, embeddingDim, sequenceLength, Adam(0.001f), blockCount, headCount);
@@ -2680,16 +2700,16 @@ void CudaLanguageModel::runTrainCpuAdamOffloadSmokeDemo(int vocabularySize, int 
         fp16Device.adam = CudaAdam(0.001f);
         fp16Device.ensureTrainState();
         for (int step = 0; step < 4; ++step) {
-            fp16Device.trainGradients.zeroInPlace();
+            fp16Device.zeroAccumulatedGradients();
             fp16Device.accumulatePackedExamples(packPointers.data(), packBatchSize, fp16Device.trainGradients);
             fp16Device.applyGradients(fp16Device.trainGradients, 1.0f / static_cast<float>(packBatchSize));
         }
-        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "fp16 cpu-adam smoke synchronize");
+        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "fp16 host-grads smoke synchronize");
         float masterNorm = 0.0f;
         for (float value : fp16Device.hostTokenEmbeddingMaster.data)
             masterNorm += value * value;
         SmokeLog::result(
-            "LanguageModel train FP16 GPU + CPU Adam",
+            "LanguageModel train FP16 GPU + host grads + CPU Adam",
             "vocab=%d embed=%d steps=4  embedMasterL2=%.4f  finite=%s",
             vocabularySize, embeddingDim, std::sqrt(masterNorm),
             std::isfinite(masterNorm) ? "yes" : "no");
@@ -2700,6 +2720,7 @@ void CudaLanguageModel::runTrainCpuAdamOffloadSmokeDemo(int vocabularySize, int 
     CudaAdam::preferInt8Moments = previousInt8;
     CudaAdam::preferCpuOffload = previousCpuOffload;
     CudaAdam::preferFp16GpuWeights = previousFp16;
+    CudaAdam::preferHostGradients = previousHostGrads;
 }
 
 void CudaLanguageModel::runTrainProfileDemo(int vocabularySize, int embeddingDim, int sequenceLength, int blockCount, int headCount, bool preferFlash, int maxPackedColumns, int packBatchSize, bool activationCheckpointing) {
@@ -3121,7 +3142,8 @@ CudaLanguageModelVramBreakdown CudaLanguageModel::estimateVramBreakdown(
     int maxPackedColumns,
     int logitChunkRows,
     size_t displaySafetyBytes,
-    bool preferFp16GpuWeights
+    bool preferFp16GpuWeights,
+    bool preferHostGradients
 ) {
     if (vocabularySize <= 0 || embeddingDim <= 0 || blockCount <= 0 || headCount <= 0 || maximumPositionCount <= 0)
         throw std::invalid_argument("CudaLanguageModel::estimateVramBreakdown invalid dims");
@@ -3131,6 +3153,8 @@ CudaLanguageModelVramBreakdown CudaLanguageModel::estimateVramBreakdown(
         throw std::invalid_argument("CudaLanguageModel::estimateVramBreakdown invalid pack/chunk");
     if (preferFp16GpuWeights && (!preferMixedPrecision || !preferCpuAdamOffload))
         throw std::invalid_argument("CudaLanguageModel::estimateVramBreakdown fp16GpuWeights requires AMP + cpuAdam");
+    if (preferHostGradients && !preferCpuAdamOffload)
+        throw std::invalid_argument("CudaLanguageModel::estimateVramBreakdown hostGrads requires cpuAdam");
 
     const size_t d = static_cast<size_t>(embeddingDim);
     const size_t v = static_cast<size_t>(vocabularySize);
@@ -3161,7 +3185,6 @@ CudaLanguageModelVramBreakdown CudaLanguageModel::estimateVramBreakdown(
     const size_t fp32TrainableAll = paramElements * floatBytes;
     const size_t fusedMirrorFp32 = layerCount * (3ull * d * d + 2ull * h * d) * floatBytes;
     const size_t ropeTables = layerCount * (2ull * pos * pairCount) * floatBytes;
-    const size_t gradients = fp32TrainableAll;
 
     // Embedding + untied projection stay FP32 for the CE / LM-head path.
     size_t embedFp32Elements = v * d;
@@ -3173,6 +3196,13 @@ CudaLanguageModelVramBreakdown CudaLanguageModel::estimateVramBreakdown(
     size_t smallFp32Elements = d + v; // finalNorm + projection bias
     smallFp32Elements += layerCount * (2ull * d + 2ull * h + d); // attn/ffn gamma + gate/up/down bias
     const size_t smallFp32Bytes = smallFp32Elements * floatBytes + embedFp32Bytes;
+
+    // Gradients: full FP32, or only embed/bias/gamma when large weight grads live on host.
+    size_t gradients = fp32TrainableAll;
+    if (preferHostGradients) {
+        size_t hostGradElements = layerCount * (4ull * d * d + 2ull * h * d + d * h); // q,k,v,o + gate,up + down
+        gradients = fp32TrainableAll - hostGradElements * floatBytes;
+    }
 
     // 2D weights that live as FP16 working copies on GPU (out, down, fused qkv+gateUp).
     size_t fp16WorkingElements = 0;
@@ -3341,21 +3371,22 @@ void CudaLanguageModel::runScale4BVramProbeDemo() {
         bool cpuAdam;
         bool muon;
         bool fp16Weights;
+        bool hostGrads;
         int packCols;
     };
     const Scenario scenarios[] = {
-        {"A adam/int8/gpu ckpt=sel pack=1seq", ActivationCheckpointMode::Selective, true, true, false, false, false, packColsTarget},
-        {"B adam/fp32/cpu + fp16 w ckpt=sel", ActivationCheckpointMode::Selective, true, false, true, false, true, packColsTarget},
-        {"C adam/int8/gpu ckpt=off pack=1seq", ActivationCheckpointMode::Off, true, true, false, false, false, packColsTarget},
-        {"D muon+adam/int8 ckpt=sel pack=1seq", ActivationCheckpointMode::Selective, true, true, false, true, false, packColsTarget},
-        {"E adam/fp32/cpu + fp16 w pack=0", ActivationCheckpointMode::Selective, true, false, true, false, true, 0},
+        {"A adam/int8/gpu ckpt=sel pack=1seq", ActivationCheckpointMode::Selective, true, true, false, false, false, false, packColsTarget},
+        {"B fp16w+cpuAdam+hostGrads ckpt=sel", ActivationCheckpointMode::Selective, true, false, true, false, true, true, packColsTarget},
+        {"C adam/int8/gpu ckpt=off pack=1seq", ActivationCheckpointMode::Off, true, true, false, false, false, false, packColsTarget},
+        {"D muon+adam/int8 ckpt=sel pack=1seq", ActivationCheckpointMode::Selective, true, true, false, true, false, false, packColsTarget},
+        {"E fp16w+cpuAdam+hostGrads pack=0", ActivationCheckpointMode::Selective, true, false, true, false, true, true, 0},
     };
 
     for (const Scenario& scenario : scenarios) {
         const CudaLanguageModelVramBreakdown breakdown = CudaLanguageModel::estimateVramBreakdown(
             vocab, embed, blocks, heads, pos,
             scenario.ckpt, scenario.amp, scenario.int8Adam, scenario.cpuAdam, scenario.muon,
-            true, scenario.packCols, 2048, safety, scenario.fp16Weights);
+            true, scenario.packCols, 2048, safety, scenario.fp16Weights, scenario.hostGrads);
         logVramBreakdown(scenario.name, breakdown);
         const bool fitsStatic = breakdown.staticTrainBytes + breakdown.displaySafetyBytes <= totalBytes;
         const bool fitsPeak = breakdown.peakEstimateBytes <= totalBytes;
@@ -3374,25 +3405,25 @@ void CudaLanguageModel::runScale4BVramProbeDemo() {
             deficitPeak);
     }
 
-    SmokeLog::section("scale-4B alloc probe (scenario B pieces: fp16 w + cpu Adam)");
+    SmokeLog::section("scale-4B alloc probe (scenario B: fp16 w + cpu Adam + host grads)");
     const CudaLanguageModelVramBreakdown a = CudaLanguageModel::estimateVramBreakdown(
         vocab, embed, blocks, heads, pos,
         ActivationCheckpointMode::Selective, true, false, true, false,
-        true, 0, 2048, safety, true);
+        true, 0, 2048, safety, true, true);
     const CudaLanguageModelVramBreakdown aPack = CudaLanguageModel::estimateVramBreakdown(
         vocab, embed, blocks, heads, pos,
         ActivationCheckpointMode::Selective, true, false, true, false,
-        true, packColsTarget, 2048, safety, true);
+        true, packColsTarget, 2048, safety, true, true);
 
     struct Piece {
         const char* name;
         size_t bytes;
     };
     const Piece pieces[] = {
-        {"fp32 small weights (gamma/bias)", a.fp32TrainableWeightBytes},
+        {"fp32 small weights (gamma/bias/embed)", a.fp32TrainableWeightBytes},
         {"fp16 working weights", a.fp16AmpMirrorBytes},
         {"RoPE tables", a.ropeTableBytes},
-        {"fp32 gradients", a.gradientBytes},
+        {"fp32 grads (embed/bias/gamma only)", a.gradientBytes},
         {"pack workspace (1x seq)", aPack.packWorkspaceBytes},
     };
 
