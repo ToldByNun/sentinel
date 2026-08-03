@@ -6,15 +6,19 @@
 *.opensdf
 *.VC.db
 *.VC.opendb
+*.sln.docstates
 
 # Build outputs (any config/platform)
 **/x64/
 **/Win32/
 **/ARM64/
+**/ARM/
 **/Debug/
 **/Release/
 [Bb]in/
 [Oo]bj/
+[Ll]og/
+[Ll]ogs/
 
 # Common binary / intermediate artifacts
 *.exe
@@ -31,28 +35,64 @@
 *.recipe
 *.tlog
 *.log
+*.log.*
+*.err
 *.cache
 *.deps
+*.lastbuildstate
+*.FileListAbsolute.txt
+*.aps
+*.ncb
+*.db
+*.opendb
 
 # CUDA build side products
 *.cubin
 *.fatbin
 *.ptx
 *.module_id
+*.cudafe*
+*.fatbin.c
+*.reg.c
+*.gpu
+*.cpp1.ii
+*.cpp2.i
+*.cpp3.i
+*.cpp4.ii
+*.cu.cpp
+*.cudafe1.c
+*.cudafe1.cpp
+*.cudafe1.gpu
+*.cudafe1.stub.c
+*.sm_*.cubin
 
-# App / dataset / local runs
+# Local dumps / logs / tee output (never commit)
+*.txt
+!**/README.txt
+build_out.txt
+sentinel/_*.txt
+sentinel/scale*.log*
+sentinel/sera_*.log*
+sentinel/cpu_*.log*
+sentinel/fa_*.txt
+sentinel/msbuild_*.log
+
+# App / dataset / local runs / checkpoints
 SERA-Data/
 *.snlm
 sera_demo.snlm
+sera_100m.snlm
 checkpoint_smoke.snlm
 streaming_smoke.jsonl
 
-# Local smoke / train tees
-sentinel/_smoke_*.txt
-sentinel/_train_*.txt
-sentinel/_ckpt_*.txt
-sentinel/_stream_*.txt
-sentinel/fa_*.txt
-sentinel/msbuild_*.log
-build_out.txt
-bench_pytorch_sera.py
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# OS junk
+Thumbs.db
+Desktop.ini
+.DS_Store

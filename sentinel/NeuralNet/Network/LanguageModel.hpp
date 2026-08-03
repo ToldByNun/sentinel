@@ -155,6 +155,9 @@ public:
     /// <summary>synthetic packed train throughput probe (tokens/s); requires enableCudaTrain</summary>
     double probeCudaPackedTrainTokensPerSecond(int sequenceLength, int warmupSteps = 3, int timedSteps = 8);
 
+    /// <summary>time fwd/bwd vs Adam vs Muon sections for one packed shape; prints SmokeLog</summary>
+    void probeCudaTrainStepProfile(int sequenceLength, int warmupSteps = 2, int timedSteps = 4);
+
     /// <summary>causal LM forward to vocab logits (device mirror if enabled)</summary>
     Matrix forward(const std::vector<int>& tokenIds);
 

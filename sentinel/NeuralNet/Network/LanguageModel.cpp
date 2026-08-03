@@ -16,10 +16,13 @@
 #include "../Cuda/CudaAmp.hpp"
 #include "../Cuda/CudaAdam.hpp"
 #include "../Cuda/CudaMatmul.hpp"
+#include "../Cuda/CudaMuon.hpp"
 #include "../Initializers/UniformInit.hpp"
 #include "../Losses/CrossEntropy.hpp"
 #include "../Tokenizer/BPETokenizer.hpp"
 #include "../Utils/SmokeLog.hpp"
+
+#include <cuda_runtime.h>
 
 #if defined(_OPENMP)
 #include <omp.h>
@@ -209,6 +212,124 @@ double LanguageModel::probeCudaPackedTrainTokensPerSecond(int sequenceLength, in
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     if (seconds <= 0.0) return 0.0;
     return static_cast<double>(sequenceLength) * static_cast<double>(packBatch) * static_cast<double>(timedSteps) / seconds;
+}
+
+void LanguageModel::probeCudaTrainStepProfile(int sequenceLength, int warmupSteps, int timedSteps) {
+    if (this->device == nullptr || !this->deviceTrainEnabled)
+        throw std::logic_error("LanguageModel::probeCudaTrainStepProfile requires enableCudaTrain");
+    if (sequenceLength <= 0 || sequenceLength > this->maximumPositionCount)
+        throw std::invalid_argument("LanguageModel::probeCudaTrainStepProfile invalid sequenceLength");
+    if (warmupSteps < 0 || timedSteps <= 0)
+        throw std::invalid_argument("LanguageModel::probeCudaTrainStepProfile invalid step counts");
+
+    CudaLanguageModel& device = *this->device;
+    device.preferTrainGraph = true;
+    device.adam = CudaAdam(this->optimizer.learningRate, this->optimizer.beta1, this->optimizer.beta2, this->optimizer.epsilon);
+    device.ensureTrainState();
+
+    const int vocab = this->tokenEmbedding.vocabSize();
+    const int packBatch = (std::max)(1, (std::min)(32, device.maxPackExamplesForSegment(sequenceLength)));
+    std::vector<LanguageModelExample> examples(static_cast<size_t>(packBatch));
+    unsigned rng = 100003u;
+    for (int exampleIndex = 0; exampleIndex < packBatch; ++exampleIndex) {
+        examples[static_cast<size_t>(exampleIndex)].inputTokenIds.resize(static_cast<size_t>(sequenceLength));
+        examples[static_cast<size_t>(exampleIndex)].targetTokenIds.resize(static_cast<size_t>(sequenceLength));
+        for (size_t index = 0; index < static_cast<size_t>(sequenceLength); ++index) {
+            rng = rng * 1664525u + 1013904223u;
+            examples[static_cast<size_t>(exampleIndex)].inputTokenIds[index] = static_cast<int>(rng % static_cast<unsigned>(vocab));
+            rng = rng * 1664525u + 1013904223u;
+            examples[static_cast<size_t>(exampleIndex)].targetTokenIds[index] = static_cast<int>(rng % static_cast<unsigned>(vocab));
+        }
+    }
+    std::vector<const LanguageModelExample*> packPointers(static_cast<size_t>(packBatch));
+    for (int exampleIndex = 0; exampleIndex < packBatch; ++exampleIndex)
+        packPointers[static_cast<size_t>(exampleIndex)] = &examples[static_cast<size_t>(exampleIndex)];
+
+    for (int step = 0; step < warmupSteps; ++step) {
+        device.trainGradients.zeroInPlace();
+        device.accumulatePackedExamples(packPointers.data(), packBatch, device.trainGradients);
+        device.applyGradients(device.trainGradients, 1.0f / static_cast<float>(packBatch));
+    }
+    if (cudaDeviceSynchronize() != cudaSuccess)
+        throw std::runtime_error("LanguageModel::probeCudaTrainStepProfile warmup sync failed");
+
+    device.muon.profileEnabled = device.preferMuon;
+    device.muon.profile.reset();
+
+    cudaEvent_t accumStart = nullptr;
+    cudaEvent_t accumStop = nullptr;
+    cudaEvent_t applyStart = nullptr;
+    cudaEvent_t applyStop = nullptr;
+    if (cudaEventCreate(&accumStart) != cudaSuccess || cudaEventCreate(&accumStop) != cudaSuccess
+        || cudaEventCreate(&applyStart) != cudaSuccess || cudaEventCreate(&applyStop) != cudaSuccess)
+        throw std::runtime_error("LanguageModel::probeCudaTrainStepProfile event create failed");
+
+    double accumMs = 0.0;
+    double applyMs = 0.0;
+    for (int step = 0; step < timedSteps; ++step) {
+        device.trainGradients.zeroInPlace();
+        cudaEventRecord(accumStart);
+        device.accumulatePackedExamples(packPointers.data(), packBatch, device.trainGradients);
+        cudaEventRecord(accumStop);
+        cudaEventSynchronize(accumStop);
+        float stepAccumMs = 0.0f;
+        cudaEventElapsedTime(&stepAccumMs, accumStart, accumStop);
+        accumMs += static_cast<double>(stepAccumMs);
+
+        cudaEventRecord(applyStart);
+        device.applyGradients(device.trainGradients, 1.0f / static_cast<float>(packBatch));
+        cudaEventRecord(applyStop);
+        cudaEventSynchronize(applyStop);
+        float stepApplyMs = 0.0f;
+        cudaEventElapsedTime(&stepApplyMs, applyStart, applyStop);
+        applyMs += static_cast<double>(stepApplyMs);
+    }
+
+    cudaEventDestroy(accumStart);
+    cudaEventDestroy(accumStop);
+    cudaEventDestroy(applyStart);
+    cudaEventDestroy(applyStop);
+    device.muon.profileEnabled = false;
+
+    const double invSteps = 1.0 / static_cast<double>(timedSteps);
+    const double avgAccum = accumMs * invSteps;
+    const double avgApply = applyMs * invSteps;
+    const CudaMuonProfile& mp = device.muon.profile;
+    const double muonInv = timedSteps > 0 ? invSteps : 1.0;
+
+    SmokeLog::result(
+        "step profile",
+        "pack=%d seq=%d  fwdBwd=%.2fms  apply=%.2fms  muonUpdates=%d  opt=%s",
+        packBatch,
+        sequenceLength,
+        avgAccum,
+        avgApply,
+        mp.updateCount,
+        device.preferMuon ? "muon+adam" : "adam");
+
+    if (device.preferMuon && mp.updateCount > 0) {
+        SmokeLog::result(
+            "muon sections /step",
+            "momentum=%.2f  normalize=%.2f  nsGemm=%.2f  nsElem=%.2f  apply=%.2f  muonTotal=%.2f  (ms)",
+            mp.momentumMs * muonInv,
+            mp.normalizeMs * muonInv,
+            mp.nsGemmMs * muonInv,
+            mp.nsElemwiseMs * muonInv,
+            mp.applyMs * muonInv,
+            mp.totalMs() * muonInv);
+        const double muonTotal = mp.totalMs() * muonInv;
+        if (muonTotal > 0.0) {
+            SmokeLog::result(
+                "muon share",
+                "nsGemm=%.0f%%  nsElem=%.0f%%  normalize=%.0f%%  momentum=%.0f%%  apply=%.0f%%  of muon; muon/apply=%.0f%%",
+                100.0 * (mp.nsGemmMs * muonInv) / muonTotal,
+                100.0 * (mp.nsElemwiseMs * muonInv) / muonTotal,
+                100.0 * (mp.normalizeMs * muonInv) / muonTotal,
+                100.0 * (mp.momentumMs * muonInv) / muonTotal,
+                100.0 * (mp.applyMs * muonInv) / muonTotal,
+                100.0 * muonTotal / (std::max)(avgApply, 1e-6));
+        }
+    }
 }
 
 LanguageModel::~LanguageModel() = default;
