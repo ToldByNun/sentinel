@@ -178,7 +178,7 @@ double LanguageModel::probeCudaPackedTrainTokensPerSecond(int sequenceLength, in
         throw std::invalid_argument("LanguageModel::probeCudaPackedTrainTokensPerSecond invalid step counts");
 
     CudaLanguageModel& device = *this->device;
-    device.preferTrainGraph = true;
+    // Preserve preferTrainGraph from caller (do not force capture on one-shot probes).
     device.adam = CudaAdam(this->optimizer.learningRate, this->optimizer.beta1, this->optimizer.beta2, this->optimizer.epsilon);
     device.ensureTrainState();
 
