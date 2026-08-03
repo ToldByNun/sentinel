@@ -179,6 +179,9 @@ public:
     /// </summary>
     void releaseTrainActivationScratch();
 
+    /// <summary>like releaseTrainActivationScratch; keepDeferredHostWeightGrads leaves large 2D weight grads for async D2H</summary>
+    void releaseTrainActivationScratch(bool keepDeferredHostWeightGrads);
+
     /// <summary>recompute AttnNorm+Attn+residual from saved block input (FFN untouched)</summary>
     void recomputeAttention(const CudaMatrix& blockInput, int segmentLength = 0);
 
@@ -189,7 +192,13 @@ public:
     void decode(const CudaMatrix& input, CudaKvCache& cache, CudaMatrix& out);
 
     /// <summary>backprop through one block accumulates into gradients returns input gradient</summary>
-    void backward(const CudaMatrix& outputGradient, CudaMatrix& inputGradient, CudaTransformerBlockGradients& gradients, CudaTransformerBlockHostWeightGrads* hostWeightGrads = nullptr);
+    /// <param name="deferHostWeightDownload">keep large weight grads on device; caller downloads async then releaseDeferredHostWeightGradDevice()</param>
+    void backward(
+        const CudaMatrix& outputGradient,
+        CudaMatrix& inputGradient,
+        CudaTransformerBlockGradients& gradients,
+        CudaTransformerBlockHostWeightGrads* hostWeightGrads = nullptr,
+        bool deferHostWeightDownload = false);
 
     /// <summary>
     /// Selective bwd: FFN from kept acts, then recompute Attn from blockInput, then Attn bwd
@@ -200,7 +209,17 @@ public:
         CudaTransformerBlockGradients& gradients,
         const CudaMatrix& blockInput,
         int segmentLength = 0,
-        CudaTransformerBlockHostWeightGrads* hostWeightGrads = nullptr);
+        CudaTransformerBlockHostWeightGrads* hostWeightGrads = nullptr,
+        bool deferHostWeightDownload = false);
+
+    /// <summary>queue D2H of deferred large weight grads into host on copyStream (after compute event)</summary>
+    void enqueueDeferredHostWeightGradDownloads(
+        CudaTransformerBlockHostWeightGrads& hostWeightGrads,
+        cudaStream_t copyStream,
+        cudaEvent_t gradsReadyOnCompute);
+
+    /// <summary>free device large-weight grad workspaces after deferred D2H completed</summary>
+    void releaseDeferredHostWeightGradDevice();
 
 
 

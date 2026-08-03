@@ -1063,6 +1063,40 @@ void CudaOps::downloadIntoHost(Matrix& hostOut, const CudaMatrix& deviceSource) 
     flushPending();
 }
 
+void CudaOps::downloadIntoHostAsync(Matrix& hostOut, const CudaMatrix& deviceSource, cudaStream_t stream) {
+    if (deviceSource.empty()) throw std::invalid_argument("CudaOps::downloadIntoHostAsync empty deviceSource");
+    if (!deviceSource.hasDeviceStorage()) throw std::invalid_argument("CudaOps::downloadIntoHostAsync missing device storage");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::downloadIntoHostAsync no CUDA device");
+    if (stream == nullptr) throw std::invalid_argument("CudaOps::downloadIntoHostAsync null stream");
+
+    hostOut.ensureSize(deviceSource.rows, deviceSource.cols);
+    const size_t bytes = deviceSource.byteCount();
+    float* hostData = hostOut.data.data();
+    // Pin pageable host so memcpyAsync on the copy stream can overlap with compute.
+    const cudaError_t reg = cudaHostRegister(hostData, bytes, cudaHostRegisterDefault);
+    if (reg != cudaSuccess) {
+        cudaGetLastError();
+        // Fallback: blocking download on the copy stream (still ordered vs compute via wait-event).
+        CudaMatmul::throwIfCudaFailed(
+            cudaMemcpyAsync(hostData, deviceSource.buffer.deviceData, bytes, cudaMemcpyDeviceToHost, stream),
+            "CudaOps::downloadIntoHostAsync D2H fallback");
+        CudaMatmul::throwIfCudaFailed(cudaStreamSynchronize(stream), "CudaOps::downloadIntoHostAsync fallback sync");
+        return;
+    }
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpyAsync(hostData, deviceSource.buffer.deviceData, bytes, cudaMemcpyDeviceToHost, stream),
+        "CudaOps::downloadIntoHostAsync D2H");
+}
+
+void CudaOps::unregisterHostMatrix(Matrix& host) {
+    if (host.empty() || host.data.empty()) return;
+    const cudaError_t status = cudaHostUnregister(host.data.data());
+    if (status != cudaSuccess) {
+        // Already unregistered or never registered (fallback path) — clear sticky error.
+        cudaGetLastError();
+    }
+}
+
 void CudaOps::extractHeadInto(const CudaMatrix& full, int headIndex, int headDimension, CudaMatrix& head) {
     CudaOps::extractHeadInto(full, headIndex, headDimension, static_cast<int>(full.cols), head);
 }

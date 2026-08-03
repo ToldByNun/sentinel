@@ -92,6 +92,15 @@ public:
     /// <summary>D2H overwrite into host (no temporary Matrix; synchronizes)</summary>
     static void downloadIntoHost(Matrix& hostOut, const CudaMatrix& deviceSource);
 
+    /// <summary>
+    /// queue D2H into hostOut on stream (cudaHostRegister + memcpyAsync). Does not synchronize.
+    /// Caller must cudaHostUnregister(hostOut.data.data()) after the stream/event completes, before freeing hostOut.
+    /// </summary>
+    static void downloadIntoHostAsync(Matrix& hostOut, const CudaMatrix& deviceSource, cudaStream_t stream);
+
+    /// <summary>cudaHostUnregister for a matrix previously passed to downloadIntoHostAsync (no-op if empty)</summary>
+    static void unregisterHostMatrix(Matrix& host);
+
     /// <summary>if non-null, downloadAddIntoHost/downloadIntoHost add wall seconds into *sink</summary>
     static double* downloadAddIntoHostSecondsSink;
 
