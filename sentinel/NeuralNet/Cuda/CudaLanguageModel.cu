@@ -556,23 +556,86 @@ size_t CudaLanguageModel::estimatePendingTrainStaticBytes() const {
         }
     }
 
-    size_t momentBytes = 0;
-    if (this->preferMuon)
-        momentBytes += muonWeightBytes; // one FP32 momentum per Muon tensor
-    if (!CudaAdam::preferCpuOffload) {
-        if (CudaAdam::preferInt8Moments) {
-            // int8 m1/m2 + FP32 scales (~1/256 of elements, padded).
-            momentBytes += adamWeightBytes / 2ull + adamWeightBytes / 128ull;
-        } else {
-            momentBytes += 2ull * adamWeightBytes;
+    size_t pending = 0;
+
+    // Only reserve what is not already resident (re-budget after ensureTrainState must not double-count).
+    const bool gradsReady = !this->blocks.empty()
+        && this->trainGradients.blocks.size() == this->blocks.size()
+        && this->trainGradients.tokenEmbedding.elementCount() == this->tokenEmbeddingWeight.elementCount();
+    if (!gradsReady)
+        pending += gradientBytes;
+
+    if (this->preferMuon) {
+        bool muonReady = this->blockMuonStates.size() == this->blocks.size();
+        if (muonReady) {
+            for (size_t blockIndex = 0; blockIndex < this->blockMuonStates.size(); ++blockIndex) {
+                if (this->blockMuonStates[blockIndex].qkvWeight.momentum.elementCount() == 0) {
+                    muonReady = false;
+                    break;
+                }
+            }
         }
+        if (!muonReady)
+            pending += muonWeightBytes;
+    }
+
+    // Adam moments stay lazy until first applyGradients — always reserve unless CPU offload.
+    if (!CudaAdam::preferCpuOffload) {
+        if (CudaAdam::preferInt8Moments)
+            pending += adamWeightBytes / 2ull + adamWeightBytes / 128ull;
+        else
+            pending += 2ull * adamWeightBytes;
     }
 
     // Sticky FP16 master-weight mirrors for AMP GEMMs.
-    const size_t halfMirrorBytes = CudaAmp::preferMixedPrecision ? (parameterBytes / 2ull) : 0ull;
+    if (CudaAmp::preferMixedPrecision)
+        pending += parameterBytes / 2ull;
 
-    // Grad buffers may already exist if ensureTrainState ran; budget is called before that.
-    return gradientBytes + momentBytes + halfMirrorBytes;
+    return pending;
+}
+
+void CudaLanguageModel::releasePackedTrainWorkspaces() {
+    this->releaseTrainGraph();
+    this->hidden.free();
+    this->normalized.free();
+    this->hiddenGradient.free();
+    this->blockInputGradientScratch.free();
+    this->normInputGradientScratch.free();
+    this->logits.free();
+    this->probabilities.free();
+    this->logitGradient.free();
+    this->projectionWeightGradient.free();
+    this->projectionBiasGradient.free();
+    this->logitChunk.free();
+    this->logitGradientChunk.free();
+    this->projectionWeightGradientChunk.free();
+    this->hiddenGradientChunk.free();
+    this->onlineSoftmaxMax.free();
+    this->onlineSoftmaxSumExp.free();
+    this->targetLogits.free();
+    this->tokenIdsBuffer.free();
+    this->targetTokenIdsBuffer.free();
+    this->meanDivisorBuffer.free();
+    this->packH2dDevice.free();
+    this->adamWindowTokenIdsBuffer.free();
+    this->releaseActivationCheckpoints();
+
+    for (CudaTransformerBlock& block : this->blocks) {
+        block.attention.releaseActivationScratch();
+        block.feedForward.gateUpPreActivation.free();
+        block.feedForward.gateUpHiddenGradient.free();
+        block.feedForward.gatePreActivation.free();
+        block.feedForward.gateActivated.free();
+        block.feedForward.up.free();
+        block.feedForward.hidden.free();
+        block.feedForward.output.free();
+        block.feedForward.inputCache.free();
+        block.feedForward.hiddenGradient.free();
+        block.feedForward.upGradient.free();
+        block.feedForward.gateGradient.free();
+        block.feedForward.siluDerivative.free();
+        block.feedForward.temp.free();
+    }
 }
 
 int CudaLanguageModel::maxPackExamplesForSegment(int segmentLength) const {
@@ -588,6 +651,11 @@ void CudaLanguageModel::applyVramPackBudget(float freeFraction, size_t safetyRes
     if (!(freeFraction > 0.0f && freeFraction <= 1.0f))
         throw std::invalid_argument("CudaLanguageModel::applyVramPackBudget freeFraction must be in (0, 1]");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaLanguageModel::applyVramPackBudget no CUDA device");
+
+    // Return pack-scaled workspace to the free pool before measuring; otherwise a second
+    // applyVramPackBudget (e.g. after enableCudaTrain) sees free≈0 and collapses to minCols.
+    this->releasePackedTrainWorkspaces();
+    CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaLanguageModel::applyVramPackBudget sync after workspace release");
 
     size_t freeBytes = 0;
     size_t totalBytes = 0;
@@ -1671,6 +1739,11 @@ void CudaLanguageModel::trainOnExamples(
     std::vector<const LanguageModelExample*> packPointers;
     packPointers.reserve(static_cast<size_t>((std::max)(1, this->maxPackedColumns / CudaLanguageModel::lengthBucketStep)));
 
+    const auto progressStart = std::chrono::steady_clock::now();
+    auto lastProgress = progressStart;
+    int doneExamples = 0;
+    long long donePredictions = 0;
+
     for (int windowStart = 0; windowStart < exampleCount; windowStart += packWindow) {
         int windowEnd = windowStart + packWindow;
         if (windowEnd > exampleCount) windowEnd = exampleCount;
@@ -1707,6 +1780,30 @@ void CudaLanguageModel::trainOnExamples(
             this->accumulateBucketPackedExamples(packPointers.data(), packExampleCount, bucketLength, this->trainGradients);
 
             accumulatedExampleCount += packExampleCount;
+            doneExamples += packExampleCount;
+            for (const LanguageModelExample* example : packPointers)
+                donePredictions += static_cast<long long>(example->targetTokenIds.size());
+
+            const auto now = std::chrono::steady_clock::now();
+            const double sinceProgress = std::chrono::duration<double>(now - lastProgress).count();
+            if (sinceProgress >= 15.0 || doneExamples == exampleCount) {
+                const double elapsed = std::chrono::duration<double>(now - progressStart).count();
+                const double tokPerSec = elapsed > 0.0 ? static_cast<double>(donePredictions) / elapsed : 0.0;
+                const double size1Percent = packCount > 0
+                    ? 100.0 * static_cast<double>(singleExamplePackCount) / static_cast<double>(packCount)
+                    : 0.0;
+                std::printf(
+                    "  ... progress  ex=%d/%d  tokens/s=%.0f  maxPackCols=%d  packs=%d  size1=%.1f%%  opt=%s\n",
+                    doneExamples,
+                    exampleCount,
+                    tokPerSec,
+                    this->maxPackedColumns,
+                    packCount,
+                    size1Percent,
+                    this->preferMuon ? "muon+adam" : "adam");
+                lastProgress = now;
+            }
+
             const bool isLastPack = flushRemainder && packEnd >= exampleCount;
             if (accumulatedExampleCount >= examplesPerAdamStep || isLastPack) {
                 this->applyGradients(this->trainGradients, 1.0f / static_cast<float>(accumulatedExampleCount));

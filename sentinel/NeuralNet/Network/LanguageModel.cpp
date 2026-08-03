@@ -362,7 +362,6 @@ void LanguageModel::enableCudaTrain() {
 
     this->deviceTrainEnabled = true;
     this->device->setActivationCheckpointMode(ActivationCheckpointMode::Selective);
-    this->device->setPreferMuon(true);
     CudaAmp::preferMixedPrecision = true;
     // loss scaling only helps when FP16 GEMMs can run (shared dim gate is 256)
     CudaAmp::useLossScaling = this->tokenEmbedding.embeddingDim() >= 256;
