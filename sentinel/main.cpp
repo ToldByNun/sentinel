@@ -117,7 +117,7 @@ int main() {
                 if (forcedPackCols > 0)
                     model.setCudaMaxPackedColumns(forcedPackCols);
                 else
-                    model.applyCudaVramPackBudget(0.55f);
+                    model.applyCudaVramPackBudget();
 
                 size_t freeBytes = 0;
                 size_t totalBytes = 0;
@@ -291,7 +291,7 @@ int main() {
                 source.chunkExampleCount());
 
             SmokeLog::note("building ~100M LanguageModel (CPU init may take a while)...");
-            LanguageModel model(tokenizer.vocabSize(), scaleEmbed, scalePos, Adam(0.001f), scaleBlocks, scaleHeads);
+            LanguageModel model(tokenizer.vocabSize(), scaleEmbed, scalePos, Adam(3e-4f), scaleBlocks, scaleHeads);
             const size_t paramCount = model.parameterElementCount();
             SmokeLog::result(
                 "model",
@@ -312,7 +312,7 @@ int main() {
             model.enableCudaTrain();
             model.enableActivationCheckpointing(true);
             model.setCudaPreferTrainGraph(true);
-            model.applyCudaVramPackBudget(0.55f);
+            model.applyCudaVramPackBudget();
 
             size_t freeAfterSetup = 0;
             size_t totalBytes = 0;

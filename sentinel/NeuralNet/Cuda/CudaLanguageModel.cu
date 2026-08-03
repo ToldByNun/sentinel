@@ -661,24 +661,37 @@ void CudaLanguageModel::applyVramPackBudget(float freeFraction, size_t safetyRes
     size_t totalBytes = 0;
     CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeBytes, &totalBytes), "CudaLanguageModel::applyVramPackBudget memGetInfo");
 
+    // WDDM shares VRAM with the desktop — keep a hard floor so DWM/apps don't thrash the train working set.
+    const size_t displayFloor = (std::max)(safetyReserveBytes, totalBytes / 5ull); // >=20% of card or explicit safety
     const size_t pendingStatic = this->estimatePendingTrainStaticBytes();
-    const size_t reserved = pendingStatic + safetyReserveBytes;
+    const size_t reserved = pendingStatic + displayFloor;
     size_t usableBytes = freeBytes > reserved ? freeBytes - reserved : 0;
 
     const size_t perColumn = this->bytesPerPackedColumn();
     if (perColumn == 0) throw std::logic_error("CudaLanguageModel::applyVramPackBudget zero bytesPerPackedColumn");
 
+    // bytesPerPackedColumn undercounts lazy Attn/FFN scratch + cuBLAS workspaces; pad so packs stay safe.
+    constexpr double footprintSlack = 1.40;
     const size_t budgetBytes = static_cast<size_t>(static_cast<double>(usableBytes) * static_cast<double>(freeFraction));
-    size_t cols = budgetBytes / perColumn;
+    const size_t bytesPerColBudget = static_cast<size_t>(static_cast<double>(perColumn) * footprintSlack);
+    size_t cols = bytesPerColBudget > 0 ? budgetBytes / bytesPerColBudget : 0;
 
     int minCols = CudaLanguageModel::lengthBucketStep;
     if (this->maximumPositionCount > minCols) minCols = this->maximumPositionCount;
-    // Hard cap keeps consumer 16GB configs away from workspace blow-ups.
-    constexpr int maxCols = 10240;
+    // Beyond ~4k cols throughput saturates on 16GB cards while VRAM pressure kills tok/s (WDDM thrash).
+    constexpr int maxCols = 4096;
     if (cols < static_cast<size_t>(minCols)) cols = static_cast<size_t>(minCols);
     if (cols > static_cast<size_t>(maxCols)) cols = static_cast<size_t>(maxCols);
 
     cols = (cols / 64u) * 64u;
+    if (cols < static_cast<size_t>(minCols)) cols = static_cast<size_t>(minCols);
+
+    // Final clamp: planned workspace must leave displayFloor free after pending static.
+    while (cols > static_cast<size_t>(minCols)) {
+        const size_t plannedWorkspace = cols * bytesPerColBudget;
+        if (pendingStatic + plannedWorkspace + displayFloor <= freeBytes) break;
+        cols -= 64u;
+    }
     if (cols < static_cast<size_t>(minCols)) cols = static_cast<size_t>(minCols);
 
     this->maxPackedColumns = static_cast<int>(cols);
@@ -686,12 +699,13 @@ void CudaLanguageModel::applyVramPackBudget(float freeFraction, size_t safetyRes
     const double freeMiB = static_cast<double>(freeBytes) / (1024.0 * 1024.0);
     const double totalMiB = static_cast<double>(totalBytes) / (1024.0 * 1024.0);
     const double pendingMiB = static_cast<double>(pendingStatic) / (1024.0 * 1024.0);
-    const double safetyMiB = static_cast<double>(safetyReserveBytes) / (1024.0 * 1024.0);
+    const double safetyMiB = static_cast<double>(displayFloor) / (1024.0 * 1024.0);
     const double workspaceMiB = static_cast<double>(perColumn) * static_cast<double>(this->maxPackedColumns) / (1024.0 * 1024.0);
+    const double plannedMiB = static_cast<double>(bytesPerColBudget) * static_cast<double>(this->maxPackedColumns) / (1024.0 * 1024.0);
     std::printf(
-        "CudaLanguageModel::applyVramPackBudget: ckpt=%s  free=%.0f/%.0f MiB  pendingStatic=%.0f safety=%.0f fraction=%.2f  maxPackCols=%d  ~workspace=%.0f MiB\n",
+        "CudaLanguageModel::applyVramPackBudget: ckpt=%s  free=%.0f/%.0f MiB  pendingStatic=%.0f safety=%.0f fraction=%.2f  maxPackCols=%d  ~workspace=%.0f MiB (~%.0f w/slack)\n",
         CudaLanguageModel::activationCheckpointModeName(this->activationCheckpointMode),
-        freeMiB, totalMiB, pendingMiB, safetyMiB, freeFraction, this->maxPackedColumns, workspaceMiB);
+        freeMiB, totalMiB, pendingMiB, safetyMiB, freeFraction, this->maxPackedColumns, workspaceMiB, plannedMiB);
 }
 
 void CudaLanguageModel::releaseActivationCheckpoints() {
@@ -1476,6 +1490,9 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
         gradients.scaleInPlace(inverseLossScale);
         if (CudaAmp::gradientsHaveNonFinite(gradients)) {
             CudaAmp::lossScaler.updateOnOverflow();
+            // Critical: leave Inf/NaN grads in the buffer and every later microbatch stays poisoned.
+            gradients.zeroInPlace();
+            this->adamWindowTokenIds.clear();
             return;
         }
         effectiveGradientScale = gradientScale;
@@ -1673,20 +1690,39 @@ float CudaLanguageModel::averageLoss(const LanguageModelDataset& dataset) {
     if (dataset.examples.empty()) return 0.0f;
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaLanguageModel::averageLoss no CUDA device");
 
+    // Eval in FP32: train AMP/half-ckpt state must not leak Inf into the reported test metric.
+    const bool previousAmp = CudaAmp::preferMixedPrecision;
+    CudaAmp::preferMixedPrecision = false;
+
     this->epochLossSum.ensureSize(1, 1);
     CudaOps::zeroInPlace(this->epochLossSum);
 
     for (const LanguageModelExample& example : dataset.examples) {
+        if (example.inputTokenIds.empty() || example.targetTokenIds.size() != example.inputTokenIds.size())
+            continue;
+
         this->forwardInto(example.inputTokenIds, this->logits);
-        CudaOps::softmaxInto(this->logits, this->probabilities);
         this->targetTokenIdsBuffer.ensureCapacity(example.targetTokenIds.size());
         this->targetTokenIdsBuffer.copyFromHost(example.targetTokenIds.data(), example.targetTokenIds.size());
-        CudaOps::crossEntropyAddMeanLossFromIds(this->probabilities, this->targetTokenIdsBuffer, example.targetTokenIds.size(), this->epochLossSum);
+
+        // Stable CE from logits (no full softmax materialization dependency on freed train probs).
+        CudaOps::softmaxCrossEntropyFromLogitsInto(
+            this->logits,
+            this->targetTokenIdsBuffer,
+            example.targetTokenIds.size(),
+            this->probabilities,
+            this->logitGradient,
+            this->epochLossSum,
+            1.0f,
+            static_cast<int>(example.targetTokenIds.size()));
     }
 
     CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaLanguageModel::averageLoss synchronize");
+    CudaAmp::preferMixedPrecision = previousAmp;
+
     Matrix lossHost = this->epochLossSum.download();
-    return lossHost.at(0, 0) / static_cast<float>(dataset.size());
+    const float mean = lossHost.at(0, 0) / static_cast<float>(dataset.size());
+    return mean;
 }
 
 void CudaLanguageModel::trainOnExamples(
@@ -1884,11 +1920,11 @@ void CudaLanguageModel::train(const LanguageModelDataset& trainDataset, const La
             tokensPerSecond);
 
         if (CudaAmp::lossScalingActive())
-            std::printf("  ampScale=%.0f", CudaAmp::lossScaler.scale);
+            std::printf("  ampScale=%.0f  ampOverflows=%d", CudaAmp::lossScaler.scale, CudaAmp::lossScaler.overflowCount);
 
         if (!testDataset.examples.empty()) {
             const float testLoss = this->averageLoss(testDataset);
-            const float testPpl = std::exp((std::min)(testLoss, 20.0f));
+            const float testPpl = std::isfinite(testLoss) ? std::exp((std::min)(testLoss, 20.0f)) : testLoss;
             std::printf("  testLoss=%.6f  testPpl=%.2f", testLoss, testPpl);
         }
 
@@ -1978,11 +2014,11 @@ void CudaLanguageModel::train(LanguageModelChunkSource& source, int epochs, int 
             tokensPerSecond);
 
         if (CudaAmp::lossScalingActive())
-            std::printf("  ampScale=%.0f", CudaAmp::lossScaler.scale);
+            std::printf("  ampScale=%.0f  ampOverflows=%d", CudaAmp::lossScaler.scale, CudaAmp::lossScaler.overflowCount);
 
         if (!testDataset.examples.empty()) {
             const float testLoss = this->averageLoss(testDataset);
-            const float testPpl = std::exp((std::min)(testLoss, 20.0f));
+            const float testPpl = std::isfinite(testLoss) ? std::exp((std::min)(testLoss, 20.0f)) : testLoss;
             std::printf("  testLoss=%.6f  testPpl=%.2f", testLoss, testPpl);
         }
 
