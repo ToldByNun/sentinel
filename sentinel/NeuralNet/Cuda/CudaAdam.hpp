@@ -97,6 +97,11 @@ public:
     /// </summary>
     static bool preferHostGradients;
 
+    /// <summary>
+    /// with preferFp16GpuWeights: SGD on host masters (no Adam m/v). Use when host RAM cannot hold ~2x param moments.
+    /// </summary>
+    static bool preferHostSgd;
+
     /// <summary>absmax quantization block size for int8 moments</summary>
     static int int8BlockSize;
 

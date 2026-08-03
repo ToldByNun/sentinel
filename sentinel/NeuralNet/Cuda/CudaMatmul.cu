@@ -296,6 +296,12 @@ void CudaMatrix::ensureSize(size_t rowCount, size_t columnCount) {
     this->buffer.ensureCapacity(this->byteCount());
 }
 
+void CudaMatrix::ensureShape(size_t rowCount, size_t columnCount) {
+    this->rows = rowCount;
+    this->cols = columnCount;
+    this->buffer.free();
+}
+
 void CudaMatrix::free() {
     this->buffer.free();
     this->rows = 0;

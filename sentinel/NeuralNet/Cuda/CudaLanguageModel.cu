@@ -3081,6 +3081,174 @@ void CudaLanguageModel::uploadFrom(const LanguageModel& host) {
         CudaAmp::registerMasterWeight(this->projectionWeight.buffer.deviceData, this->projectionWeight.elementCount());
 }
 
+void CudaLanguageModel::uploadFromFp16CpuOffload(LanguageModel& host) {
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaLanguageModel::uploadFromFp16CpuOffload no CUDA device");
+    if (!CudaAmp::preferMixedPrecision)
+        throw std::logic_error("CudaLanguageModel::uploadFromFp16CpuOffload requires AMP");
+    if (!CudaAdam::preferCpuOffload || !CudaAdam::preferFp16GpuWeights)
+        throw std::logic_error("CudaLanguageModel::uploadFromFp16CpuOffload requires cpu offload + fp16 weights");
+
+    auto memMiB = []() -> double {
+        size_t freeBytes = 0;
+        size_t totalBytes = 0;
+        if (cudaMemGetInfo(&freeBytes, &totalBytes) != cudaSuccess) return -1.0;
+        return static_cast<double>(totalBytes - freeBytes) / (1024.0 * 1024.0);
+    };
+
+    auto bindFp16FromHost = [](CudaMatrix& deviceWeight, Matrix& hostMaster) {
+        if (hostMaster.empty()) throw std::invalid_argument("uploadFromFp16CpuOffload empty host master");
+        deviceWeight.ampWeightSlot = -1;
+        deviceWeight.upload(hostMaster);
+        CudaAmp::bindFp16WorkingWeight(deviceWeight);
+    };
+
+    auto hostOnlyShape = [](CudaMatrix& deviceWeight, const Matrix& hostMaster) {
+        if (hostMaster.empty()) throw std::invalid_argument("uploadFromFp16CpuOffload empty host-only weight");
+        deviceWeight.ampWeightSlot = -1;
+        deviceWeight.ensureShape(hostMaster.rows, hostMaster.cols);
+    };
+
+    CudaAmp::clearMasterWeights();
+
+    this->tieEmbeddingProjection = host.tieEmbeddingProjection;
+    this->maximumPositionCount = host.maximumPositionCount;
+
+    this->hostTokenEmbeddingMaster = std::move(host.tokenEmbedding.weight);
+    host.tokenEmbedding.weight = Matrix();
+    this->tokenEmbeddingWeight.upload(this->hostTokenEmbeddingMaster);
+
+    this->hostFinalNormGammaMaster = std::move(host.finalNorm.gamma);
+    host.finalNorm.gamma = Matrix();
+    this->finalNorm.epsilon = host.finalNorm.epsilon;
+    this->finalNorm.gamma.upload(this->hostFinalNormGammaMaster);
+
+    this->hostProjectionBiasMaster = std::move(host.outputProjection.bias);
+    host.outputProjection.bias = Matrix();
+    this->projectionBias.upload(this->hostProjectionBiasMaster);
+
+    if (this->tieEmbeddingProjection) {
+        this->projectionWeight.free();
+        this->hostProjectionWeightMaster = Matrix();
+        host.outputProjection.weight = Matrix();
+    } else {
+        this->hostProjectionWeightMaster = std::move(host.outputProjection.weight);
+        host.outputProjection.weight = Matrix();
+        this->projectionWeight.upload(this->hostProjectionWeightMaster);
+    }
+
+    this->blocks.clear();
+    this->blocks.resize(host.blocks.size());
+    this->hostBlockAdamStates.clear();
+    this->hostBlockAdamStates.resize(host.blocks.size());
+    this->kvCaches.clear();
+    this->kvCaches.resize(host.blocks.size());
+
+    for (size_t blockIndex = 0; blockIndex < host.blocks.size(); ++blockIndex) {
+        TransformerBlock& hostBlock = host.blocks[blockIndex];
+        CudaTransformerBlock& block = this->blocks[blockIndex];
+        CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[blockIndex];
+
+        block.attentionNorm.epsilon = hostBlock.attentionNorm.epsilon;
+        hosts.attentionNormGammaMaster = std::move(hostBlock.attentionNorm.gamma);
+        hostBlock.attentionNorm.gamma = Matrix();
+        block.attentionNorm.gamma.upload(hosts.attentionNormGammaMaster);
+
+        block.feedForwardNorm.epsilon = hostBlock.feedForwardNorm.epsilon;
+        hosts.feedForwardNormGammaMaster = std::move(hostBlock.feedForwardNorm.gamma);
+        hostBlock.feedForwardNorm.gamma = Matrix();
+        block.feedForwardNorm.gamma.upload(hosts.feedForwardNormGammaMaster);
+
+        // Attention meta + RoPE (no full weight upload).
+        block.attention.headCount = hostBlock.attention.headCount;
+        block.attention.headDimension = hostBlock.attention.headDimension;
+        block.attention.pairCount = hostBlock.attention.rotaryEmbedding.pairCount;
+        block.attention.maximumPositionCount = hostBlock.attention.rotaryEmbedding.maximumPositionCount;
+        block.attention.windowSize = hostBlock.attention.windowSize;
+        block.attention.globalTokenCount = hostBlock.attention.globalTokenCount;
+        block.attention.preferFlashAttention = false;
+        {
+            Matrix hostCos(static_cast<size_t>(block.attention.maximumPositionCount), static_cast<size_t>(block.attention.pairCount), 0.0f);
+            Matrix hostSin(static_cast<size_t>(block.attention.maximumPositionCount), static_cast<size_t>(block.attention.pairCount), 0.0f);
+            for (int position = 0; position < block.attention.maximumPositionCount; ++position) {
+                for (int pairIndex = 0; pairIndex < block.attention.pairCount; ++pairIndex) {
+                    const size_t tableIndex = static_cast<size_t>(position * block.attention.pairCount + pairIndex);
+                    hostCos.at(static_cast<size_t>(position), static_cast<size_t>(pairIndex)) = hostBlock.attention.rotaryEmbedding.cosTable[tableIndex];
+                    hostSin.at(static_cast<size_t>(position), static_cast<size_t>(pairIndex)) = hostBlock.attention.rotaryEmbedding.sinTable[tableIndex];
+                }
+            }
+            block.attention.cosTable.upload(hostCos);
+            block.attention.sinTable.upload(hostSin);
+        }
+
+        hosts.queryWeightMaster = std::move(hostBlock.attention.queryWeight);
+        hosts.keyWeightMaster = std::move(hostBlock.attention.keyWeight);
+        hosts.valueWeightMaster = std::move(hostBlock.attention.valueWeight);
+        hosts.attentionOutputWeightMaster = std::move(hostBlock.attention.outputWeight);
+        hostBlock.attention.queryWeight = Matrix();
+        hostBlock.attention.keyWeight = Matrix();
+        hostBlock.attention.valueWeight = Matrix();
+        hostBlock.attention.outputWeight = Matrix();
+
+        hostOnlyShape(block.attention.queryWeight, hosts.queryWeightMaster);
+        hostOnlyShape(block.attention.keyWeight, hosts.keyWeightMaster);
+        hostOnlyShape(block.attention.valueWeight, hosts.valueWeightMaster);
+        bindFp16FromHost(block.attention.outputWeight, hosts.attentionOutputWeightMaster);
+
+        Matrix qkvHost(hosts.queryWeightMaster.rows * 3ull, hosts.queryWeightMaster.cols, 0.0f);
+        const size_t qSlice = hosts.queryWeightMaster.data.size();
+        std::memcpy(qkvHost.data.data(), hosts.queryWeightMaster.data.data(), qSlice * sizeof(float));
+        std::memcpy(qkvHost.data.data() + qSlice, hosts.keyWeightMaster.data.data(), qSlice * sizeof(float));
+        std::memcpy(qkvHost.data.data() + 2 * qSlice, hosts.valueWeightMaster.data.data(), qSlice * sizeof(float));
+        bindFp16FromHost(block.attention.qkvWeight, qkvHost);
+
+        hosts.feedForwardGateWeightMaster = std::move(hostBlock.feedForward.gateWeight);
+        hosts.feedForwardUpWeightMaster = std::move(hostBlock.feedForward.upWeight);
+        hosts.feedForwardDownWeightMaster = std::move(hostBlock.feedForward.downWeight);
+        hosts.feedForwardGateBiasMaster = std::move(hostBlock.feedForward.gateBias);
+        hosts.feedForwardUpBiasMaster = std::move(hostBlock.feedForward.upBias);
+        hosts.feedForwardDownBiasMaster = std::move(hostBlock.feedForward.downBias);
+        hostBlock.feedForward.gateWeight = Matrix();
+        hostBlock.feedForward.upWeight = Matrix();
+        hostBlock.feedForward.downWeight = Matrix();
+        hostBlock.feedForward.gateBias = Matrix();
+        hostBlock.feedForward.upBias = Matrix();
+        hostBlock.feedForward.downBias = Matrix();
+
+        hostOnlyShape(block.feedForward.gateWeight, hosts.feedForwardGateWeightMaster);
+        hostOnlyShape(block.feedForward.upWeight, hosts.feedForwardUpWeightMaster);
+        bindFp16FromHost(block.feedForward.downWeight, hosts.feedForwardDownWeightMaster);
+        block.feedForward.gateBias.upload(hosts.feedForwardGateBiasMaster);
+        block.feedForward.upBias.upload(hosts.feedForwardUpBiasMaster);
+        block.feedForward.downBias.upload(hosts.feedForwardDownBiasMaster);
+
+        Matrix gateUpHost(hosts.feedForwardGateWeightMaster.rows + hosts.feedForwardUpWeightMaster.rows, hosts.feedForwardGateWeightMaster.cols, 0.0f);
+        const size_t gateSlice = hosts.feedForwardGateWeightMaster.data.size();
+        std::memcpy(gateUpHost.data.data(), hosts.feedForwardGateWeightMaster.data.data(), gateSlice * sizeof(float));
+        std::memcpy(gateUpHost.data.data() + gateSlice, hosts.feedForwardUpWeightMaster.data.data(), hosts.feedForwardUpWeightMaster.data.size() * sizeof(float));
+        bindFp16FromHost(block.feedForward.gateUpWeight, gateUpHost);
+
+        if (!block.feedForward.gateBias.empty() && !block.feedForward.upBias.empty()) {
+            block.feedForward.gateUpBias.ensureSize(block.feedForward.gateBias.rows + block.feedForward.upBias.rows, 1);
+            CudaMatmul::memcpyDevice(block.feedForward.gateUpBias.buffer.deviceData, block.feedForward.gateBias.buffer.deviceData, block.feedForward.gateBias.byteCount());
+            CudaMatmul::memcpyDevice(
+                block.feedForward.gateUpBias.buffer.deviceData + block.feedForward.gateBias.elementCount(),
+                block.feedForward.upBias.buffer.deviceData,
+                block.feedForward.upBias.byteCount());
+        }
+
+        if ((blockIndex + 1ull) == 1ull || (blockIndex + 1ull) == host.blocks.size() || ((blockIndex + 1ull) % 8ull) == 0ull) {
+            SmokeLog::result(
+                "4B upload",
+                "block %zu/%zu  used≈%.0f MiB",
+                blockIndex + 1ull,
+                host.blocks.size(),
+                memMiB());
+        }
+    }
+
+    this->trainStateReady = false;
+}
+
 CudaLanguageModel CudaLanguageModel::createFrom(const LanguageModel& host) {
     CudaLanguageModel device;
     device.uploadFrom(host);
@@ -3544,6 +3712,159 @@ void CudaLanguageModel::runScale4BVramProbeDemo() {
     }
     freeHolds();
     SmokeLog::note("unexpected: all scenario-A pieces fit as raw cudaMalloc (fragmentation/real objects may still OOM)");
+}
+
+void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
+    if (!CudaMatmul::isAvailable()) {
+        SmokeLog::skip("scale-4B train-step probe");
+        return;
+    }
+
+    const int vocab = 32000;
+    const int embed = 3072;
+    const int blocks = 34;
+    const int heads = 48;
+    const int pos = 2048;
+    const int seq = 512;
+
+    SmokeLog::section("scale-4B train-step");
+    SmokeLog::result(
+        "shape",
+        "vocab=%d embed=%d blocks=%d heads=%d pos=%d seq=%d  mode=fp16w+cpuAdam+hostGrads+ckpt=sel flash=off",
+        vocab, embed, blocks, heads, pos, seq);
+
+    auto memSnapshot = [](const char* label) {
+        size_t freeBytes = 0;
+        size_t totalBytes = 0;
+        CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeBytes, &totalBytes), "4B train-step memGetInfo");
+        SmokeLog::result(
+            label,
+            "used=%.0f  free=%.0f  total=%.0f MiB",
+            static_cast<double>(totalBytes - freeBytes) / (1024.0 * 1024.0),
+            static_cast<double>(freeBytes) / (1024.0 * 1024.0),
+            static_cast<double>(totalBytes) / (1024.0 * 1024.0));
+        return freeBytes;
+    };
+
+    const bool previousAmp = CudaAmp::preferMixedPrecision;
+    const bool previousLoss = CudaAmp::useLossScaling;
+    const bool previousInt8 = CudaAdam::preferInt8Moments;
+    const bool previousCpu = CudaAdam::preferCpuOffload;
+    const bool previousFp16 = CudaAdam::preferFp16GpuWeights;
+    const bool previousHostGrads = CudaAdam::preferHostGradients;
+    const bool previousHostSgd = CudaAdam::preferHostSgd;
+
+    try {
+        memSnapshot("before host ctor");
+        SmokeLog::note("constructing ~4B host LanguageModel (CPU)…");
+        const auto ctorStart = std::chrono::steady_clock::now();
+        LanguageModel host(vocab, embed, pos, Adam(0.001f), blocks, heads);
+        const double ctorSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - ctorStart).count();
+        SmokeLog::result("host ctor", "sec=%.1f", ctorSec);
+        memSnapshot("after host ctor");
+
+        CudaAmp::preferMixedPrecision = true;
+        CudaAmp::useLossScaling = true;
+        CudaAmp::resetLossScaler();
+        CudaAdam::preferCpuOffload = true;
+        CudaAdam::preferFp16GpuWeights = true;
+        CudaAdam::preferHostGradients = true;
+        CudaAdam::preferInt8Moments = false;
+        // ~31GB host RAM cannot hold FP32 masters + host grads + Adam m/v (~2x params).
+        // SGD proves full fwd/bwd + weight update + FP16 H2D without moment buffers.
+        CudaAdam::preferHostSgd = true;
+        SmokeLog::note("optimizer=SGD on host masters (Adam moments need ~2x param host RAM)");
+
+        CudaLanguageModel device;
+        device.preferTrainGraph = false;
+        device.preferMuon = false;
+        device.adam = CudaAdam(0.001f);
+        device.setActivationCheckpointMode(ActivationCheckpointMode::Selective);
+        device.maxPackedColumns = seq;
+        device.maxPackedColumnsManual = true;
+        device.logitChunkRows = 2048;
+
+        SmokeLog::note("streaming FP16 upload (moves host weights → masters)…");
+        const auto uploadStart = std::chrono::steady_clock::now();
+        device.uploadFromFp16CpuOffload(host);
+        const double uploadSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - uploadStart).count();
+        SmokeLog::result("upload", "sec=%.1f", uploadSec);
+        memSnapshot("after upload");
+
+        device.ensureTrainState();
+        memSnapshot("after ensureTrainState");
+
+        LanguageModelExample example;
+        example.inputTokenIds.resize(static_cast<size_t>(seq));
+        example.targetTokenIds.resize(static_cast<size_t>(seq));
+        unsigned rng = 20260803u;
+        for (int i = 0; i < seq; ++i) {
+            rng = rng * 1664525u + 1013904223u;
+            example.inputTokenIds[static_cast<size_t>(i)] = static_cast<int>(rng % static_cast<unsigned>(vocab));
+            rng = rng * 1664525u + 1013904223u;
+            example.targetTokenIds[static_cast<size_t>(i)] = static_cast<int>(rng % static_cast<unsigned>(vocab));
+        }
+        const LanguageModelExample* packPtr = &example;
+
+        SmokeLog::note("running 1 packed train step (accumulate + applyGradients)…");
+        const size_t freeBeforeStep = memSnapshot("before step");
+        const auto stepStart = std::chrono::steady_clock::now();
+        device.zeroAccumulatedGradients();
+        device.epochLossSum.ensureSize(1, 1);
+        CudaOps::zeroInPlace(device.epochLossSum);
+        device.accumulatePackedExamples(&packPtr, 1, device.trainGradients);
+        device.applyGradients(device.trainGradients, 1.0f);
+        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "4B train-step synchronize");
+        const double stepSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - stepStart).count();
+        size_t freeAfterStep = 0;
+        size_t totalAfterStep = 0;
+        CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeAfterStep, &totalAfterStep), "4B after-step memGetInfo");
+        SmokeLog::result(
+            "after step",
+            "used=%.0f  free=%.0f  total=%.0f MiB",
+            static_cast<double>(totalAfterStep - freeAfterStep) / (1024.0 * 1024.0),
+            static_cast<double>(freeAfterStep) / (1024.0 * 1024.0),
+            static_cast<double>(totalAfterStep) / (1024.0 * 1024.0));
+
+        float loss = device.epochLossSum.download().at(0, 0);
+        const bool finiteLoss = std::isfinite(loss);
+        float masterNorm = 0.0f;
+        for (float value : device.hostTokenEmbeddingMaster.data)
+            masterNorm += value * value;
+        masterNorm = std::sqrt(masterNorm);
+
+        SmokeLog::result(
+            "4B train-step",
+            "OK  loss=%.4f finite=%s  embedMasterL2=%.2f  stepSec=%.2f  tokens/s=%.0f  usedAfter=%.0f MiB  opt=SGD(host)  stepDelta=%.0f MiB",
+            loss,
+            finiteLoss ? "yes" : "no",
+            masterNorm,
+            stepSec,
+            stepSec > 0.0 ? static_cast<double>(seq) / stepSec : 0.0,
+            static_cast<double>(totalAfterStep - freeAfterStep) / (1024.0 * 1024.0),
+            static_cast<double>(static_cast<long long>(freeBeforeStep) - static_cast<long long>(freeAfterStep)) / (1024.0 * 1024.0));
+    } catch (const std::exception& ex) {
+        SmokeLog::result("4B train-step", "FAILED: %s", ex.what());
+        size_t freeBytes = 0;
+        size_t totalBytes = 0;
+        if (cudaMemGetInfo(&freeBytes, &totalBytes) == cudaSuccess) {
+            SmokeLog::result(
+                "after fail",
+                "used=%.0f  free=%.0f MiB",
+                static_cast<double>(totalBytes - freeBytes) / (1024.0 * 1024.0),
+                static_cast<double>(freeBytes) / (1024.0 * 1024.0));
+        }
+        cudaGetLastError();
+    }
+
+    CudaAmp::clearMasterWeights();
+    CudaAmp::preferMixedPrecision = previousAmp;
+    CudaAmp::useLossScaling = previousLoss;
+    CudaAdam::preferInt8Moments = previousInt8;
+    CudaAdam::preferCpuOffload = previousCpu;
+    CudaAdam::preferFp16GpuWeights = previousFp16;
+    CudaAdam::preferHostGradients = previousHostGrads;
+    CudaAdam::preferHostSgd = previousHostSgd;
 }
 
 void CudaLanguageModel::runConsumerVramDemo(
