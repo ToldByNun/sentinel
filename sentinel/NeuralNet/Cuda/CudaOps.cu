@@ -135,6 +135,13 @@ __device__ void CudaOps::runAddInPlace(float* total, const float* delta, int ele
     total[index] += delta[index];
 }
 
+__device__ void CudaOps::runAddScaledInPlace(float* total, const float* delta, float scalar, int elementCount) {
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+
+    total[index] += scalar * delta[index];
+}
+
 __device__ void CudaOps::runSumColumnsInto(const float* gradient, float* biasGradient, int rowCount, int columnCount) {
     const int row = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
     if (row >= rowCount) return;
@@ -654,6 +661,10 @@ __global__ void CudaOpsAddInPlaceEntry(float* total, const float* delta, int ele
     CudaOps::runAddInPlace(total, delta, elementCount);
 }
 
+__global__ void CudaOpsAddScaledInPlaceEntry(float* total, const float* delta, float scalar, int elementCount) {
+    CudaOps::runAddScaledInPlace(total, delta, scalar, elementCount);
+}
+
 __global__ void CudaOpsSumColumnsEntry(const float* gradient, float* biasGradient, int rowCount, int columnCount) {
     CudaOps::runSumColumnsInto(gradient, biasGradient, rowCount, columnCount);
 }
@@ -952,6 +963,18 @@ void CudaOps::addInPlace(CudaMatrix& total, const CudaMatrix& delta) {
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
     CudaOpsAddInPlaceEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(total.buffer.deviceData, delta.buffer.deviceData, elementCount);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsAddInPlaceEntry launch");
+}
+
+void CudaOps::addScaledInPlace(CudaMatrix& total, const CudaMatrix& delta, float scalar) {
+    if (total.empty() || delta.empty()) throw std::invalid_argument("CudaOps::addScaledInPlace empty input");
+    if (total.rows != delta.rows || total.cols != delta.cols) throw std::invalid_argument("CudaOps::addScaledInPlace shape mismatch");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::addScaledInPlace no CUDA device");
+
+    const int elementCount = static_cast<int>(total.elementCount());
+    const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsAddScaledInPlaceEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(
+        total.buffer.deviceData, delta.buffer.deviceData, scalar, elementCount);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsAddScaledInPlaceEntry launch");
 }
 
 void CudaOps::sumColumnsInto(const CudaMatrix& gradient, CudaMatrix& biasGradient) {

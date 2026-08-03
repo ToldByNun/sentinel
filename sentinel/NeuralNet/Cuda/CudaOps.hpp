@@ -74,6 +74,9 @@ public:
     /// <summary>total += delta element wise in place</summary>
     static void addInPlace(CudaMatrix& total, const CudaMatrix& delta);
 
+    /// <summary>total += scalar * delta in place</summary>
+    static void addScaledInPlace(CudaMatrix& total, const CudaMatrix& delta, float scalar);
+
     /// <summary>sum gradient columns into biasGradient rows x 1</summary>
     static void sumColumnsInto(const CudaMatrix& gradient, CudaMatrix& biasGradient);
 
@@ -217,6 +220,7 @@ private:
     __device__ static void runMultiplyElementwiseInPlace(float* total, const float* other, int elementCount);
     __device__ static void runAddInto(const float* left, const float* right, float* out, int elementCount);
     __device__ static void runAddInPlace(float* total, const float* delta, int elementCount);
+    __device__ static void runAddScaledInPlace(float* total, const float* delta, float scalar, int elementCount);
     __device__ static void runSumColumnsInto(const float* gradient, float* biasGradient, int rowCount, int columnCount);
     __device__ static void runScaleInPlace(float* matrix, float scalar, int elementCount);
     __device__ static void runZeroInPlace(float* matrix, int elementCount);
@@ -248,6 +252,7 @@ private:
     friend __global__ void CudaOpsMultiplyElementwiseInPlaceEntry(float* total, const float* other, int elementCount);
     friend __global__ void CudaOpsAddEntry(const float* left, const float* right, float* out, int elementCount);
     friend __global__ void CudaOpsAddInPlaceEntry(float* total, const float* delta, int elementCount);
+    friend __global__ void CudaOpsAddScaledInPlaceEntry(float* total, const float* delta, float scalar, int elementCount);
     friend __global__ void CudaOpsSumColumnsEntry(const float* gradient, float* biasGradient, int rowCount, int columnCount);
     friend __global__ void CudaOpsScaleEntry(float* matrix, float scalar, int elementCount);
     friend __global__ void CudaOpsZeroEntry(float* matrix, int elementCount);
@@ -282,6 +287,7 @@ __global__ void CudaOpsMultiplyElementwiseEntry(const float* left, const float* 
 __global__ void CudaOpsMultiplyElementwiseInPlaceEntry(float* total, const float* other, int elementCount);
 __global__ void CudaOpsAddEntry(const float* left, const float* right, float* out, int elementCount);
 __global__ void CudaOpsAddInPlaceEntry(float* total, const float* delta, int elementCount);
+__global__ void CudaOpsAddScaledInPlaceEntry(float* total, const float* delta, float scalar, int elementCount);
 __global__ void CudaOpsSumColumnsEntry(const float* gradient, float* biasGradient, int rowCount, int columnCount);
 __global__ void CudaOpsScaleEntry(float* matrix, float scalar, int elementCount);
 __global__ void CudaOpsZeroEntry(float* matrix, int elementCount);

@@ -2079,12 +2079,19 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
                 std::memcpy(qkvPack.data() + 2ull * slice, hosts.valueWeightMaster.data.data(), slice * sizeof(float));
                 CudaAmp::uploadHostMasterToFp16Working(block.attention.qkvWeight, qkvPack.data());
 
+                CudaAmp::uploadHostMasterToFp16Working(
+                    block.attention.outputWeight,
+                    hosts.attentionOutputWeightMaster.data.data());
+
                 const size_t gateSlice = hosts.feedForwardGateWeightMaster.data.size();
                 const size_t upSlice = hosts.feedForwardUpWeightMaster.data.size();
                 gateUpPack.resize(gateSlice + upSlice);
                 std::memcpy(gateUpPack.data(), hosts.feedForwardGateWeightMaster.data.data(), gateSlice * sizeof(float));
                 std::memcpy(gateUpPack.data() + gateSlice, hosts.feedForwardUpWeightMaster.data.data(), upSlice * sizeof(float));
                 CudaAmp::uploadHostMasterToFp16Working(block.feedForward.gateUpWeight, gateUpPack.data());
+                CudaAmp::uploadHostMasterToFp16Working(
+                    block.feedForward.downWeight,
+                    hosts.feedForwardDownWeightMaster.data.data());
                 block.feedForward.syncFusedGateUpWeight(); // bias only when fp16 slot set
             }
             return;
@@ -4099,7 +4106,7 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
     const int heads = 48;
     const int pos = 2048;
     const int seq = 512;
-    // Full ckpt: act peak ~1 layer — widen pack to amortize fixed D2H/SGD/H2D over more tokens.
+    // Speed path: pack=8 amortizes fixed PCIe; pipeline D2H keeps wait ~0.5s.
     const int packExamples = 8;
     const int packCols = seq * packExamples;
     const int tokenCount = packCols;
@@ -4107,10 +4114,10 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
     SmokeLog::section("scale-4B train-step");
     SmokeLog::result(
         "shape",
-        "vocab=%d embed=%d blocks=%d heads=%d pos=%d seq=%d pack=%d cols=%d  mode=fp16w+hostGrads+ckpt=full flash=on opt=SGD",
+        "vocab=%d embed=%d blocks=%d heads=%d pos=%d seq=%d pack=%d cols=%d  mode=fp16w+hostGrads+ckpt=full flash=on opt=SGD target>=600tok/s",
         vocab, embed, blocks, heads, pos, seq, packExamples, packCols);
 
-    auto memSnapshot = [](const char* label) {
+    auto memSnapshot = [](const char* label) -> size_t {
         size_t freeBytes = 0;
         size_t totalBytes = 0;
         CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeBytes, &totalBytes), "4B train-step memGetInfo");
@@ -4133,16 +4140,15 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
 
     try {
         memSnapshot("before host ctor");
-        SmokeLog::note("constructing ~4B host LanguageModel (CPU)…");
+        SmokeLog::note("constructing ~4B host LanguageModel (CPU)�");
         const auto ctorStart = std::chrono::steady_clock::now();
 
         CudaLanguageModel device;
         device.preferTrainGraph = false;
         device.preferMuon = false;
-        device.preferTrainMemTrace = true;
+        device.preferTrainMemTrace = false;
         device.preferTrainPhaseTrace = true;
         device.adam = CudaAdam(0.001f);
-        // Full + releaseTrainActivationScratch: peak ~1 layer acts (avoids Selective FFN×L spill).
         device.setActivationCheckpointMode(ActivationCheckpointMode::Full);
         device.maxPackedColumns = packCols;
         device.maxPackedColumnsManual = true;
@@ -4161,23 +4167,16 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
             CudaAdam::preferFp16GpuWeights = true;
             CudaAdam::preferHostGradients = true;
             CudaAdam::preferInt8Moments = false;
-            // ~31GB host RAM cannot hold FP32 masters + host grads + Adam m/v (~2x params).
-            // SGD proves full fwd/bwd + weight update + FP16 H2D without moment buffers.
-            // Layer-wise host SGD frees each block's grads during bwd (masters-only steady RAM).
             CudaAdam::preferHostSgd = true;
-            SmokeLog::note("optimizer=SGD on host masters (Adam moments need ~2x param host RAM)");
+            SmokeLog::note("optimizer=SGD host large weights + GPU SGD for FP32-resident (embed/bias/gamma)");
 
-            SmokeLog::note("streaming FP16 upload (moves host weights → masters)…");
+            SmokeLog::note("streaming FP16 upload (moves host weights ? masters)�");
             const auto uploadStart = std::chrono::steady_clock::now();
             device.uploadFromFp16CpuOffload(host);
             const double uploadSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - uploadStart).count();
             SmokeLog::result("upload", "sec=%.1f  headDim=%d flashMax=%d", uploadSec, embed / heads, CudaFlashAttention::maxHeadDimension);
             memSnapshot("after upload");
-            SmokeLog::result(
-                "host offload bytes",
-                "masters+grads≈%.1f GiB (host LM dropped after this scope)",
-                static_cast<double>(device.estimateHostMasterAndGradBytes()) / (1024.0 * 1024.0 * 1024.0));
-        } // destroy emptied host LanguageModel (no Adam zombies)
+        }
 
         for (CudaTransformerBlock& block : device.blocks) {
             block.attention.preferFlashAttention = true;
@@ -4185,11 +4184,7 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
         }
 
         device.ensureTrainState();
-        memSnapshot("after ensureTrainState");
-        SmokeLog::result(
-            "host offload bytes",
-            "masters+grads≈%.1f GiB",
-            static_cast<double>(device.estimateHostMasterAndGradBytes()) / (1024.0 * 1024.0 * 1024.0));
+        const size_t freeBeforeStep = memSnapshot("after ensureTrainState");
 
         std::vector<LanguageModelExample> examples(static_cast<size_t>(packExamples));
         std::vector<const LanguageModelExample*> packPtrs(static_cast<size_t>(packExamples));
@@ -4207,8 +4202,7 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
             packPtrs[static_cast<size_t>(e)] = &example;
         }
 
-        SmokeLog::note("running 1 packed train step (accumulate + applyGradients)…");
-        const size_t freeBeforeStep = memSnapshot("before step");
+        SmokeLog::note("running 1 packed train step (accumulate + applyGradients)�");
         device.zeroAccumulatedGradients();
         device.epochLossSum.ensureSize(1, 1);
         CudaOps::zeroInPlace(device.epochLossSum);
@@ -4218,12 +4212,8 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
         CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "4B accumulate synchronize");
         const double accumSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - accumStart).count();
         memSnapshot("after accumulate");
-        SmokeLog::result(
-            "host offload bytes",
-            "masters+grads≈%.1f GiB",
-            static_cast<double>(device.estimateHostMasterAndGradBytes()) / (1024.0 * 1024.0 * 1024.0));
         if (device.blocks.empty() || !device.blocks[0].attention.usedFlashAttention)
-            throw std::runtime_error("4B train-step expected flash attention (usedFlashAttention=false)");
+            throw std::runtime_error("4B train-step expected flash attention");
         SmokeLog::result(
             "accumulate",
             "sec=%.2f  tokens/s=%.0f  flash=on ckpt=full pack=%d",
@@ -4235,42 +4225,27 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
         device.applyGradients(device.trainGradients, 1.0f);
         CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "4B applyGradients synchronize");
         const double applySec = std::chrono::duration<double>(std::chrono::steady_clock::now() - applyStart).count();
-        SmokeLog::result("applyGradients", "sec=%.2f  opt=SGD(host)", applySec);
-        SmokeLog::result(
-            "host offload bytes",
-            "masters+grads≈%.1f GiB",
-            static_cast<double>(device.estimateHostMasterAndGradBytes()) / (1024.0 * 1024.0 * 1024.0));
+        SmokeLog::result("applyGradients", "sec=%.2f  opt=SGD", applySec);
 
         const double stepSec = accumSec + applySec;
         size_t freeAfterStep = 0;
         size_t totalAfterStep = 0;
         CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeAfterStep, &totalAfterStep), "4B after-step memGetInfo");
-        SmokeLog::result(
-            "after step",
-            "used=%.0f  free=%.0f  total=%.0f MiB",
-            static_cast<double>(totalAfterStep - freeAfterStep) / (1024.0 * 1024.0),
-            static_cast<double>(freeAfterStep) / (1024.0 * 1024.0),
-            static_cast<double>(totalAfterStep) / (1024.0 * 1024.0));
-
-        float loss = device.epochLossSum.download().at(0, 0);
+        const float loss = device.epochLossSum.download().at(0, 0);
         const bool finiteLoss = std::isfinite(loss);
-        float masterNorm = 0.0f;
-        for (float value : device.hostTokenEmbeddingMaster.data)
-            masterNorm += value * value;
-        masterNorm = std::sqrt(masterNorm);
+        const double toks = stepSec > 0.0 ? static_cast<double>(tokenCount) / stepSec : 0.0;
 
         SmokeLog::result(
             "4B train-step",
-            "OK  loss=%.4f finite=%s  embedMasterL2=%.2f  stepSec=%.2f  tokens/s=%.0f  usedAfter=%.0f MiB  freeAfter=%.0f MiB  opt=SGD(host)  stepDelta=%.0f MiB  ckpt=full pack=%d",
+            "OK  loss=%.4f finite=%s  stepSec=%.2f  tokens/s=%.0f  freeAfter=%.0f MiB  stepDelta=%.0f MiB  pack=%d  vs600=%s",
             loss,
             finiteLoss ? "yes" : "no",
-            masterNorm,
             stepSec,
-            stepSec > 0.0 ? static_cast<double>(tokenCount) / stepSec : 0.0,
-            static_cast<double>(totalAfterStep - freeAfterStep) / (1024.0 * 1024.0),
+            toks,
             static_cast<double>(freeAfterStep) / (1024.0 * 1024.0),
             static_cast<double>(static_cast<long long>(freeBeforeStep) - static_cast<long long>(freeAfterStep)) / (1024.0 * 1024.0),
-            packExamples);
+            packExamples,
+            toks >= 600.0 ? "HIT" : "MISS");
     } catch (const std::exception& ex) {
         SmokeLog::result("4B train-step", "FAILED: %s", ex.what());
         size_t freeBytes = 0;
@@ -4294,6 +4269,7 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
     CudaAdam::preferHostGradients = previousHostGrads;
     CudaAdam::preferHostSgd = previousHostSgd;
 }
+
 
 void CudaLanguageModel::runConsumerVramDemo(
     int vocabularySize,
