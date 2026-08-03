@@ -240,6 +240,28 @@ public:
     /// <summary>log cudaMemGetInfo during packed train (4B probe)</summary>
     bool preferTrainMemTrace;
 
+    /// <summary>accumulate fwd/bwd/D2H/SGD/H2D wall times during packed train</summary>
+    bool preferTrainPhaseTrace;
+
+    /// <summary>last packed-train phase timers (seconds); filled when preferTrainPhaseTrace</summary>
+    struct TrainPhaseTimers {
+        double forwardSec = 0.0;
+        double headCeSec = 0.0;
+        double bwdGpuSec = 0.0;
+        double d2hSec = 0.0;
+        double sgdSec = 0.0;
+        double h2dSec = 0.0;
+
+        void reset() {
+            forwardSec = headCeSec = bwdGpuSec = d2hSec = sgdSec = h2dSec = 0.0;
+        }
+
+        double totalSec() const {
+            return forwardSec + headCeSec + bwdGpuSec + d2hSec + sgdSec + h2dSec;
+        }
+    };
+    TrainPhaseTimers trainPhaseTimers;
+
     /// <summary>true when mode is Full or Selective</summary>
     bool activationCheckpointingActive() const;
 

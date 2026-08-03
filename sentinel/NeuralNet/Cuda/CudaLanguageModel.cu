@@ -35,6 +35,7 @@ CudaLanguageModel::CudaLanguageModel()
       preferTrainGraph(true),
       preferMuon(false),
       preferTrainMemTrace(false),
+      preferTrainPhaseTrace(false),
       adam(0.001f),
       muon(0.001f),
       trainStateReady(false),
@@ -113,17 +114,36 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
             static_cast<double>(totalBytes) / (1024.0 * 1024.0));
     };
 
-    this->forwardTrunkFromDevice(tokenCount, segmentLength);
-    CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "runPackedTrainDevice after forwardTrunk");
+    const bool phaseTrace = this->preferTrainPhaseTrace;
+    if (phaseTrace) {
+        this->trainPhaseTimers.reset();
+        CudaOps::downloadAddIntoHostSecondsSink = &this->trainPhaseTimers.d2hSec;
+    }
+
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        this->forwardTrunkFromDevice(tokenCount, segmentLength);
+        if (phaseTrace || this->preferTrainMemTrace)
+            CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "runPackedTrainDevice after forwardTrunk");
+        if (phaseTrace)
+            this->trainPhaseTimers.forwardSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    }
     memTrace("after forwardTrunk");
 
-    if (this->epochLossSum.rows != 1 || this->epochLossSum.cols != 1)
-        this->epochLossSum.ensureSize(1, 1);
-    this->accumulateChunkedProjection(tokenCount, segmentLength, exampleCount, gradients);
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        if (this->epochLossSum.rows != 1 || this->epochLossSum.cols != 1)
+            this->epochLossSum.ensureSize(1, 1);
+        this->accumulateChunkedProjection(tokenCount, segmentLength, exampleCount, gradients);
 
-    this->finalNorm.backward(this->hiddenGradient, this->normInputGradientScratch, this->finalNormGammaGradient);
-    CudaOps::addInPlace(gradients.finalNormGamma, this->finalNormGammaGradient);
-    std::swap(this->hiddenGradient, this->normInputGradientScratch);
+        this->finalNorm.backward(this->hiddenGradient, this->normInputGradientScratch, this->finalNormGammaGradient);
+        CudaOps::addInPlace(gradients.finalNormGamma, this->finalNormGammaGradient);
+        std::swap(this->hiddenGradient, this->normInputGradientScratch);
+        if (phaseTrace) {
+            CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "runPackedTrainDevice after headCe");
+            this->trainPhaseTimers.headCeSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        }
+    }
 
     const bool hostLarge = CudaAdam::preferHostGradients;
     if (hostLarge && this->hostBlockAdamStates.size() != this->blocks.size())
@@ -146,6 +166,9 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
             hostGrads.feedForwardDownWeight = &hosts.feedForwardDownWeightGrad;
             hostGradsPtr = &hostGrads;
         }
+
+        const double d2hBefore = this->trainPhaseTimers.d2hSec;
+        const auto bwdStart = std::chrono::steady_clock::now();
 
         if (this->activationCheckpointMode == ActivationCheckpointMode::Selective) {
             const CudaMatrix* blockInput = nullptr;
@@ -186,18 +209,51 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
             block.backward(this->hiddenGradient, this->blockInputGradientScratch, gradients.blocks[static_cast<size_t>(blockIndex)], hostGradsPtr);
         }
 
+        if (phaseTrace) {
+            CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "runPackedTrainDevice after block bwd");
+            const double bwdWall = std::chrono::duration<double>(std::chrono::steady_clock::now() - bwdStart).count();
+            const double d2hDelta = this->trainPhaseTimers.d2hSec - d2hBefore;
+            this->trainPhaseTimers.bwdGpuSec += (std::max)(0.0, bwdWall - d2hDelta);
+        }
+
         if (hostLarge && CudaAdam::preferHostSgd)
             this->applyHostSgdForBlockAndFree(static_cast<size_t>(blockIndex), 1.0f);
 
         std::swap(this->hiddenGradient, this->blockInputGradientScratch);
 
         if (blockIndex == midBlock) {
-            CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "runPackedTrainDevice mid backward");
-            memTrace("mid backward");
+            if (this->preferTrainMemTrace) {
+                CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "runPackedTrainDevice mid backward");
+                memTrace("mid backward");
+            }
         }
     }
 
-    CudaOps::embeddingScatterAddInto(gradients.tokenEmbedding, this->tokenIdsBuffer, tokenCount, this->hiddenGradient);
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        CudaOps::embeddingScatterAddInto(gradients.tokenEmbedding, this->tokenIdsBuffer, tokenCount, this->hiddenGradient);
+        if (phaseTrace) {
+            CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "runPackedTrainDevice after embed scatter");
+            this->trainPhaseTimers.bwdGpuSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        }
+    }
+
+    if (phaseTrace) {
+        CudaOps::downloadAddIntoHostSecondsSink = nullptr;
+        const TrainPhaseTimers& t = this->trainPhaseTimers;
+        const double total = t.totalSec();
+        const double pct = total > 0.0 ? 100.0 / total : 0.0;
+        SmokeLog::result(
+            "phase accumulate",
+            "fwd=%.2fs(%.0f%%) headCe=%.2fs(%.0f%%) bwdGpu=%.2fs(%.0f%%) d2h=%.2fs(%.0f%%) sgd=%.2fs(%.0f%%) h2d=%.2fs(%.0f%%) sum=%.2fs",
+            t.forwardSec, t.forwardSec * pct,
+            t.headCeSec, t.headCeSec * pct,
+            t.bwdGpuSec, t.bwdGpuSec * pct,
+            t.d2hSec, t.d2hSec * pct,
+            t.sgdSec, t.sgdSec * pct,
+            t.h2dSec, t.h2dSec * pct,
+            total);
+    }
 }
 
 bool CudaLanguageModel::tryLaunchTrainGraph(int segmentLength, int exampleCount) {
@@ -1647,6 +1703,7 @@ void CudaLanguageModel::applyHostSgdForBlockAndFree(size_t blockIndex, float gra
         invLoss = 1.0f / scale;
     }
     const float stepScale = this->adam.learningRate * gradientScale * invLoss;
+    const bool phaseTrace = this->preferTrainPhaseTrace;
 
     auto finite = [](const Matrix& matrix) -> bool {
         for (float value : matrix.data) {
@@ -1655,6 +1712,7 @@ void CudaLanguageModel::applyHostSgdForBlockAndFree(size_t blockIndex, float gra
         return true;
     };
 
+    const auto sgdStart = std::chrono::steady_clock::now();
     CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[blockIndex];
     if (!finite(hosts.queryWeightGrad) || !finite(hosts.keyWeightGrad) || !finite(hosts.valueWeightGrad)
         || !finite(hosts.attentionOutputWeightGrad) || !finite(hosts.feedForwardGateWeightGrad)
@@ -1662,6 +1720,8 @@ void CudaLanguageModel::applyHostSgdForBlockAndFree(size_t blockIndex, float gra
         this->releaseHostWeightGradsForBlock(blockIndex);
         if (CudaAmp::lossScalingActive())
             CudaAmp::lossScaler.updateOnOverflow();
+        if (phaseTrace)
+            this->trainPhaseTimers.sgdSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - sgdStart).count();
         return;
     }
 
@@ -1672,7 +1732,10 @@ void CudaLanguageModel::applyHostSgdForBlockAndFree(size_t blockIndex, float gra
     applyHostSgdInPlace(hosts.feedForwardGateWeightMaster, hosts.feedForwardGateWeightGrad, stepScale);
     applyHostSgdInPlace(hosts.feedForwardUpWeightMaster, hosts.feedForwardUpWeightGrad, stepScale);
     applyHostSgdInPlace(hosts.feedForwardDownWeightMaster, hosts.feedForwardDownWeightGrad, stepScale);
+    if (phaseTrace)
+        this->trainPhaseTimers.sgdSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - sgdStart).count();
 
+    const auto h2dStart = std::chrono::steady_clock::now();
     CudaTransformerBlock& block = this->blocks[blockIndex];
     if (block.attention.outputWeight.ampWeightSlot >= 0)
         CudaAmp::uploadHostMasterToFp16Working(block.attention.outputWeight, hosts.attentionOutputWeightMaster.data.data());
@@ -1697,6 +1760,10 @@ void CudaLanguageModel::applyHostSgdForBlockAndFree(size_t blockIndex, float gra
         std::memcpy(gateUpPack.data() + gateSlice, hosts.feedForwardUpWeightMaster.data.data(), upSlice * sizeof(float));
         CudaAmp::uploadHostMasterToFp16Working(block.feedForward.gateUpWeight, gateUpPack.data());
         block.feedForward.syncFusedGateUpWeight();
+    }
+    if (phaseTrace) {
+        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "applyHostSgdForBlockAndFree H2D sync");
+        this->trainPhaseTimers.h2dSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - h2dStart).count();
     }
 
     this->releaseHostWeightGradsForBlock(blockIndex);
@@ -2065,8 +2132,27 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
 
         pushOffload(this->tokenEmbeddingWeight, this->hostTokenEmbeddingState, &gradients.tokenEmbedding, &this->hostTokenEmbeddingMaster, nullptr);
         applyMuonBlockWeights();
-        this->adam.updateCpuOffloadedMany(offloadItems.data(), static_cast<int>(offloadItems.size()), effectiveGradientScale);
-        syncFusedMirrors();
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            this->adam.updateCpuOffloadedMany(offloadItems.data(), static_cast<int>(offloadItems.size()), effectiveGradientScale);
+            if (this->preferTrainPhaseTrace)
+                this->trainPhaseTimers.sgdSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        }
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            syncFusedMirrors();
+            if (this->preferTrainPhaseTrace) {
+                CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "applyGradients syncFusedMirrors");
+                const double h2dApply = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+                this->trainPhaseTimers.h2dSec += h2dApply;
+                SmokeLog::result(
+                    "phase apply",
+                    "h2d(syncFused)=%.2fs  phaseH2dTotal=%.2fs phaseSgdTotal=%.2fs",
+                    h2dApply,
+                    this->trainPhaseTimers.h2dSec,
+                    this->trainPhaseTimers.sgdSec);
+            }
+        }
         this->releaseHostWeightGradients();
 
         if (CudaAmp::lossScalingActive())
@@ -3993,6 +4079,7 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
         device.preferTrainGraph = false;
         device.preferMuon = false;
         device.preferTrainMemTrace = true;
+        device.preferTrainPhaseTrace = true;
         device.adam = CudaAdam(0.001f);
         // Full + releaseTrainActivationScratch: peak ~1 layer acts (avoids Selective FFN×L spill).
         device.setActivationCheckpointMode(ActivationCheckpointMode::Full);
