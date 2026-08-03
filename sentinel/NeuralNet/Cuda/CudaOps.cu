@@ -2,10 +2,13 @@
 
 #include "CudaAmp.hpp"
 
+#include <chrono>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <limits>
 #include <stdexcept>
+
+double* CudaOps::downloadAddIntoHostSecondsSink = nullptr;
 
 __device__ void CudaOps::runBroadcastBiasAddInPlace(float* product, const float* bias, int rowCount, int columnCount) {
     const int elementCount = rowCount * columnCount;
@@ -926,8 +929,14 @@ void CudaOps::downloadAddIntoHost(Matrix& hostTotal, const CudaMatrix& deviceDel
         throw std::invalid_argument("CudaOps::downloadAddIntoHost shape mismatch");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::downloadAddIntoHost no CUDA device");
 
+    const bool timeIt = CudaOps::downloadAddIntoHostSecondsSink != nullptr;
+    const auto t0 = timeIt ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     Matrix delta = deviceDelta.download();
     Matrix::addInPlace(hostTotal, delta);
+    if (timeIt) {
+        *CudaOps::downloadAddIntoHostSecondsSink += std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - t0).count();
+    }
 }
 
 void CudaOps::extractHeadInto(const CudaMatrix& full, int headIndex, int headDimension, CudaMatrix& head) {
