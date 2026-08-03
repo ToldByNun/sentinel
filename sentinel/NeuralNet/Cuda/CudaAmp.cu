@@ -149,10 +149,18 @@ void CudaAmp::uploadHostMasterToFp16Working(CudaMatrix& matrix, const float* hos
     const size_t halfBytes = elementCount * sizeof(__half);
     entry.half.ensureCapacity(halfBytes);
 
-    // Chunked host FP32→FP16 into a small pinned staging buffer, then H2D half.
-    // Keeps pinned RAM bounded (~8 MiB) under the 4B host-master + host-grad footprint.
+    // Double-buffered pinned staging: cast chunk N+1 while H2D of chunk N runs.
     constexpr size_t kChunkElements = 16ull * 1024ull * 1024ull; // 16M halves ≈ 32 MiB
     cudaStream_t stream = CudaMatmul::activeStream();
+    if (stream == nullptr) {
+        // Prefer a non-default stream so memcpyAsync can overlap CPU cast without legacy sync.
+        static thread_local cudaStream_t uploadStream = nullptr;
+        if (uploadStream == nullptr)
+            CudaMatmul::throwIfCudaFailed(
+                cudaStreamCreateWithFlags(&uploadStream, cudaStreamNonBlocking),
+                "CudaAmp upload stream create");
+        stream = uploadStream;
+    }
     __half* deviceHalf = reinterpret_cast<__half*>(entry.half.deviceData);
 
     for (size_t offset = 0; offset < elementCount; offset += kChunkElements) {

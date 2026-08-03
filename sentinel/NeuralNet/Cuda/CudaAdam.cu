@@ -491,7 +491,9 @@ void CudaAdam::updateCpuOffloadedMany(const CudaAdamCpuOffloadItem* items, int i
 
         try {
             // Validate + optional D2H for device grads first (keeps OpenMP SGD simple).
+            // preferHostSgd applies FP32-resident params on GPU — skip their grad D2H.
             std::vector<Matrix> deviceGradHosts(static_cast<size_t>(itemCount));
+            bool anyDeviceGradD2h = false;
             for (int itemIndex = 0; itemIndex < itemCount; ++itemIndex) {
                 const CudaAdamCpuOffloadItem& item = items[itemIndex];
                 if (item.parameter == nullptr || item.hostState == nullptr)
@@ -504,7 +506,8 @@ void CudaAdam::updateCpuOffloadedMany(const CudaAdamCpuOffloadItem* items, int i
                     throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany hostMaster size mismatch");
 
                 if (item.hostGradient != nullptr) {
-                    if (item.hostGradient->empty() || item.hostGradient->data.size() != item.parameter->elementCount())
+                    if (item.hostGradient->empty()) continue;
+                    if (item.hostGradient->data.size() != item.parameter->elementCount())
                         throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany hostGradient size mismatch");
                     if (item.hostGradient->rows != item.parameter->rows || item.hostGradient->cols != item.parameter->cols)
                         throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany hostGradient shape mismatch");
@@ -513,6 +516,8 @@ void CudaAdam::updateCpuOffloadedMany(const CudaAdamCpuOffloadItem* items, int i
                         throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany empty device gradient");
                     if (item.parameter->rows != item.gradient->rows || item.parameter->cols != item.gradient->cols)
                         throw std::invalid_argument("CudaAdam::updateCpuOffloadedMany parameter/gradient shape mismatch");
+                    if (CudaAdam::preferHostSgd)
+                        continue; // GPU SGD below — no host grad staging
                     deviceGradHosts[static_cast<size_t>(itemIndex)].ensureSize(item.parameter->rows, item.parameter->cols);
                     throwIfCudaFailedPinned(
                         cudaMemcpyAsync(
@@ -522,25 +527,37 @@ void CudaAdam::updateCpuOffloadedMany(const CudaAdamCpuOffloadItem* items, int i
                             cudaMemcpyDeviceToHost,
                             stream),
                         "CudaAdam::updateCpuOffloadedMany D2H gradient (fp16)");
+                    anyDeviceGradD2h = true;
                 }
             }
-            throwIfCudaFailedPinned(cudaStreamSynchronize(stream), "CudaAdam::updateCpuOffloadedMany D2H sync");
+            if (anyDeviceGradD2h)
+                throwIfCudaFailedPinned(cudaStreamSynchronize(stream), "CudaAdam::updateCpuOffloadedMany D2H sync");
 
             const float stepScale = this->learningRate * gradientScale;
             if (CudaAdam::preferHostSgd) {
+                // Large 2D weights: already SGD'd on host during bwd (empty hostGradient → skip).
+                // FP32-resident params (embed/bias/gamma): SGD on GPU — avoid ~GB D2H/H2D roundtrip.
                 for (int itemIndex = 0; itemIndex < itemCount; ++itemIndex) {
                     const CudaAdamCpuOffloadItem& item = items[itemIndex];
-                    float* masterData = item.hostMaster->data.data();
-                    const float* gradData = item.hostGradient != nullptr
-                        ? item.hostGradient->data.data()
-                        : deviceGradHosts[static_cast<size_t>(itemIndex)].data.data();
-                    const ptrdiff_t n = static_cast<ptrdiff_t>(item.hostMaster->data.size());
+                    if (item.hostGradient != nullptr) {
+                        if (item.hostGradient->empty()) continue;
+                        float* masterData = item.hostMaster->data.data();
+                        const float* gradData = item.hostGradient->data.data();
+                        const ptrdiff_t n = static_cast<ptrdiff_t>(item.hostMaster->data.size());
 #if defined(_OPENMP)
-                    #pragma omp parallel for schedule(static)
+                        #pragma omp parallel for schedule(static)
 #endif
-                    for (ptrdiff_t index = 0; index < n; ++index)
-                        masterData[index] -= stepScale * gradData[index];
+                        for (ptrdiff_t index = 0; index < n; ++index)
+                            masterData[index] -= stepScale * gradData[index];
+                        continue;
+                    }
+                    if (item.gradient == nullptr || item.gradient->empty()) continue;
+                    if (!item.parameter->hasDeviceStorage())
+                        throw std::logic_error("CudaAdam::updateCpuOffloadedMany preferHostSgd device grad needs device param");
+                    CudaOps::addScaledInPlace(*item.parameter, *item.gradient, -stepScale);
                 }
+                // FP16 working uploads happen in syncFusedMirrors (qkv/gateUp/output/down).
+                // Host masters for FP32-resident params stay stale until an explicit download (fwd uses GPU).
             } else {
                 for (int itemIndex = 0; itemIndex < itemCount; ++itemIndex) {
                     const CudaAdamCpuOffloadItem& item = items[itemIndex];
@@ -558,24 +575,24 @@ void CudaAdam::updateCpuOffloadedMany(const CudaAdamCpuOffloadItem* items, int i
                         hostAdam.update(*item.hostMaster, *item.hostState, *gradientForUpdate);
                     }
                 }
-            }
 
-            for (int itemIndex = 0; itemIndex < itemCount; ++itemIndex) {
-                const CudaAdamCpuOffloadItem& item = items[itemIndex];
-                if (item.parameter->ampWeightSlot >= 0)
-                    CudaAmp::uploadHostMasterToFp16Working(*item.parameter, item.hostMaster->data.data());
-                else if (item.parameter->hasDeviceStorage()) {
-                    throwIfCudaFailedPinned(
-                        cudaMemcpyAsync(
-                            item.parameter->buffer.deviceData,
-                            item.hostMaster->data.data(),
-                            item.parameter->byteCount(),
-                            cudaMemcpyHostToDevice,
-                            stream),
-                        "CudaAdam::updateCpuOffloadedMany H2D fp32 parameter");
+                for (int itemIndex = 0; itemIndex < itemCount; ++itemIndex) {
+                    const CudaAdamCpuOffloadItem& item = items[itemIndex];
+                    if (item.parameter->ampWeightSlot >= 0)
+                        CudaAmp::uploadHostMasterToFp16Working(*item.parameter, item.hostMaster->data.data());
+                    else if (item.parameter->hasDeviceStorage()) {
+                        throwIfCudaFailedPinned(
+                            cudaMemcpyAsync(
+                                item.parameter->buffer.deviceData,
+                                item.hostMaster->data.data(),
+                                item.parameter->byteCount(),
+                                cudaMemcpyHostToDevice,
+                                stream),
+                            "CudaAdam::updateCpuOffloadedMany H2D fp32 parameter");
+                    }
                 }
+                throwIfCudaFailedPinned(cudaStreamSynchronize(stream), "CudaAdam::updateCpuOffloadedMany H2D sync");
             }
-            throwIfCudaFailedPinned(cudaStreamSynchronize(stream), "CudaAdam::updateCpuOffloadedMany H2D sync");
         } catch (...) {
             restoreStream();
             throw;
