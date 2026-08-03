@@ -10,6 +10,12 @@ AdamState AdamState::zerosLike(const Matrix& parameter) {
     return state;
 }
 
+MuonState MuonState::zerosLike(const Matrix& parameter) {
+    MuonState state;
+    state.momentum = Matrix::zerosLike(parameter);
+    return state;
+}
+
 Adam::Adam(float learningRate, float beta1, float beta2, float epsilon)
     : learningRate(learningRate), beta1(beta1), beta2(beta2), epsilon(epsilon), timeStep(0) {
     if (learningRate <= 0.0f) throw std::invalid_argument("Adam learningRate must be > 0");

@@ -1,6 +1,7 @@
 #ifndef CUDAMUON_HPP
 #define CUDAMUON_HPP
 
+#include "../Optimizers/Adam.hpp"
 #include "CudaMatmul.hpp"
 
 /// <summary>device SGD-momentum buffer for one Muon 2D parameter</summary>
@@ -13,6 +14,12 @@ public:
     bool empty() const;
     void ensure(const CudaMatrix& parameter);
     void free();
+
+    /// <summary>download momentum to host</summary>
+    void downloadInto(MuonState& host) const;
+
+    /// <summary>upload host momentum (allocates device buffer if needed)</summary>
+    void uploadFrom(const MuonState& host);
 };
 
 /// <summary>

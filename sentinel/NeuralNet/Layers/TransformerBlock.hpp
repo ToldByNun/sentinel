@@ -74,6 +74,14 @@ public:
     AdamState feedForwardDownWeightState;
     AdamState feedForwardDownBiasState;
 
+    MuonState queryWeightMuon;
+    MuonState keyWeightMuon;
+    MuonState valueWeightMuon;
+    MuonState attentionOutputWeightMuon;
+    MuonState feedForwardGateWeightMuon;
+    MuonState feedForwardUpWeightMuon;
+    MuonState feedForwardDownWeightMuon;
+
     TransformerBlock(int embeddingDim, int headCount, int maximumPositionCount, unsigned seed);
 
     /// <summary>forward through one block writes cache</summary>

@@ -183,6 +183,22 @@ void CudaMuonState::free() {
     this->momentum.free();
 }
 
+void CudaMuonState::downloadInto(MuonState& host) const {
+    if (this->momentum.empty()) {
+        host.momentum = Matrix();
+        return;
+    }
+    this->momentum.downloadInto(host.momentum);
+}
+
+void CudaMuonState::uploadFrom(const MuonState& host) {
+    if (host.momentum.empty()) {
+        this->free();
+        return;
+    }
+    this->momentum.upload(host.momentum);
+}
+
 CudaMuon::CudaMuon(
     float learningRate,
     float momentumBeta,

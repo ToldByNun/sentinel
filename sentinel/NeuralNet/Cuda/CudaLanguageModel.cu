@@ -680,6 +680,57 @@ void CudaLanguageModel::downloadOptimizerTo(LanguageModel& host) {
     host.optimizer.epsilon = this->adam.epsilon;
     host.optimizer.timeStep = this->adam.timeStep;
 
+    auto clearHostMuon = [](TransformerBlock& hostBlock) {
+        hostBlock.queryWeightMuon = MuonState{};
+        hostBlock.keyWeightMuon = MuonState{};
+        hostBlock.valueWeightMuon = MuonState{};
+        hostBlock.attentionOutputWeightMuon = MuonState{};
+        hostBlock.feedForwardGateWeightMuon = MuonState{};
+        hostBlock.feedForwardUpWeightMuon = MuonState{};
+        hostBlock.feedForwardDownWeightMuon = MuonState{};
+    };
+
+    auto downloadMuonOrZero = [](const CudaMuonState& state, MuonState& hostState, size_t rows, size_t cols) {
+        if (state.empty()) {
+            hostState = MuonState::zerosLike(Matrix(rows, cols, 0.0f));
+            return;
+        }
+        state.downloadInto(hostState);
+    };
+
+    auto downloadOrZero = [](const CudaAdamState& state, AdamState& hostState, size_t rows, size_t cols) {
+        if (state.empty()) {
+            hostState = AdamState::zerosLike(Matrix(rows, cols, 0.0f));
+            return;
+        }
+        state.downloadInto(hostState, rows, cols);
+    };
+
+    auto downloadBlockAuxAdam = [&](TransformerBlock& hostBlock, const CudaTransformerBlock& block, const CudaTransformerBlockAdamStates& states) {
+        downloadOrZero(states.attentionNormGamma, hostBlock.attentionNormGammaState, block.attentionNorm.gamma.rows, block.attentionNorm.gamma.cols);
+        downloadOrZero(states.feedForwardNormGamma, hostBlock.feedForwardNormGammaState, block.feedForwardNorm.gamma.rows, block.feedForwardNorm.gamma.cols);
+        downloadOrZero(states.feedForwardGateBias, hostBlock.feedForwardGateBiasState, block.feedForward.gateBias.rows, block.feedForward.gateBias.cols);
+        downloadOrZero(states.feedForwardUpBias, hostBlock.feedForwardUpBiasState, block.feedForward.upBias.rows, block.feedForward.upBias.cols);
+        downloadOrZero(states.feedForwardDownBias, hostBlock.feedForwardDownBiasState, block.feedForward.downBias.rows, block.feedForward.downBias.cols);
+    };
+
+    auto downloadBlockMuon = [&](TransformerBlock& hostBlock, const CudaTransformerBlock& block, const CudaTransformerBlockMuonStates& muonStates) {
+        downloadMuonOrZero(muonStates.queryWeight, hostBlock.queryWeightMuon, block.attention.queryWeight.rows, block.attention.queryWeight.cols);
+        downloadMuonOrZero(muonStates.keyWeight, hostBlock.keyWeightMuon, block.attention.keyWeight.rows, block.attention.keyWeight.cols);
+        downloadMuonOrZero(muonStates.valueWeight, hostBlock.valueWeightMuon, block.attention.valueWeight.rows, block.attention.valueWeight.cols);
+        downloadMuonOrZero(muonStates.attentionOutputWeight, hostBlock.attentionOutputWeightMuon, block.attention.outputWeight.rows, block.attention.outputWeight.cols);
+        downloadMuonOrZero(muonStates.feedForwardGateWeight, hostBlock.feedForwardGateWeightMuon, block.feedForward.gateWeight.rows, block.feedForward.gateWeight.cols);
+        downloadMuonOrZero(muonStates.feedForwardUpWeight, hostBlock.feedForwardUpWeightMuon, block.feedForward.upWeight.rows, block.feedForward.upWeight.cols);
+        downloadMuonOrZero(muonStates.feedForwardDownWeight, hostBlock.feedForwardDownWeightMuon, block.feedForward.downWeight.rows, block.feedForward.downWeight.cols);
+        hostBlock.queryWeightState = AdamState{};
+        hostBlock.keyWeightState = AdamState{};
+        hostBlock.valueWeightState = AdamState{};
+        hostBlock.attentionOutputWeightState = AdamState{};
+        hostBlock.feedForwardGateWeightState = AdamState{};
+        hostBlock.feedForwardUpWeightState = AdamState{};
+        hostBlock.feedForwardDownWeightState = AdamState{};
+    };
+
     if (CudaAdam::preferCpuOffload) {
         host.tokenEmbeddingState = this->hostTokenEmbeddingState;
         host.finalNormGammaState = this->hostFinalNormGammaState;
@@ -695,29 +746,30 @@ void CudaLanguageModel::downloadOptimizerTo(LanguageModel& host) {
         for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
             TransformerBlock& hostBlock = host.blocks[blockIndex];
             const CudaTransformerBlockHostAdamStates& states = this->hostBlockAdamStates[blockIndex];
-            hostBlock.queryWeightState = states.queryWeight;
-            hostBlock.keyWeightState = states.keyWeight;
-            hostBlock.valueWeightState = states.valueWeight;
-            hostBlock.attentionOutputWeightState = states.attentionOutputWeight;
+            const CudaTransformerBlock& block = this->blocks[blockIndex];
+
+            if (this->preferMuon) {
+                if (this->blockMuonStates.size() != this->blocks.size())
+                    throw std::logic_error("CudaLanguageModel::downloadOptimizerTo Muon states not ready");
+                downloadBlockMuon(hostBlock, block, this->blockMuonStates[blockIndex]);
+            } else {
+                clearHostMuon(hostBlock);
+                hostBlock.queryWeightState = states.queryWeight;
+                hostBlock.keyWeightState = states.keyWeight;
+                hostBlock.valueWeightState = states.valueWeight;
+                hostBlock.attentionOutputWeightState = states.attentionOutputWeight;
+                hostBlock.feedForwardGateWeightState = states.feedForwardGateWeight;
+                hostBlock.feedForwardUpWeightState = states.feedForwardUpWeight;
+                hostBlock.feedForwardDownWeightState = states.feedForwardDownWeight;
+            }
             hostBlock.attentionNormGammaState = states.attentionNormGamma;
             hostBlock.feedForwardNormGammaState = states.feedForwardNormGamma;
-            hostBlock.feedForwardGateWeightState = states.feedForwardGateWeight;
             hostBlock.feedForwardGateBiasState = states.feedForwardGateBias;
-            hostBlock.feedForwardUpWeightState = states.feedForwardUpWeight;
             hostBlock.feedForwardUpBiasState = states.feedForwardUpBias;
-            hostBlock.feedForwardDownWeightState = states.feedForwardDownWeight;
             hostBlock.feedForwardDownBiasState = states.feedForwardDownBias;
         }
         return;
     }
-
-    auto downloadOrZero = [](const CudaAdamState& state, AdamState& hostState, size_t rows, size_t cols) {
-        if (state.empty()) {
-            hostState = AdamState::zerosLike(Matrix(rows, cols, 0.0f));
-            return;
-        }
-        state.downloadInto(hostState, rows, cols);
-    };
 
     downloadOrZero(this->tokenEmbeddingState, host.tokenEmbeddingState, this->tokenEmbeddingWeight.rows, this->tokenEmbeddingWeight.cols);
     downloadOrZero(this->finalNormGammaState, host.finalNormGammaState, this->finalNorm.gamma.rows, this->finalNorm.gamma.cols);
@@ -735,18 +787,21 @@ void CudaLanguageModel::downloadOptimizerTo(LanguageModel& host) {
         TransformerBlock& hostBlock = host.blocks[blockIndex];
         const CudaTransformerBlockAdamStates& states = this->blockAdamStates[blockIndex];
 
-        downloadOrZero(states.queryWeight, hostBlock.queryWeightState, block.attention.queryWeight.rows, block.attention.queryWeight.cols);
-        downloadOrZero(states.keyWeight, hostBlock.keyWeightState, block.attention.keyWeight.rows, block.attention.keyWeight.cols);
-        downloadOrZero(states.valueWeight, hostBlock.valueWeightState, block.attention.valueWeight.rows, block.attention.valueWeight.cols);
-        downloadOrZero(states.attentionOutputWeight, hostBlock.attentionOutputWeightState, block.attention.outputWeight.rows, block.attention.outputWeight.cols);
-        downloadOrZero(states.attentionNormGamma, hostBlock.attentionNormGammaState, block.attentionNorm.gamma.rows, block.attentionNorm.gamma.cols);
-        downloadOrZero(states.feedForwardNormGamma, hostBlock.feedForwardNormGammaState, block.feedForwardNorm.gamma.rows, block.feedForwardNorm.gamma.cols);
-        downloadOrZero(states.feedForwardGateWeight, hostBlock.feedForwardGateWeightState, block.feedForward.gateWeight.rows, block.feedForward.gateWeight.cols);
-        downloadOrZero(states.feedForwardGateBias, hostBlock.feedForwardGateBiasState, block.feedForward.gateBias.rows, block.feedForward.gateBias.cols);
-        downloadOrZero(states.feedForwardUpWeight, hostBlock.feedForwardUpWeightState, block.feedForward.upWeight.rows, block.feedForward.upWeight.cols);
-        downloadOrZero(states.feedForwardUpBias, hostBlock.feedForwardUpBiasState, block.feedForward.upBias.rows, block.feedForward.upBias.cols);
-        downloadOrZero(states.feedForwardDownWeight, hostBlock.feedForwardDownWeightState, block.feedForward.downWeight.rows, block.feedForward.downWeight.cols);
-        downloadOrZero(states.feedForwardDownBias, hostBlock.feedForwardDownBiasState, block.feedForward.downBias.rows, block.feedForward.downBias.cols);
+        if (this->preferMuon) {
+            if (this->blockMuonStates.size() != this->blocks.size())
+                throw std::logic_error("CudaLanguageModel::downloadOptimizerTo Muon states not ready");
+            downloadBlockMuon(hostBlock, block, this->blockMuonStates[blockIndex]);
+        } else {
+            clearHostMuon(hostBlock);
+            downloadOrZero(states.queryWeight, hostBlock.queryWeightState, block.attention.queryWeight.rows, block.attention.queryWeight.cols);
+            downloadOrZero(states.keyWeight, hostBlock.keyWeightState, block.attention.keyWeight.rows, block.attention.keyWeight.cols);
+            downloadOrZero(states.valueWeight, hostBlock.valueWeightState, block.attention.valueWeight.rows, block.attention.valueWeight.cols);
+            downloadOrZero(states.attentionOutputWeight, hostBlock.attentionOutputWeightState, block.attention.outputWeight.rows, block.attention.outputWeight.cols);
+            downloadOrZero(states.feedForwardGateWeight, hostBlock.feedForwardGateWeightState, block.feedForward.gateWeight.rows, block.feedForward.gateWeight.cols);
+            downloadOrZero(states.feedForwardUpWeight, hostBlock.feedForwardUpWeightState, block.feedForward.upWeight.rows, block.feedForward.upWeight.cols);
+            downloadOrZero(states.feedForwardDownWeight, hostBlock.feedForwardDownWeightState, block.feedForward.downWeight.rows, block.feedForward.downWeight.cols);
+        }
+        downloadBlockAuxAdam(hostBlock, block, states);
     }
 }
 
@@ -761,6 +816,7 @@ void CudaLanguageModel::uploadOptimizerFrom(const LanguageModel& host) {
     this->adam.beta2 = host.optimizer.beta2;
     this->adam.epsilon = host.optimizer.epsilon;
     this->adam.timeStep = host.optimizer.timeStep;
+    this->muon.learningRate = this->adam.learningRate;
 
     if (CudaAdam::preferCpuOffload) {
         this->hostTokenEmbeddingState = host.tokenEmbeddingState;
@@ -777,17 +833,37 @@ void CudaLanguageModel::uploadOptimizerFrom(const LanguageModel& host) {
         for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
             const TransformerBlock& hostBlock = host.blocks[blockIndex];
             CudaTransformerBlockHostAdamStates& states = this->hostBlockAdamStates[blockIndex];
-            states.queryWeight = hostBlock.queryWeightState;
-            states.keyWeight = hostBlock.keyWeightState;
-            states.valueWeight = hostBlock.valueWeightState;
-            states.attentionOutputWeight = hostBlock.attentionOutputWeightState;
+            if (this->preferMuon) {
+                if (this->blockMuonStates.size() != this->blocks.size())
+                    throw std::logic_error("CudaLanguageModel::uploadOptimizerFrom Muon states not ready");
+                CudaTransformerBlockMuonStates& muonStates = this->blockMuonStates[blockIndex];
+                muonStates.queryWeight.uploadFrom(hostBlock.queryWeightMuon);
+                muonStates.keyWeight.uploadFrom(hostBlock.keyWeightMuon);
+                muonStates.valueWeight.uploadFrom(hostBlock.valueWeightMuon);
+                muonStates.attentionOutputWeight.uploadFrom(hostBlock.attentionOutputWeightMuon);
+                muonStates.feedForwardGateWeight.uploadFrom(hostBlock.feedForwardGateWeightMuon);
+                muonStates.feedForwardUpWeight.uploadFrom(hostBlock.feedForwardUpWeightMuon);
+                muonStates.feedForwardDownWeight.uploadFrom(hostBlock.feedForwardDownWeightMuon);
+                states.queryWeight = AdamState{};
+                states.keyWeight = AdamState{};
+                states.valueWeight = AdamState{};
+                states.attentionOutputWeight = AdamState{};
+                states.feedForwardGateWeight = AdamState{};
+                states.feedForwardUpWeight = AdamState{};
+                states.feedForwardDownWeight = AdamState{};
+            } else {
+                states.queryWeight = hostBlock.queryWeightState;
+                states.keyWeight = hostBlock.keyWeightState;
+                states.valueWeight = hostBlock.valueWeightState;
+                states.attentionOutputWeight = hostBlock.attentionOutputWeightState;
+                states.feedForwardGateWeight = hostBlock.feedForwardGateWeightState;
+                states.feedForwardUpWeight = hostBlock.feedForwardUpWeightState;
+                states.feedForwardDownWeight = hostBlock.feedForwardDownWeightState;
+            }
             states.attentionNormGamma = hostBlock.attentionNormGammaState;
             states.feedForwardNormGamma = hostBlock.feedForwardNormGammaState;
-            states.feedForwardGateWeight = hostBlock.feedForwardGateWeightState;
             states.feedForwardGateBias = hostBlock.feedForwardGateBiasState;
-            states.feedForwardUpWeight = hostBlock.feedForwardUpWeightState;
             states.feedForwardUpBias = hostBlock.feedForwardUpBiasState;
-            states.feedForwardDownWeight = hostBlock.feedForwardDownWeightState;
             states.feedForwardDownBias = hostBlock.feedForwardDownBiasState;
         }
         return;
@@ -805,17 +881,31 @@ void CudaLanguageModel::uploadOptimizerFrom(const LanguageModel& host) {
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
         const TransformerBlock& hostBlock = host.blocks[blockIndex];
         CudaTransformerBlockAdamStates& states = this->blockAdamStates[blockIndex];
-        states.queryWeight.uploadFrom(hostBlock.queryWeightState);
-        states.keyWeight.uploadFrom(hostBlock.keyWeightState);
-        states.valueWeight.uploadFrom(hostBlock.valueWeightState);
-        states.attentionOutputWeight.uploadFrom(hostBlock.attentionOutputWeightState);
+        if (this->preferMuon) {
+            if (this->blockMuonStates.size() != this->blocks.size())
+                throw std::logic_error("CudaLanguageModel::uploadOptimizerFrom Muon states not ready");
+            CudaTransformerBlockMuonStates& muonStates = this->blockMuonStates[blockIndex];
+            muonStates.queryWeight.uploadFrom(hostBlock.queryWeightMuon);
+            muonStates.keyWeight.uploadFrom(hostBlock.keyWeightMuon);
+            muonStates.valueWeight.uploadFrom(hostBlock.valueWeightMuon);
+            muonStates.attentionOutputWeight.uploadFrom(hostBlock.attentionOutputWeightMuon);
+            muonStates.feedForwardGateWeight.uploadFrom(hostBlock.feedForwardGateWeightMuon);
+            muonStates.feedForwardUpWeight.uploadFrom(hostBlock.feedForwardUpWeightMuon);
+            muonStates.feedForwardDownWeight.uploadFrom(hostBlock.feedForwardDownWeightMuon);
+            states.freeMuonManagedWeights();
+        } else {
+            states.queryWeight.uploadFrom(hostBlock.queryWeightState);
+            states.keyWeight.uploadFrom(hostBlock.keyWeightState);
+            states.valueWeight.uploadFrom(hostBlock.valueWeightState);
+            states.attentionOutputWeight.uploadFrom(hostBlock.attentionOutputWeightState);
+            states.feedForwardGateWeight.uploadFrom(hostBlock.feedForwardGateWeightState);
+            states.feedForwardUpWeight.uploadFrom(hostBlock.feedForwardUpWeightState);
+            states.feedForwardDownWeight.uploadFrom(hostBlock.feedForwardDownWeightState);
+        }
         states.attentionNormGamma.uploadFrom(hostBlock.attentionNormGammaState);
         states.feedForwardNormGamma.uploadFrom(hostBlock.feedForwardNormGammaState);
-        states.feedForwardGateWeight.uploadFrom(hostBlock.feedForwardGateWeightState);
         states.feedForwardGateBias.uploadFrom(hostBlock.feedForwardGateBiasState);
-        states.feedForwardUpWeight.uploadFrom(hostBlock.feedForwardUpWeightState);
         states.feedForwardUpBias.uploadFrom(hostBlock.feedForwardUpBiasState);
-        states.feedForwardDownWeight.uploadFrom(hostBlock.feedForwardDownWeightState);
         states.feedForwardDownBias.uploadFrom(hostBlock.feedForwardDownBiasState);
     }
 }

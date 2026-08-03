@@ -15,6 +15,15 @@ public:
     static AdamState zerosLike(const Matrix& parameter);
 };
 
+/// <summary>SGD-momentum buffer for one Muon parameter matrix</summary>
+class MuonState {
+public:
+    Matrix momentum;
+
+    /// <summary>allocate zero momentum matching parameter shape</summary>
+    static MuonState zerosLike(const Matrix& parameter);
+};
+
 /// <summary>
 /// Adam optimizer with bias corrected moments
 /// call step once per batch then update each parameter

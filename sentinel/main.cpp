@@ -41,7 +41,7 @@ int main() {
     const bool runSmokes = false;
     const bool runSpeedBench = false;
     const bool runGate40k = false;
-    const bool runFlashParity256 = false;
+    const bool runFlashParity256 = true;
     const bool runScale100M = false;
     const bool runGraphCheck = false;
     const bool runEpilogueCheck = false;
