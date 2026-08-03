@@ -65,6 +65,8 @@ public:
     AdamState* hostState = nullptr;
     /// <summary>persistent FP32 master on host when preferFp16GpuWeights; else nullptr (D2H from parameter)</summary>
     Matrix* hostMaster = nullptr;
+    /// <summary>when set, Adam uses this host gradient (skip D2H); gradient may be null</summary>
+    Matrix* hostGradient = nullptr;
 };
 
 /// <summary>device resident Adam optimizer with bias corrected moments</summary>
@@ -89,6 +91,11 @@ public:
     /// with preferCpuOffload: FP32 Adam masters on host, FP16 working weights on GPU (requires AMP)
     /// </summary>
     static bool preferFp16GpuWeights;
+
+    /// <summary>
+    /// with preferFp16GpuWeights: accumulate large 2D weight grads on host (VRAM offload); embed/bias/gamma stay on GPU
+    /// </summary>
+    static bool preferHostGradients;
 
     /// <summary>absmax quantization block size for int8 moments</summary>
     static int int8BlockSize;

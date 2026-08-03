@@ -48,9 +48,9 @@ public:
 
 
 
-    /// <summary>ensure gradient tensor shapes match block parameters</summary>
+    /// <summary>ensure gradient tensor shapes match block parameters; largeWeightsOnHost skips 2D weight GPU grads</summary>
 
-    void ensureFrom(const CudaTransformerBlock& block);
+    void ensureFrom(const CudaTransformerBlock& block, bool largeWeightsOnHost = false);
 
 
 
@@ -70,6 +70,17 @@ public:
 
     void scaleInPlace(float scalar);
 
+};
+
+/// <summary>non-owning host accumulators for large 2D weight grads (preferHostGradients)</summary>
+struct CudaTransformerBlockHostWeightGrads {
+    Matrix* queryWeight = nullptr;
+    Matrix* keyWeight = nullptr;
+    Matrix* valueWeight = nullptr;
+    Matrix* attentionOutputWeight = nullptr;
+    Matrix* feedForwardGateWeight = nullptr;
+    Matrix* feedForwardUpWeight = nullptr;
+    Matrix* feedForwardDownWeight = nullptr;
 };
 
 
@@ -172,7 +183,7 @@ public:
     void decode(const CudaMatrix& input, CudaKvCache& cache, CudaMatrix& out);
 
     /// <summary>backprop through one block accumulates into gradients returns input gradient</summary>
-    void backward(const CudaMatrix& outputGradient, CudaMatrix& inputGradient, CudaTransformerBlockGradients& gradients);
+    void backward(const CudaMatrix& outputGradient, CudaMatrix& inputGradient, CudaTransformerBlockGradients& gradients, CudaTransformerBlockHostWeightGrads* hostWeightGrads = nullptr);
 
     /// <summary>
     /// Selective bwd: FFN from kept acts, then recompute Attn from blockInput, then Attn bwd
@@ -182,7 +193,8 @@ public:
         CudaMatrix& inputGradient,
         CudaTransformerBlockGradients& gradients,
         const CudaMatrix& blockInput,
-        int segmentLength = 0);
+        int segmentLength = 0,
+        CudaTransformerBlockHostWeightGrads* hostWeightGrads = nullptr);
 
 
 

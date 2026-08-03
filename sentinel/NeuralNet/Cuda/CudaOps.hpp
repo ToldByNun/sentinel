@@ -86,6 +86,9 @@ public:
     /// <summary>set every element to zero</summary>
     static void zeroInPlace(CudaMatrix& matrix);
 
+    /// <summary>D2H device delta and add into host accumulator (synchronizes)</summary>
+    static void downloadAddIntoHost(Matrix& hostTotal, const CudaMatrix& deviceDelta);
+
     /// <summary>copy one head block of rows from full into tightly packed head</summary>
     static void extractHeadInto(const CudaMatrix& full, int headIndex, int headDimension, CudaMatrix& head);
 
