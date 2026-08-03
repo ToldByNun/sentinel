@@ -151,7 +151,7 @@ void CudaAmp::uploadHostMasterToFp16Working(CudaMatrix& matrix, const float* hos
 
     // Chunked host FP32→FP16 into a small pinned staging buffer, then H2D half.
     // Keeps pinned RAM bounded (~8 MiB) under the 4B host-master + host-grad footprint.
-    constexpr size_t kChunkElements = 4ull * 1024ull * 1024ull; // 4M halves ≈ 8 MiB
+    constexpr size_t kChunkElements = 16ull * 1024ull * 1024ull; // 16M halves ≈ 32 MiB
     cudaStream_t stream = CudaMatmul::activeStream();
     __half* deviceHalf = reinterpret_cast<__half*>(entry.half.deviceData);
 

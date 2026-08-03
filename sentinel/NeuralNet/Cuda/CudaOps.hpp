@@ -89,7 +89,10 @@ public:
     /// <summary>D2H device delta and add into host accumulator (synchronizes)</summary>
     static void downloadAddIntoHost(Matrix& hostTotal, const CudaMatrix& deviceDelta);
 
-    /// <summary>if non-null, downloadAddIntoHost adds wall seconds into *sink</summary>
+    /// <summary>D2H overwrite into host (no temporary Matrix; synchronizes)</summary>
+    static void downloadIntoHost(Matrix& hostOut, const CudaMatrix& deviceSource);
+
+    /// <summary>if non-null, downloadAddIntoHost/downloadIntoHost add wall seconds into *sink</summary>
     static double* downloadAddIntoHostSecondsSink;
 
     /// <summary>copy one head block of rows from full into tightly packed head</summary>

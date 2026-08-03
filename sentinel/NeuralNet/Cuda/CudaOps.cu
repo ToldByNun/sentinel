@@ -1,14 +1,84 @@
 #include "CudaOps.hpp"
 
 #include "CudaAmp.hpp"
+#include "CudaAdam.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <limits>
 #include <stdexcept>
 
 double* CudaOps::downloadAddIntoHostSecondsSink = nullptr;
+
+namespace {
+/// <summary>double-buffered pinned staging for pageable host D2H (full PCIe rate + CPU memcpy overlap)</summary>
+struct PinnedFloatDownloadStaging {
+    void* buffers[2] = { nullptr, nullptr };
+    size_t capacityBytes[2] = { 0, 0 };
+    cudaEvent_t readyEvents[2] = { nullptr, nullptr };
+    int turn = 0;
+
+    ~PinnedFloatDownloadStaging() {
+        for (int slot = 0; slot < 2; ++slot) {
+            if (this->readyEvents[slot] != nullptr) {
+                cudaEventDestroy(this->readyEvents[slot]);
+                this->readyEvents[slot] = nullptr;
+            }
+            if (this->buffers[slot] != nullptr) {
+                cudaFreeHost(this->buffers[slot]);
+                this->buffers[slot] = nullptr;
+            }
+            this->capacityBytes[slot] = 0;
+        }
+    }
+
+    void ensureEvents() {
+        for (int slot = 0; slot < 2; ++slot) {
+            if (this->readyEvents[slot] != nullptr) continue;
+            if (cudaEventCreateWithFlags(&this->readyEvents[slot], cudaEventDisableTiming) != cudaSuccess)
+                throw std::runtime_error("PinnedFloatDownloadStaging event create failed");
+        }
+    }
+
+    void* acquire(size_t bytes, int* outSlot) {
+        this->ensureEvents();
+        const int slot = this->turn;
+        this->turn = 1 - this->turn;
+        if (this->readyEvents[slot] != nullptr)
+            cudaEventSynchronize(this->readyEvents[slot]);
+        if (bytes > this->capacityBytes[slot]) {
+            if (this->buffers[slot] != nullptr) {
+                cudaFreeHost(this->buffers[slot]);
+                this->buffers[slot] = nullptr;
+            }
+            this->capacityBytes[slot] = 0;
+            if (cudaMallocHost(&this->buffers[slot], bytes) != cudaSuccess)
+                throw std::runtime_error("PinnedFloatDownloadStaging cudaMallocHost failed");
+            this->capacityBytes[slot] = bytes;
+        }
+        if (outSlot != nullptr)
+            *outSlot = slot;
+        return this->buffers[slot];
+    }
+
+    void record(cudaStream_t stream, int slot) {
+        this->ensureEvents();
+        if (cudaEventRecord(this->readyEvents[slot], stream) != cudaSuccess)
+            throw std::runtime_error("PinnedFloatDownloadStaging event record failed");
+    }
+
+    void syncSlot(int slot) {
+        if (slot < 0 || slot > 1) return;
+        if (this->readyEvents[slot] != nullptr)
+            cudaEventSynchronize(this->readyEvents[slot]);
+    }
+};
+
+thread_local PinnedFloatDownloadStaging gPinnedFloatDownloadStaging;
+} // namespace
 
 __device__ void CudaOps::runBroadcastBiasAddInPlace(float* product, const float* bias, int rowCount, int columnCount) {
     const int elementCount = rowCount * columnCount;
@@ -931,12 +1001,66 @@ void CudaOps::downloadAddIntoHost(Matrix& hostTotal, const CudaMatrix& deviceDel
 
     const bool timeIt = CudaOps::downloadAddIntoHostSecondsSink != nullptr;
     const auto t0 = timeIt ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-    Matrix delta = deviceDelta.download();
-    Matrix::addInPlace(hostTotal, delta);
+    // PreferHostSgd microbatches overwrite fresh host grads — avoid alloc+add temp Matrix.
+    if (CudaAdam::preferHostSgd) {
+        CudaOps::downloadIntoHost(hostTotal, deviceDelta);
+    } else {
+        Matrix delta = deviceDelta.download();
+        Matrix::addInPlace(hostTotal, delta);
+    }
     if (timeIt) {
         *CudaOps::downloadAddIntoHostSecondsSink += std::chrono::duration<double>(
             std::chrono::steady_clock::now() - t0).count();
     }
+}
+
+void CudaOps::downloadIntoHost(Matrix& hostOut, const CudaMatrix& deviceSource) {
+    if (deviceSource.empty()) throw std::invalid_argument("CudaOps::downloadIntoHost empty deviceSource");
+    if (!deviceSource.hasDeviceStorage()) throw std::invalid_argument("CudaOps::downloadIntoHost missing device storage");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::downloadIntoHost no CUDA device");
+
+    hostOut.ensureSize(deviceSource.rows, deviceSource.cols);
+    const size_t elementCount = deviceSource.elementCount();
+    float* hostData = hostOut.data.data();
+    const float* deviceData = deviceSource.buffer.deviceData;
+    constexpr size_t kDirectThreshold = 1ull << 20; // 1M floats ≈ 4 MiB
+    if (elementCount <= kDirectThreshold) {
+        CudaMatmul::throwIfCudaFailed(
+            cudaMemcpy(hostData, deviceData, elementCount * sizeof(float), cudaMemcpyDeviceToHost),
+            "CudaOps::downloadIntoHost D2H");
+        return;
+    }
+
+    constexpr size_t kChunkElements = 16ull * 1024ull * 1024ull; // 16M floats ≈ 64 MiB
+    cudaStream_t stream = CudaMatmul::activeStream();
+    float* pendingPinned = nullptr;
+    size_t pendingOffset = 0;
+    size_t pendingChunk = 0;
+    int pendingSlot = -1;
+
+    auto flushPending = [&]() {
+        if (pendingPinned == nullptr || pendingSlot < 0) return;
+        gPinnedFloatDownloadStaging.syncSlot(pendingSlot);
+        std::memcpy(hostData + pendingOffset, pendingPinned, pendingChunk * sizeof(float));
+        pendingPinned = nullptr;
+        pendingSlot = -1;
+    };
+
+    for (size_t offset = 0; offset < elementCount; offset += kChunkElements) {
+        const size_t chunk = (std::min)(kChunkElements, elementCount - offset);
+        int slot = 0;
+        float* pinned = static_cast<float*>(gPinnedFloatDownloadStaging.acquire(chunk * sizeof(float), &slot));
+        CudaMatmul::throwIfCudaFailed(
+            cudaMemcpyAsync(pinned, deviceData + offset, chunk * sizeof(float), cudaMemcpyDeviceToHost, stream),
+            "CudaOps::downloadIntoHost D2H pinned");
+        gPinnedFloatDownloadStaging.record(stream, slot);
+        flushPending(); // overlap: CPU memcpy of previous chunk while this D2H runs
+        pendingPinned = pinned;
+        pendingOffset = offset;
+        pendingChunk = chunk;
+        pendingSlot = slot;
+    }
+    flushPending();
 }
 
 void CudaOps::extractHeadInto(const CudaMatrix& full, int headIndex, int headDimension, CudaMatrix& head) {
