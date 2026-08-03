@@ -158,6 +158,7 @@ C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaFeedForward.hpp
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaKvCache.hpp
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaLanguageModel.hpp
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaMatmul.hpp
+C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaMuon.hpp
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaOps.hpp
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaRMSNorm.hpp
 C:\Users\mikaj\source\repos\sentinel\sentinel\NeuralNet\Cuda\CudaTransformerBlock.hpp
