@@ -51,12 +51,14 @@ int main() {
     const bool runPackBudgetBench = false;
     const bool runScaleProfile = false;
     const bool runScale4BVramProbe = false;
-    const bool runScale4BTrainStep = true;
+    const bool runScale4BTrainStep = false;
     const bool runArrowCorpusSmoke = false;
     const bool runBpeBench = false;
     const bool runCkptParity = false;
     const bool runMuonSmoke = false;
     const bool runCpuAdamOffloadSmoke = false;
+    // One-shot: smokes + parities + small speed + cpuAdam (no 4B / no full SERA train).
+    const bool runSmallSuite = true;
 
     // Arrow HF disk layout (sera_best_subset) via from-scratch ArrowChunkReader; JSONL still works
     const bool useArrowCorpus = true;
@@ -79,6 +81,208 @@ int main() {
     const int testReservoirCap = 512;
     const bool preferCpuAdamOffload = true;
     const bool useCheckpointing = false;
+
+    if (runSmallSuite) {
+        SmokeLog::section("small suite");
+        if (!CudaMatmul::isAvailable()) {
+            SmokeLog::skip("small suite (no CUDA)");
+            return 1;
+        }
+
+        int failures = 0;
+        auto run = [&](const char* name, auto&& fn) {
+            try {
+                SmokeLog::section(name);
+                // Isolate demos: previous LanguageModel wiring can leave global CUDA Adam/Amp flags set.
+                CudaAmp::clearMasterWeights();
+                CudaAmp::preferMixedPrecision = false;
+                CudaAmp::useLossScaling = false;
+                CudaAmp::resetLossScaler();
+                CudaAdam::preferCpuOffload = false;
+                CudaAdam::preferFp16GpuWeights = false;
+                CudaAdam::preferHostGradients = false;
+                CudaAdam::preferHostSgd = false;
+                CudaAdam::preferInt8Moments = true;
+                fn();
+                SmokeLog::result(name, "OK");
+            } catch (const std::exception& ex) {
+                SmokeLog::result(name, "FAILED: %s", ex.what());
+                ++failures;
+                cudaGetLastError();
+                CudaAmp::clearMasterWeights();
+            }
+        };
+
+        run("runtime/OpenMP", []() {
+#if defined(_OPENMP)
+            SmokeLog::result("OpenMP", "threads=%d", omp_get_max_threads());
+#else
+            SmokeLog::note("OpenMP disabled");
+#endif
+        });
+        run("gemm", []() { CudaMatmul::runSmokeDemo(512); });
+        run("layers", []() {
+            CudaFeedForward::runSmokeDemo(128, 64);
+            CudaFeedForward::runBackwardSmokeDemo(64, 32);
+            CudaRMSNorm::runSmokeDemo(128, 64);
+            CudaRMSNorm::runBackwardSmokeDemo(64, 32);
+            CudaRMSNorm::runResidualEpilogueSmokeDemo(64, 48);
+            CudaAdam::runSmokeDemo(128, 64);
+        });
+        run("muon", []() {
+            CudaMuon::runSmokeDemo(64, 48);
+            CudaMuon::runSmokeDemo(48, 64);
+            CudaLanguageModel::runMuonTrainSmokeDemo(128, 64, 32, 2, 4);
+        });
+        run("attention", []() {
+            CausalSelfAttention::runSparseMaskSmokeDemo(32, 2, 16, 32, 4, 2);
+            CausalSelfAttention::runSparseBackwardSmokeDemo(32, 2, 12, 32, 4, 2);
+            CausalSelfAttention::runSparseComputeSmokeDemo(32, 2, 16, 32, 4, 2);
+            CudaCausalSelfAttention::runSmokeDemo(64, 4, 32, 64);
+            CudaCausalSelfAttention::runBackwardSmokeDemo(32, 2, 16, 32);
+            CudaCausalSelfAttention::runFlashParitySmokeDemo(64, 4, 48, 64);
+            CudaCausalSelfAttention::runKvCacheSmokeDemo(64, 4, 32, 64);
+            CudaCausalSelfAttention::runSparseSmokeDemo(32, 2, 16, 32, 4, 2);
+        });
+        run("model", []() {
+            CudaTransformerBlock::runSmokeDemo(64, 4, 32, 64);
+            CudaLanguageModel::runSmokeDemo(128, 64, 32, 2, 4);
+            CudaLanguageModel::runKvCacheSmokeDemo(128, 64, 32, 2, 4);
+            LanguageModel::runCheckpointSmokeDemo();
+            LanguageModel::runStreamingSmokeDemo();
+            CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);
+            CudaLanguageModel::runTrainSmokeDemo(1000, 64, 48, 2, 4);
+            CudaLanguageModel::runTrainInt8AdamSmokeDemo(1000, 64, 48, 2, 4);
+            CudaLanguageModel::runTrainCpuAdamOffloadSmokeDemo(2000, 128, 64, 2, 4);
+        });
+        run("ckpt parity", []() {
+            CudaLanguageModel::runSelectiveCheckpointParitySmokeDemo(256, 64, 32, 2, 4);
+            CudaLanguageModel::runSelectiveCheckpointParitySmokeDemo(512, 128, 48, 4, 4);
+        });
+        run("flash parity", []() {
+            CudaCausalSelfAttention::runFlashParitySmokeDemo(64, 4, 48, 64);
+            CudaCausalSelfAttention::runFlashParitySmokeDemo(768, 12, 128, 512);
+            CudaCausalSelfAttention::runFlashParitySmokeDemo(768, 12, 256, 512);
+        });
+        run("cpu-adam LanguageModel wire", []() {
+            LanguageModel model(512, 256, 64, Adam(0.001f), 2, 4);
+            model.enableCuda();
+            model.setCudaPreferCpuAdamOffload(true);
+            model.enableCudaTrain();
+            model.enableActivationCheckpointing(false);
+            model.setCudaPreferFlashAttention(true);
+            std::vector<LanguageModelExample> examples(4);
+            unsigned rng = 91u;
+            for (LanguageModelExample& example : examples) {
+                example.inputTokenIds.resize(64);
+                example.targetTokenIds.resize(64);
+                for (size_t i = 0; i < 64; ++i) {
+                    rng = rng * 1664525u + 1013904223u;
+                    example.inputTokenIds[i] = static_cast<int>(rng % 512u);
+                    rng = rng * 1664525u + 1013904223u;
+                    example.targetTokenIds[i] = static_cast<int>(rng % 512u);
+                }
+            }
+            LanguageModelDataset tiny;
+            tiny.examples = examples;
+            LanguageModelDataset emptyTest;
+            model.train(tiny, emptyTest, 1, 1, 4, 1);
+        });
+        run("speed bench tiny", []() {
+            // Reuse profile demo (known-good path) for a quick tokens/s sample.
+            CudaLanguageModel::runTrainProfileDemo(1000, 64, 64, 2, 4, true, 256, 4, true);
+        });
+        run("speed bench 768", [&]() {
+            // Same shape as runSpeedBench (embed=768 blocks=8) — one timed mode.
+            const int vocab = 4000;
+            const int seq = 256;
+            LanguageModel host(vocab, embeddingDim, maximumPositionCount, Adam(0.001f), blockCount, headCount);
+            CudaAmp::preferMixedPrecision = true;
+            CudaAmp::useLossScaling = true;
+            CudaAmp::resetLossScaler();
+            CudaAdam::preferCpuOffload = false;
+            CudaAdam::preferInt8Moments = true;
+            CudaLanguageModel device = CudaLanguageModel::createFrom(host);
+            device.adam = CudaAdam(0.001f);
+            device.setActivationCheckpointMode(ActivationCheckpointMode::Selective);
+            device.maxPackedColumnsManual = false;
+            device.applyVramPackBudget();
+            for (CudaTransformerBlock& block : device.blocks)
+                block.attention.preferFlashAttention = true;
+            device.ensureTrainState();
+            const int packBatch = (std::max)(1, (std::min)(32, device.maxPackedColumns / seq));
+            std::vector<LanguageModelExample> examples(static_cast<size_t>(packBatch));
+            unsigned rng = 91u;
+            for (int exampleIndex = 0; exampleIndex < packBatch; ++exampleIndex) {
+                examples[static_cast<size_t>(exampleIndex)].inputTokenIds.resize(static_cast<size_t>(seq));
+                examples[static_cast<size_t>(exampleIndex)].targetTokenIds.resize(static_cast<size_t>(seq));
+                for (size_t index = 0; index < static_cast<size_t>(seq); ++index) {
+                    rng = rng * 1664525u + 1013904223u;
+                    examples[static_cast<size_t>(exampleIndex)].inputTokenIds[index] = static_cast<int>(rng % static_cast<unsigned>(vocab));
+                    rng = rng * 1664525u + 1013904223u;
+                    examples[static_cast<size_t>(exampleIndex)].targetTokenIds[index] = static_cast<int>(rng % static_cast<unsigned>(vocab));
+                }
+            }
+            std::vector<const LanguageModelExample*> packPointers(static_cast<size_t>(packBatch));
+            for (int exampleIndex = 0; exampleIndex < packBatch; ++exampleIndex)
+                packPointers[static_cast<size_t>(exampleIndex)] = &examples[static_cast<size_t>(exampleIndex)];
+            for (int step = 0; step < 2; ++step) {
+                device.trainGradients.zeroInPlace();
+                device.accumulatePackedExamples(packPointers.data(), packBatch, device.trainGradients);
+                device.applyGradients(device.trainGradients, 1.0f / static_cast<float>(packBatch));
+            }
+            if (cudaDeviceSynchronize() != cudaSuccess)
+                throw std::runtime_error("speed 768 warmup sync failed");
+            const auto start = std::chrono::steady_clock::now();
+            const int timedSteps = 8;
+            for (int step = 0; step < timedSteps; ++step) {
+                device.trainGradients.zeroInPlace();
+                device.accumulatePackedExamples(packPointers.data(), packBatch, device.trainGradients);
+                device.applyGradients(device.trainGradients, 1.0f / static_cast<float>(packBatch));
+            }
+            if (cudaDeviceSynchronize() != cudaSuccess)
+                throw std::runtime_error("speed 768 timed sync failed");
+            const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            const double tokensPerSecond = seconds > 0.0
+                ? static_cast<double>(seq * packBatch) * static_cast<double>(timedSteps) / seconds
+                : 0.0;
+            SmokeLog::result(
+                "speed 768",
+                "embed=%d blocks=%d seq=%d pack=%d maxPackCols=%d tokens/s=%.0f",
+                embeddingDim, blockCount, seq, packBatch, device.maxPackedColumns, tokensPerSecond);
+        });
+        run("train profile tiny", []() {
+            CudaLanguageModel::runTrainProfileDemo(1000, 64, 48, 2, 4, true, 256);
+            CudaLanguageModel::runTrainProfileDemo(1000, 64, 48, 2, 4, false, 256);
+        });
+        run("scale-100M probe", []() {
+            // Synthetic ~100M throughput smoke (no corpus required).
+            const int vocab = 8000;
+            const int embed = 768;
+            const int blocks = 12;
+            const int heads = 12;
+            const int pos = 512;
+            LanguageModel model(vocab, embed, pos, Adam(3e-4f), blocks, heads);
+            model.enableCuda();
+            model.setCudaPreferCpuAdamOffload(false);
+            model.setCudaPreferInt8AdamMoments(true);
+            model.setCudaPreferFlashAttention(true);
+            model.setCudaPreferMuon(true);
+            model.enableCudaTrain();
+            model.enableActivationCheckpointing(true);
+            model.applyCudaVramPackBudget();
+            const double tokensPerSecond = model.probeCudaPackedTrainTokensPerSecond(256, 2, 4);
+            SmokeLog::result(
+                "scale-100M probe",
+                "params=%.2fM  maxPackCols=%d  tokens/s=%.0f",
+                static_cast<double>(model.parameterElementCount()) / 1.0e6,
+                model.cudaMaxPackedColumns(),
+                tokensPerSecond);
+        });
+
+        SmokeLog::result("small suite", failures == 0 ? "ALL OK" : "failures=%d", failures);
+        return failures == 0 ? 0 : 1;
+    }
 
     if (runMuonSmoke) {
         SmokeLog::section("muon");
