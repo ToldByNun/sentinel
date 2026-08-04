@@ -43,27 +43,14 @@ jobs:
 
           echo "/usr/local/cuda/bin" >> $GITHUB_PATH
 
-      - name: Install CUDA 13 (Windows)
+      - name: Install CUDA (Windows)
         if: runner.os == 'Windows'
         shell: powershell
         run: |
-
-          $url="https://developer.download.nvidia.com/compute/cuda/13.0.0/network_installers/cuda_13.0.0_windows_network.exe"
-
-          Invoke-WebRequest `
-            -Uri $url `
-            -OutFile cuda_installer.exe
-
-
-          Start-Process `
-            -FilePath .\cuda_installer.exe `
-            -ArgumentList "-s" `
-            -Wait
-
-
-          echo "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0" >> $env:GITHUB_ENV
-
-          echo "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0\bin" >> $env:GITHUB_PATH
+          choco install cuda -y
+          $cudaPath = (Get-ChildItem "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.*" | Select-Object -First 1).FullName
+          echo "CUDA_PATH=$cudaPath" >> $env:GITHUB_ENV
+          echo "$cudaPath\bin" >> $env:GITHUB_PATH
 
       - name: Setup MSVC dev environment
         if: runner.os == 'Windows'
