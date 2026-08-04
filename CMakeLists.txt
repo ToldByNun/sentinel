@@ -8,6 +8,11 @@ set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_SEPARABLE_COMPILATION OFF)
 
+# Prefer the same host compiler nvcc will use (important on Linux).
+if(NOT DEFINED CMAKE_CUDA_HOST_COMPILER AND NOT MSVC)
+    set(CMAKE_CUDA_HOST_COMPILER "${CMAKE_CXX_COMPILER}" CACHE FILEPATH "Host compiler for nvcc")
+endif()
+
 # Fat binary for GeForce 20/30/40/50 (Turing → Blackwell). CUDA 13+ floor is sm_75.
 # Override for faster local builds, e.g. -DSENTINEL_CUDA_ARCHITECTURES=native
 set(SENTINEL_CUDA_ARCHITECTURES "75;80;86;89;120" CACHE STRING
@@ -16,6 +21,7 @@ set(CMAKE_CUDA_ARCHITECTURES "${SENTINEL_CUDA_ARCHITECTURES}")
 
 find_package(CUDAToolkit REQUIRED)
 find_package(OpenMP)
+find_package(Threads REQUIRED)
 
 set(SENTINEL_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/sentinel")
 
@@ -81,15 +87,29 @@ target_link_libraries(sentinel PRIVATE
     CUDA::cudart_static
     CUDA::cublasLt
     CUDA::cublas
+    Threads::Threads
 )
+
+# Static cudart on Linux needs libdl + librt (and pthread via Threads above).
+if(UNIX AND NOT APPLE)
+    target_link_libraries(sentinel PRIVATE ${CMAKE_DL_LIBS} rt)
+endif()
 
 if(OpenMP_CXX_FOUND)
     target_link_libraries(sentinel PRIVATE OpenMP::OpenMP_CXX)
     if(MSVC)
         target_compile_options(sentinel PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/openmp>)
     else()
-        target_compile_options(sentinel PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=${OpenMP_CXX_FLAGS}>)
+        # Pass OpenMP to the host compiler inside nvcc (GCC/Clang: typically -fopenmp).
+        separate_arguments(_sentinel_omp_cuda_flags NATIVE_COMMAND "${OpenMP_CXX_FLAGS}")
+        foreach(_omp_flag IN LISTS _sentinel_omp_cuda_flags)
+            if(_omp_flag)
+                target_compile_options(sentinel PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=${_omp_flag}>")
+            endif()
+        endforeach()
     endif()
+else()
+    message(WARNING "OpenMP not found — host parallel paths will be single-threaded")
 endif()
 
 if(MSVC)
@@ -97,7 +117,6 @@ if(MSVC)
         $<$<COMPILE_LANGUAGE:CXX>:/W3 /EHsc /MP>
         $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:/O2>
     )
-    # Match vcxproj console subsystem
     set_property(TARGET sentinel PROPERTY WIN32_EXECUTABLE FALSE)
 else()
     target_compile_options(sentinel PRIVATE
@@ -114,5 +133,7 @@ set_target_properties(sentinel PROPERTIES
     VS_DEBUGGER_WORKING_DIRECTORY "${SENTINEL_ROOT}"
 )
 
+message(STATUS "sentinel platform: ${CMAKE_SYSTEM_NAME}")
 message(STATUS "sentinel CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 message(STATUS "CUDA Toolkit: ${CUDAToolkit_VERSION} (${CUDAToolkit_LIBRARY_ROOT})")
+message(STATUS "C++ compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER}")
