@@ -121,6 +121,9 @@ public:
     /// <summary>Muon on hidden 2D weights + Adam on embed/norms/biases/head (default on in enableCudaTrain)</summary>
     void setCudaPreferMuon(bool enabled);
 
+    /// <summary>set Newton-Schulz iterations for Muon hidden-weight updates</summary>
+    void setCudaMuonNsSteps(int steps);
+
     /// <summary>ZeRO-Offload Stage-1: keep Adam m/v on host RAM (disables int8 device moments)</summary>
     void setCudaPreferCpuAdamOffload(bool enabled);
 

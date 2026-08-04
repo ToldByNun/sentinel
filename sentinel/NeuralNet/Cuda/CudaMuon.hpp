@@ -76,7 +76,7 @@ public:
         float learningRate = 0.02f,
         float momentumBeta = 0.95f,
         float weightDecay = 0.0f,
-        int nsSteps = 3,
+        int nsSteps = 2,
         bool nesterov = true,
         bool adjustLrMatchRmsAdamw = true);
 
