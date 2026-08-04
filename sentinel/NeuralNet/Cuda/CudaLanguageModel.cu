@@ -1961,9 +1961,16 @@ void CudaLanguageModel::accumulateChunkedProjection(size_t tokenCount, int segme
         const int chunkRows = (std::min)(chunkCap, vocabularySize - rowStart);
         this->logitChunk.ensureSize(static_cast<size_t>(chunkRows), tokenCount);
         projectChunk(rowStart, chunkRows, this->logitChunk.buffer.deviceData);
-        CudaOps::broadcastBiasRowsAddInPlace(this->logitChunk, this->projectionBias, rowStart, chunkRows);
-        CudaOps::onlineSoftmaxUpdateFromChunk(this->logitChunk, chunkRows, tokenCount, this->onlineSoftmaxMax, this->onlineSoftmaxSumExp);
-        CudaOps::captureTargetLogitFromChunk(this->logitChunk, this->targetTokenIdsBuffer, rowStart, chunkRows, tokenCount, this->targetLogits);
+        CudaOps::onlineSoftmaxBiasedUpdateAndCaptureTargetFromChunk(
+            this->logitChunk.buffer.deviceData,
+            this->projectionBias,
+            rowStart,
+            chunkRows,
+            this->targetTokenIdsBuffer,
+            tokenCount,
+            this->onlineSoftmaxMax,
+            this->onlineSoftmaxSumExp,
+            this->targetLogits);
     }
 
     CudaOps::onlineSoftmaxAddMeanCrossEntropy(
@@ -1975,11 +1982,20 @@ void CudaLanguageModel::accumulateChunkedProjection(size_t tokenCount, int segme
         const int chunkRows = (std::min)(chunkCap, vocabularySize - rowStart);
         this->logitChunk.ensureSize(static_cast<size_t>(chunkRows), tokenCount);
         projectChunk(rowStart, chunkRows, this->logitChunk.buffer.deviceData);
-        CudaOps::broadcastBiasRowsAddInPlace(this->logitChunk, this->projectionBias, rowStart, chunkRows);
-        CudaOps::onlineSoftmaxLogitGradientChunkInto(
-            this->logitChunk, this->targetTokenIdsBuffer, rowStart, chunkRows, tokenCount,
-            this->onlineSoftmaxMax, this->onlineSoftmaxSumExp, this->logitGradientChunk, gradScale, segmentLength,
-            CudaLanguageModel::padTargetId, &this->meanDivisorBuffer);
+        CudaOps::onlineSoftmaxBiasedLogitGradientChunkInto(
+            this->logitChunk.buffer.deviceData,
+            this->projectionBias,
+            this->targetTokenIdsBuffer,
+            rowStart,
+            chunkRows,
+            tokenCount,
+            this->onlineSoftmaxMax,
+            this->onlineSoftmaxSumExp,
+            this->logitGradientChunk,
+            gradScale,
+            segmentLength,
+            CudaLanguageModel::padTargetId,
+            &this->meanDivisorBuffer);
 
         this->projectionWeightGradientChunk.ensureSize(static_cast<size_t>(chunkRows), static_cast<size_t>(embeddingDim));
         const bool previousAmp = CudaAmp::preferMixedPrecision;
