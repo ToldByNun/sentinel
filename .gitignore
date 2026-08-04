@@ -71,6 +71,8 @@
 !**/README.txt
 !CMakeLists.txt
 !**/CMakeLists.txt
+!cmake/**
+!examples/**
 build_out.txt
 sentinel/_*.txt
 sentinel/scale*.log*
@@ -96,6 +98,8 @@ SERA-Data/
 sera_demo.snlm
 sera_100m.snlm
 checkpoint_smoke.snlm
+tiny_demo.snlm
+tiny_ci.snlm
 streaming_smoke.jsonl
 
 # Python

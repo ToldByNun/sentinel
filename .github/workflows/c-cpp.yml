@@ -12,7 +12,7 @@ jobs:
         include:
           - os: ubuntu-latest
             name: Linux
-          - os: windows-latest
+          - os: windows-2022
             name: Windows
     runs-on: ${{ matrix.os }}
     name: Build (${{ matrix.name }})
@@ -65,6 +65,18 @@ jobs:
             -DSENTINEL_CUDA_ARCHITECTURES=75
 
       - name: Build
-        shell: bash          # ← Auch hier konsistent
+        shell: bash
         run: |
           cmake --build build --parallel
+
+      - name: Run tiny example (CPU/CUDA if present)
+        shell: bash
+        working-directory: build/bin
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            ./sentinel_train_tiny.exe tiny_ci.snlm
+            ./sentinel_generate.exe tiny_ci.snlm "the cat"
+          else
+            ./sentinel_train_tiny tiny_ci.snlm
+            ./sentinel_generate tiny_ci.snlm "the cat"
+          fi
