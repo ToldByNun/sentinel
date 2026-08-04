@@ -193,12 +193,14 @@ public:
 
     /// <summary>backprop through one block accumulates into gradients returns input gradient</summary>
     /// <param name="deferHostWeightDownload">keep large weight grads on device; caller downloads async then releaseDeferredHostWeightGradDevice()</param>
+    /// <param name="retainActivationScratch">skip free of act/grad scratch (ckpt=off + CUDA graph friendly)</param>
     void backward(
         const CudaMatrix& outputGradient,
         CudaMatrix& inputGradient,
         CudaTransformerBlockGradients& gradients,
         CudaTransformerBlockHostWeightGrads* hostWeightGrads = nullptr,
-        bool deferHostWeightDownload = false);
+        bool deferHostWeightDownload = false,
+        bool retainActivationScratch = false);
 
     /// <summary>
     /// Selective bwd: FFN from kept acts, then recompute Attn from blockInput, then Attn bwd

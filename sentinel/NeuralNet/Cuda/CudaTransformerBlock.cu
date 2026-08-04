@@ -192,7 +192,8 @@ void CudaTransformerBlock::backward(
     CudaMatrix& inputGradient,
     CudaTransformerBlockGradients& gradients,
     CudaTransformerBlockHostWeightGrads* hostWeightGrads,
-    bool deferHostWeightDownload
+    bool deferHostWeightDownload,
+    bool retainActivationScratch
 ) {
     if (outputGradient.empty()) throw std::invalid_argument("CudaTransformerBlock::backward empty outputGradient");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaTransformerBlock::backward no CUDA device");
@@ -250,6 +251,9 @@ void CudaTransformerBlock::backward(
     CudaOps::addInPlace(gradients.feedForwardGateBias, this->feedForwardGateBiasGradient);
     CudaOps::addInPlace(gradients.feedForwardNormGamma, this->feedForwardNormGammaGradient);
     CudaOps::addInPlace(gradients.attentionNormGamma, this->attentionNormGammaGradient);
+
+    if (retainActivationScratch)
+        return;
 
     if (hostWeightGrads != nullptr) {
         if (!deferHostWeightDownload) {

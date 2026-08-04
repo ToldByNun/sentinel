@@ -59,6 +59,49 @@ int main() {
     const bool runCpuAdamOffloadSmoke = false;
     // One-shot: smokes + parities + small speed + cpuAdam (no 4B / no full SERA train).
     const bool runSmallSuite = false;
+    // Temporary WMMA FA verify (flash parity + synthetic ~100M tok/s). Flip false after check.
+    const bool runWmmaFaVerify = false;
+
+    if (runWmmaFaVerify) {
+        SmokeLog::section("wmma FA verify");
+        if (!CudaMatmul::isAvailable()) {
+            SmokeLog::skip("wmma FA verify (no CUDA)");
+            return 1;
+        }
+        try {
+            CudaCausalSelfAttention::runFlashParitySmokeDemo(64, 4, 48, 64);
+            CudaCausalSelfAttention::runFlashParitySmokeDemo(768, 12, 128, 512);
+            CudaCausalSelfAttention::runFlashParitySmokeDemo(768, 12, 256, 512);
+            CudaCausalSelfAttention::runFlashParitySmokeDemo(768, 12, 1024, 1024);
+
+            const int vocab = 16000;
+            const int embed = 768;
+            const int blocks = 12;
+            const int heads = 12;
+            const int pos = 512;
+            LanguageModel model(vocab, embed, pos, Adam(3e-4f), blocks, heads);
+            model.enableCuda();
+            model.setCudaPreferCpuAdamOffload(false);
+            model.setCudaPreferInt8AdamMoments(true);
+            model.setCudaPreferFlashAttention(true);
+            model.setCudaPreferMuon(false);
+            model.enableCudaTrain();
+            model.setActivationCheckpointMode(ActivationCheckpointMode::Off);
+            model.setCudaPreferTrainGraph(true);
+            model.applyCudaVramPackBudget();
+            const double tokensPerSecond = model.probeCudaPackedTrainTokensPerSecond(256, 4, 8);
+            SmokeLog::result(
+                "scale-100M probe",
+                "params=%.2fM  adam+ckpt-off+wmma  maxPackCols=%d  tokens/s=%.0f",
+                static_cast<double>(model.parameterElementCount()) / 1.0e6,
+                model.cudaMaxPackedColumns(),
+                tokensPerSecond);
+            return 0;
+        } catch (const std::exception& ex) {
+            SmokeLog::result("wmma FA verify", "FAILED: %s", ex.what());
+            return 1;
+        }
+    }
 
     // Arrow HF disk layout (sera_best_subset) via from-scratch ArrowChunkReader; JSONL still works
     const bool useArrowCorpus = true;

@@ -368,7 +368,9 @@ void LanguageModel::enableCudaTrain() {
     }
 
     this->deviceTrainEnabled = true;
-    this->device->setActivationCheckpointMode(ActivationCheckpointMode::Selective);
+    // Prefer Off when VRAM allows: retaining act scratch avoids free/malloc thrash and enables graphs.
+    // Call setActivationCheckpointMode(Selective/Full) when fitting larger models.
+    this->device->setActivationCheckpointMode(ActivationCheckpointMode::Off);
     CudaAmp::preferMixedPrecision = true;
     // loss scaling only helps when FP16 GEMMs can run (shared dim gate is 256)
     CudaAmp::useLossScaling = this->tokenEmbedding.embeddingDim() >= 256;

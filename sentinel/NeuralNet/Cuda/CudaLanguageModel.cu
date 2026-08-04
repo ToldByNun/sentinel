@@ -31,7 +31,7 @@ CudaLanguageModel::CudaLanguageModel()
       maxPackedColumnsManual(false),
       logitChunkRows(2048),
       gradientAccumulationSteps(4),
-      activationCheckpointMode(ActivationCheckpointMode::Selective),
+      activationCheckpointMode(ActivationCheckpointMode::Off),
       preferTrainGraph(true),
       preferMuon(false),
       preferTrainMemTrace(false),
@@ -261,12 +261,15 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
                 hostGradsPtr,
                 deferDownload);
         } else {
+            // Off: keep per-block act scratch alive across steps (already budgeted). Avoids
+            // cudaFree/cudaMalloc churn and makes CUDA graph capture possible.
             block.backward(
                 this->hiddenGradient,
                 this->blockInputGradientScratch,
                 gradients.blocks[static_cast<size_t>(blockIndex)],
                 hostGradsPtr,
-                deferDownload);
+                deferDownload,
+                true);
         }
 
         if (deferDownload) {
@@ -967,7 +970,8 @@ void CudaLanguageModel::applyVramPackBudget(float freeFraction, size_t safetyRes
     if (perColumn == 0) throw std::logic_error("CudaLanguageModel::applyVramPackBudget zero bytesPerPackedColumn");
 
     // bytesPerPackedColumn undercounts lazy Attn/FFN scratch + cuBLAS workspaces; pad so packs stay safe.
-    constexpr double footprintSlack = 1.40;
+    // 1.20 is enough once ckpt=off retains scratch (no free/realloc thrash) and selective keeps FFN acts.
+    constexpr double footprintSlack = 1.20;
     const size_t budgetBytes = static_cast<size_t>(static_cast<double>(usableBytes) * static_cast<double>(freeFraction));
     const size_t bytesPerColBudget = static_cast<size_t>(static_cast<double>(perColumn) * footprintSlack);
     size_t cols = bytesPerColBudget > 0 ? budgetBytes / bytesPerColBudget : 0;
@@ -3912,7 +3916,7 @@ CudaLanguageModelVramBreakdown CudaLanguageModel::estimateVramBreakdown(
         perColumn += d * 2ull;
 
     const size_t packCols = static_cast<size_t>((std::max)(0, maxPackedColumns));
-    constexpr double footprintSlack = 1.40;
+    constexpr double footprintSlack = 1.20;
     const size_t packWorkspace = static_cast<size_t>(static_cast<double>(perColumn * packCols) * footprintSlack);
 
     CudaLanguageModelVramBreakdown out;

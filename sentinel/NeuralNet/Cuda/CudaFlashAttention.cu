@@ -5,14 +5,20 @@
 #include <algorithm>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <mma.h>
 #include <cmath>
 #include <stdexcept>
 #include <string>
 
 namespace {
 
+using namespace nvcuda;
+
 constexpr int kBrMax = CudaFlashAttention::queryTileSize;
 constexpr size_t kDefaultSharedBytes = 48ull * 1024ull;
+constexpr int kWmmaM = 16;
+constexpr int kWmmaN = 16;
+constexpr int kWmmaK = 16;
 
 size_t deviceMaxDynamicSharedBytes() {
     static size_t cached = 0;
@@ -874,6 +880,457 @@ __global__ void CudaFlashAttentionBackwardQueryFixedEntry(
     }
 }
 
+/// <summary>
+/// Tensor-core (WMMA) GEMM helpers for the 64×64×64 flash hot path.
+/// Q/K/V tiles are FP16 row-major [token][dim]; scores/probs stay FP32 until packed back to FP16 for PV / bwd GEMMs.
+/// </summary>
+__device__ __forceinline__ void wmmaGemmQKt64(float* scores, const __half* query, const __half* key, float scale) {
+    // S = scale * Q * K^T. 8 warps cover 16 of the 16×16 output tiles (2 each).
+    const int warpId = static_cast<int>(threadIdx.x) >> 5;
+    if (warpId >= 8) return;
+
+    for (int tile = warpId; tile < 16; tile += 8) {
+        const int tileM = tile >> 2;
+        const int tileN = tile & 3;
+        wmma::fragment<wmma::matrix_a, kWmmaM, kWmmaN, kWmmaK, __half, wmma::row_major> aFrag;
+        wmma::fragment<wmma::matrix_b, kWmmaM, kWmmaN, kWmmaK, __half, wmma::col_major> bFrag;
+        wmma::fragment<wmma::accumulator, kWmmaM, kWmmaN, kWmmaK, float> cFrag;
+        wmma::fill_fragment(cFrag, 0.0f);
+
+        #pragma unroll
+        for (int kk = 0; kk < 64; kk += kWmmaK) {
+            const __half* aPtr = query + (tileM * kWmmaM) * 64 + kk;
+            const __half* bPtr = key + (tileN * kWmmaN) * 64 + kk;
+            wmma::load_matrix_sync(aFrag, aPtr, 64);
+            wmma::load_matrix_sync(bFrag, bPtr, 64);
+            wmma::mma_sync(cFrag, aFrag, bFrag, cFrag);
+        }
+
+        #pragma unroll
+        for (int i = 0; i < static_cast<int>(cFrag.num_elements); ++i)
+            cFrag.x[i] *= scale;
+
+        wmma::store_matrix_sync(scores + (tileM * kWmmaM) * 64 + tileN * kWmmaN, cFrag, 64, wmma::mem_row_major);
+    }
+}
+
+__device__ __forceinline__ void wmmaGemmPV64(float* outAccum, const __half* prob, const __half* value) {
+    // outAccum is FP32 row-major 64×64 workspace; each warp writes its tiles then threads fold into registers.
+    const int warpId = static_cast<int>(threadIdx.x) >> 5;
+    if (warpId >= 8) return;
+
+    for (int tile = warpId; tile < 16; tile += 8) {
+        const int tileM = tile >> 2;
+        const int tileN = tile & 3;
+        wmma::fragment<wmma::matrix_a, kWmmaM, kWmmaN, kWmmaK, __half, wmma::row_major> aFrag;
+        wmma::fragment<wmma::matrix_b, kWmmaM, kWmmaN, kWmmaK, __half, wmma::row_major> bFrag;
+        wmma::fragment<wmma::accumulator, kWmmaM, kWmmaN, kWmmaK, float> cFrag;
+        wmma::fill_fragment(cFrag, 0.0f);
+
+        #pragma unroll
+        for (int kk = 0; kk < 64; kk += kWmmaK) {
+            const __half* aPtr = prob + (tileM * kWmmaM) * 64 + kk;
+            const __half* bPtr = value + kk * 64 + tileN * kWmmaN;
+            wmma::load_matrix_sync(aFrag, aPtr, 64);
+            wmma::load_matrix_sync(bFrag, bPtr, 64);
+            wmma::mma_sync(cFrag, aFrag, bFrag, cFrag);
+        }
+
+        wmma::store_matrix_sync(outAccum + (tileM * kWmmaM) * 64 + tileN * kWmmaN, cFrag, 64, wmma::mem_row_major);
+    }
+}
+
+__device__ __forceinline__ void wmmaGemmDovt64(float* dP, const __half* outGrad, const __half* value) {
+    // dP = dO * V^T  (64×64)
+    const int warpId = static_cast<int>(threadIdx.x) >> 5;
+    if (warpId >= 8) return;
+
+    for (int tile = warpId; tile < 16; tile += 8) {
+        const int tileM = tile >> 2;
+        const int tileN = tile & 3;
+        wmma::fragment<wmma::matrix_a, kWmmaM, kWmmaN, kWmmaK, __half, wmma::row_major> aFrag;
+        wmma::fragment<wmma::matrix_b, kWmmaM, kWmmaN, kWmmaK, __half, wmma::col_major> bFrag;
+        wmma::fragment<wmma::accumulator, kWmmaM, kWmmaN, kWmmaK, float> cFrag;
+        wmma::fill_fragment(cFrag, 0.0f);
+
+        #pragma unroll
+        for (int kk = 0; kk < 64; kk += kWmmaK) {
+            const __half* aPtr = outGrad + (tileM * kWmmaM) * 64 + kk;
+            const __half* bPtr = value + (tileN * kWmmaN) * 64 + kk;
+            wmma::load_matrix_sync(aFrag, aPtr, 64);
+            wmma::load_matrix_sync(bFrag, bPtr, 64);
+            wmma::mma_sync(cFrag, aFrag, bFrag, cFrag);
+        }
+
+        wmma::store_matrix_sync(dP + (tileM * kWmmaM) * 64 + tileN * kWmmaN, cFrag, 64, wmma::mem_row_major);
+    }
+}
+
+__device__ __forceinline__ void applyCausalAndBounds64(float* scores, int queryStart, int queryCount, int keyStart, int keyCount, int causal, int threadIndex, int threadCount) {
+    for (int index = threadIndex; index < 64 * 64; index += threadCount) {
+        const int localQuery = index >> 6;
+        const int localKey = index & 63;
+        if (localQuery >= queryCount || localKey >= keyCount
+            || (causal && (keyStart + localKey) > (queryStart + localQuery)))
+            scores[index] = -INFINITY;
+    }
+}
+
+/// <summary>Flash forward hot path: headDim=64, Br=Bc=64 with WMMA QK^T + PV.</summary>
+__global__ void CudaFlashAttentionForwardWmma64Entry(
+    const float* query,
+    const float* key,
+    const float* value,
+    float* out,
+    float* logSumExp,
+    int strideColumns,
+    int columnStart,
+    int sequenceLength,
+    float scale,
+    int causal) {
+    constexpr int HeadDim = 64;
+    constexpr int TileBr = 64;
+    constexpr int TileBc = 64;
+
+    extern __shared__ char sharedBytes[];
+    __half* sharedQuery = reinterpret_cast<__half*>(sharedBytes);
+    __half* sharedKey = sharedQuery + TileBr * HeadDim;
+    __half* sharedValue = sharedKey + TileBc * HeadDim;
+    float* sharedScores = reinterpret_cast<float*>(sharedValue + TileBc * HeadDim);
+    // Reuse score buffer as FP32 PV workspace after probs are packed into sharedQuery.
+    float* sharedPv = sharedScores;
+
+    const int headIndex = static_cast<int>(blockIdx.y);
+    const int packIndex = static_cast<int>(blockIdx.z);
+    const int packColumnStart = columnStart + packIndex * sequenceLength;
+    const int queryTile = static_cast<int>(blockIdx.x);
+    const int queryStart = queryTile * TileBr;
+    if (queryStart >= sequenceLength) return;
+
+    const int queryCount = sequenceLength - queryStart < TileBr ? sequenceLength - queryStart : TileBr;
+    const int threadIndex = static_cast<int>(threadIdx.x);
+    const int threadCount = static_cast<int>(blockDim.x);
+
+    for (int index = threadIndex; index < TileBr * HeadDim; index += threadCount) {
+        const int localQuery = index / HeadDim;
+        const int dim = index - localQuery * HeadDim;
+        __half valueHalf = __float2half_rn(0.0f);
+        if (localQuery < queryCount) {
+            const int absoluteColumn = packColumnStart + queryStart + localQuery;
+            valueHalf = __float2half_rn(*headRow(query, headIndex, HeadDim, dim, strideColumns, absoluteColumn));
+        }
+        sharedQuery[localQuery * HeadDim + dim] = valueHalf;
+    }
+    __syncthreads();
+
+    float rowMax = -INFINITY;
+    float rowSum = 0.0f;
+    float outputAccum[HeadDim];
+#pragma unroll
+    for (int dim = 0; dim < HeadDim; ++dim)
+        outputAccum[dim] = 0.0f;
+
+    const int keyTileCount = (sequenceLength + TileBc - 1) / TileBc;
+    for (int keyTile = 0; keyTile < keyTileCount; ++keyTile) {
+        const int keyStart = keyTile * TileBc;
+        const int keyCount = sequenceLength - keyStart < TileBc ? sequenceLength - keyStart : TileBc;
+        if (causal && keyStart > (queryStart + queryCount - 1)) break;
+
+        for (int index = threadIndex; index < TileBc * HeadDim; index += threadCount) {
+            const int localKey = index / HeadDim;
+            const int dim = index - localKey * HeadDim;
+            __half keyHalf = __float2half_rn(0.0f);
+            __half valueHalf = __float2half_rn(0.0f);
+            if (localKey < keyCount) {
+                const int absoluteColumn = packColumnStart + keyStart + localKey;
+                keyHalf = __float2half_rn(*headRow(key, headIndex, HeadDim, dim, strideColumns, absoluteColumn));
+                valueHalf = __float2half_rn(*headRow(value, headIndex, HeadDim, dim, strideColumns, absoluteColumn));
+            }
+            sharedKey[localKey * HeadDim + dim] = keyHalf;
+            sharedValue[localKey * HeadDim + dim] = valueHalf;
+        }
+        __syncthreads();
+
+        wmmaGemmQKt64(sharedScores, sharedQuery, sharedKey, scale);
+        __syncthreads();
+        applyCausalAndBounds64(sharedScores, queryStart, queryCount, keyStart, keyCount, causal, threadIndex, threadCount);
+        __syncthreads();
+
+        if (threadIndex < queryCount) {
+            float tileRowMax = -INFINITY;
+#pragma unroll
+            for (int localKey = 0; localKey < TileBc; ++localKey) {
+                const float score = sharedScores[threadIndex * TileBc + localKey];
+                if (score > tileRowMax)
+                    tileRowMax = score;
+            }
+            if (tileRowMax < -1.0e20f)
+                tileRowMax = 0.0f;
+
+            const float newRowMax = rowMax > tileRowMax ? rowMax : tileRowMax;
+            const float rescale = __expf(rowMax - newRowMax);
+            float tileSum = 0.0f;
+#pragma unroll
+            for (int localKey = 0; localKey < TileBc; ++localKey) {
+                float probability = 0.0f;
+                if (localKey < keyCount) {
+                    probability = __expf(sharedScores[threadIndex * TileBc + localKey] - newRowMax);
+                    if (!isfinite(probability))
+                        probability = 0.0f;
+                }
+                sharedScores[threadIndex * TileBc + localKey] = probability;
+                tileSum += probability;
+            }
+
+            // Stash rescale into outputAccum temporarily via a side channel: apply after PV.
+            rowSum = rowSum * rescale + tileSum;
+#pragma unroll
+            for (int dim = 0; dim < HeadDim; ++dim)
+                outputAccum[dim] *= rescale;
+            rowMax = newRowMax;
+        }
+        __syncthreads();
+
+        // Clear invalid probability rows/cols before packing to FP16 for WMMA PV.
+        for (int index = threadIndex; index < TileBr * TileBc; index += threadCount) {
+            const int localQuery = index >> 6;
+            const int localKey = index & 63;
+            if (localQuery >= queryCount || localKey >= keyCount)
+                sharedScores[index] = 0.0f;
+        }
+        __syncthreads();
+
+        // Pack float probs → half into sharedQuery (Q reloaded after PV).
+        for (int index = threadIndex; index < TileBr * TileBc; index += threadCount)
+            reinterpret_cast<__half*>(sharedQuery)[index] = __float2half_rn(sharedScores[index]);
+        __syncthreads();
+
+        wmmaGemmPV64(sharedPv, reinterpret_cast<const __half*>(sharedQuery), sharedValue);
+        __syncthreads();
+
+        if (threadIndex < queryCount) {
+#pragma unroll
+            for (int dim = 0; dim < HeadDim; ++dim)
+                outputAccum[dim] += sharedPv[threadIndex * HeadDim + dim];
+        }
+        __syncthreads();
+
+        // Reload Q tile for the next key iteration.
+        for (int index = threadIndex; index < queryCount * HeadDim; index += threadCount) {
+            const int localQuery = index / HeadDim;
+            const int dim = index - localQuery * HeadDim;
+            const int absoluteColumn = packColumnStart + queryStart + localQuery;
+            sharedQuery[localQuery * HeadDim + dim] = __float2half_rn(*headRow(query, headIndex, HeadDim, dim, strideColumns, absoluteColumn));
+        }
+        for (int index = queryCount * HeadDim + threadIndex; index < TileBr * HeadDim; index += threadCount)
+            sharedQuery[index] = __float2half_rn(0.0f);
+        __syncthreads();
+    }
+
+    if (threadIndex < queryCount) {
+        const int absoluteColumn = packColumnStart + queryStart + threadIndex;
+        const float inverseSum = rowSum > 0.0f ? (1.0f / rowSum) : 0.0f;
+#pragma unroll
+        for (int dim = 0; dim < HeadDim; ++dim)
+            *headRowMutable(out, headIndex, HeadDim, dim, strideColumns, absoluteColumn) = outputAccum[dim] * inverseSum;
+        logSumExp[headIndex * strideColumns + absoluteColumn] = rowMax + ((rowSum > 0.0f) ? __logf(rowSum) : 0.0f);
+    }
+}
+
+/// <summary>Flash bwd hot path: WMMA for QK^T (P) and dO V^T; rest stays specialized half loops.</summary>
+__global__ void CudaFlashAttentionBackwardQueryWmma64Entry(
+    const float* query,
+    const float* key,
+    const float* value,
+    const float* outGradient,
+    const float* logSumExp,
+    const float* delta,
+    float* queryGradient,
+    float* keyGradient,
+    float* valueGradient,
+    int strideColumns,
+    int columnStart,
+    int sequenceLength,
+    float scale,
+    int causal) {
+    constexpr int HeadDim = 64;
+    constexpr int TileBr = 64;
+    constexpr int TileBc = 64;
+
+    extern __shared__ char sharedBytes[];
+    __half* sharedKey = reinterpret_cast<__half*>(sharedBytes);
+    __half* sharedValue = sharedKey + TileBc * HeadDim;
+    __half* sharedQuery = sharedValue + TileBc * HeadDim;
+    __half* sharedOutGrad = sharedQuery + TileBr * HeadDim;
+    float* sharedProb = reinterpret_cast<float*>(sharedOutGrad + TileBr * HeadDim);
+    float* sharedLse = sharedProb + TileBr * TileBc;
+    float* sharedDelta = sharedLse + TileBr;
+    float* sharedDp = sharedProb; // reuse after P→scaledDs transformation starts from dP
+
+    const int headIndex = static_cast<int>(blockIdx.y);
+    const int packIndex = static_cast<int>(blockIdx.z);
+    const int packColumnStart = columnStart + packIndex * sequenceLength;
+    const int deltaStride = static_cast<int>(gridDim.z) * sequenceLength;
+    const int queryTile = static_cast<int>(blockIdx.x);
+    const int queryStart = queryTile * TileBr;
+    if (queryStart >= sequenceLength) return;
+
+    const int queryCount = sequenceLength - queryStart < TileBr ? sequenceLength - queryStart : TileBr;
+    const int threadIndex = static_cast<int>(threadIdx.x);
+    const int threadCount = static_cast<int>(blockDim.x);
+
+    float queryGradLocal[HeadDim];
+#pragma unroll
+    for (int dim = 0; dim < HeadDim; ++dim)
+        queryGradLocal[dim] = 0.0f;
+
+    for (int index = threadIndex; index < TileBr * HeadDim; index += threadCount) {
+        const int localQuery = index / HeadDim;
+        const int dim = index - localQuery * HeadDim;
+        __half qHalf = __float2half_rn(0.0f);
+        __half dOHalf = __float2half_rn(0.0f);
+        if (localQuery < queryCount) {
+            const int absoluteColumn = packColumnStart + queryStart + localQuery;
+            qHalf = __float2half_rn(*headRow(query, headIndex, HeadDim, dim, strideColumns, absoluteColumn));
+            dOHalf = __float2half_rn(*headRow(outGradient, headIndex, HeadDim, dim, strideColumns, absoluteColumn));
+        }
+        sharedQuery[localQuery * HeadDim + dim] = qHalf;
+        sharedOutGrad[localQuery * HeadDim + dim] = dOHalf;
+    }
+    if (threadIndex < queryCount) {
+        const int absoluteColumn = packColumnStart + queryStart + threadIndex;
+        sharedLse[threadIndex] = logSumExp[headIndex * strideColumns + absoluteColumn];
+        sharedDelta[threadIndex] = delta[headIndex * deltaStride + packIndex * sequenceLength + queryStart + threadIndex];
+    } else if (threadIndex < TileBr) {
+        sharedLse[threadIndex] = 0.0f;
+        sharedDelta[threadIndex] = 0.0f;
+    }
+    __syncthreads();
+
+    const int keyTileCount = (sequenceLength + TileBc - 1) / TileBc;
+    for (int keyTile = 0; keyTile < keyTileCount; ++keyTile) {
+        const int keyStart = keyTile * TileBc;
+        const int keyCount = sequenceLength - keyStart < TileBc ? sequenceLength - keyStart : TileBc;
+        if (causal && keyStart > (queryStart + queryCount - 1)) continue;
+
+        for (int index = threadIndex; index < TileBc * HeadDim; index += threadCount) {
+            const int localKey = index / HeadDim;
+            const int dim = index - localKey * HeadDim;
+            __half keyHalf = __float2half_rn(0.0f);
+            __half valueHalf = __float2half_rn(0.0f);
+            if (localKey < keyCount) {
+                const int absoluteColumn = packColumnStart + keyStart + localKey;
+                keyHalf = __float2half_rn(*headRow(key, headIndex, HeadDim, dim, strideColumns, absoluteColumn));
+                valueHalf = __float2half_rn(*headRow(value, headIndex, HeadDim, dim, strideColumns, absoluteColumn));
+            }
+            sharedKey[localKey * HeadDim + dim] = keyHalf;
+            sharedValue[localKey * HeadDim + dim] = valueHalf;
+        }
+        __syncthreads();
+
+        // Scores via WMMA, then P = exp(S - LSE) with causal/bounds.
+        wmmaGemmQKt64(sharedProb, sharedQuery, sharedKey, scale);
+        __syncthreads();
+        applyCausalAndBounds64(sharedProb, queryStart, queryCount, keyStart, keyCount, causal, threadIndex, threadCount);
+        __syncthreads();
+
+        if (threadIndex < queryCount) {
+            const float lse = sharedLse[threadIndex];
+#pragma unroll
+            for (int localKey = 0; localKey < TileBc; ++localKey) {
+                float probability = 0.0f;
+                if (localKey < keyCount) {
+                    probability = __expf(sharedProb[threadIndex * TileBc + localKey] - lse);
+                    if (!isfinite(probability))
+                        probability = 0.0f;
+                }
+                sharedProb[threadIndex * TileBc + localKey] = probability;
+            }
+        } else if (threadIndex < TileBr) {
+#pragma unroll
+            for (int localKey = 0; localKey < TileBc; ++localKey)
+                sharedProb[threadIndex * TileBc + localKey] = 0.0f;
+        }
+        __syncthreads();
+
+        // Pack P → half into sharedKey (K reloaded below for dQ); dP via WMMA overwrites sharedProb.
+        for (int index = threadIndex; index < TileBr * TileBc; index += threadCount)
+            sharedKey[index] = __float2half_rn(sharedProb[index]);
+        __syncthreads();
+
+        wmmaGemmDovt64(sharedDp, sharedOutGrad, sharedValue);
+        __syncthreads();
+
+        // scaledDs = P * (dP - Delta) * scale; keep in sharedProb; accumulate dK/dV.
+        if (threadIndex < keyCount) {
+            const int localKey = threadIndex;
+            float keyGradLocal[HeadDim];
+            float valueGradLocal[HeadDim];
+#pragma unroll
+            for (int dim = 0; dim < HeadDim; ++dim) {
+                keyGradLocal[dim] = 0.0f;
+                valueGradLocal[dim] = 0.0f;
+            }
+            for (int localQuery = 0; localQuery < queryCount; ++localQuery) {
+                const float probability = __half2float(sharedKey[localQuery * TileBc + localKey]);
+                float scaledDs = 0.0f;
+                if (probability != 0.0f) {
+                    const float dP = sharedDp[localQuery * TileBc + localKey];
+                    scaledDs = probability * (dP - sharedDelta[localQuery]) * scale;
+#pragma unroll
+                    for (int dim = 0; dim < HeadDim; dim += 2) {
+                        const float2 q = __half22float2(*reinterpret_cast<const __half2*>(sharedQuery + localQuery * HeadDim + dim));
+                        const float2 outG = __half22float2(*reinterpret_cast<const __half2*>(sharedOutGrad + localQuery * HeadDim + dim));
+                        keyGradLocal[dim] += scaledDs * q.x;
+                        keyGradLocal[dim + 1] += scaledDs * q.y;
+                        valueGradLocal[dim] += probability * outG.x;
+                        valueGradLocal[dim + 1] += probability * outG.y;
+                    }
+                }
+                sharedProb[localQuery * TileBc + localKey] = scaledDs;
+            }
+            const int absoluteColumn = packColumnStart + keyStart + localKey;
+#pragma unroll
+            for (int dim = 0; dim < HeadDim; ++dim) {
+                atomicAdd(headRowMutable(keyGradient, headIndex, HeadDim, dim, strideColumns, absoluteColumn), keyGradLocal[dim]);
+                atomicAdd(headRowMutable(valueGradient, headIndex, HeadDim, dim, strideColumns, absoluteColumn), valueGradLocal[dim]);
+            }
+        }
+        __syncthreads();
+
+        // Reload K for dQ = scaledDs @ K
+        for (int index = threadIndex; index < keyCount * HeadDim; index += threadCount) {
+            const int localKey = index / HeadDim;
+            const int dim = index - localKey * HeadDim;
+            const int absoluteColumn = packColumnStart + keyStart + localKey;
+            sharedKey[localKey * HeadDim + dim] = __float2half_rn(*headRow(key, headIndex, HeadDim, dim, strideColumns, absoluteColumn));
+        }
+        __syncthreads();
+
+        if (threadIndex < queryCount) {
+            const int localQuery = threadIndex;
+            for (int localKey = 0; localKey < keyCount; ++localKey) {
+                const float scaledDs = sharedProb[localQuery * TileBc + localKey];
+                if (scaledDs == 0.0f) continue;
+#pragma unroll
+                for (int dim = 0; dim < HeadDim; dim += 2) {
+                    const float2 k = __half22float2(*reinterpret_cast<const __half2*>(sharedKey + localKey * HeadDim + dim));
+                    queryGradLocal[dim] += scaledDs * k.x;
+                    queryGradLocal[dim + 1] += scaledDs * k.y;
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    if (threadIndex < queryCount) {
+        const int absoluteColumn = packColumnStart + queryStart + threadIndex;
+#pragma unroll
+        for (int dim = 0; dim < HeadDim; ++dim)
+            *headRowMutable(queryGradient, headIndex, HeadDim, dim, strideColumns, absoluteColumn) = queryGradLocal[dim];
+    }
+}
+
 void validateMultiHeadShape(const CudaMatrix& query, const CudaMatrix& key, const CudaMatrix& value, int headCount, int headDimension, const char* operationName) {
     if (query.empty() || key.empty() || value.empty())
         throw std::invalid_argument(std::string(operationName) + " empty input");
@@ -977,9 +1434,11 @@ void CudaFlashAttention::forwardMultiHead(const CudaMatrix& query, const CudaMat
         CudaFlashAttentionForwardFixedEntry<16, 32, 32><<<grid, threadCount, sharedBytes, CudaMatmul::activeStream()>>>(
             query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, out.buffer.deviceData, logSumExp.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
     } else if (headDimension == 64 && tileBr == 64 && tileBc == 64) {
+        // Tensor-core WMMA path (QK^T + PV); 8 warps × 16×16 tiles cover the 64×64 GEMMs.
         const size_t sharedBytes = forwardSharedBytesHalf(headDimension, tileBr, tileBc);
-        ensureDynamicShared(CudaFlashAttentionForwardFixedEntry<64, 64, 64>, sharedBytes);
-        CudaFlashAttentionForwardFixedEntry<64, 64, 64><<<grid, threadCount, sharedBytes, CudaMatmul::activeStream()>>>(
+        constexpr int wmmaThreads = 256;
+        ensureDynamicShared(CudaFlashAttentionForwardWmma64Entry, sharedBytes);
+        CudaFlashAttentionForwardWmma64Entry<<<grid, wmmaThreads, sharedBytes, CudaMatmul::activeStream()>>>(
             query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, out.buffer.deviceData, logSumExp.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
     } else if (headDimension == 64 && tileBr == 32 && tileBc == 32) {
         const size_t sharedBytes = forwardSharedBytesHalf(headDimension, tileBr, tileBc);
@@ -1072,7 +1531,11 @@ void CudaFlashAttention::backwardMultiHead(const CudaMatrix& query, const CudaMa
     } else if (headDimension == 16 && tileBr == 32 && tileBc == 32) {
         launchQueryFixed(CudaFlashAttentionBackwardQueryFixedEntry<16, 32, 32>);
     } else if (headDimension == 64 && tileBr == 64 && tileBc == 64) {
-        launchQueryFixed(CudaFlashAttentionBackwardQueryFixedEntry<64, 64, 64>);
+        constexpr int wmmaThreads = 256;
+        ensureDynamicShared(CudaFlashAttentionBackwardQueryWmma64Entry, querySharedBytes);
+        CudaFlashAttentionBackwardQueryWmma64Entry<<<queryGrid, wmmaThreads, querySharedBytes, CudaMatmul::activeStream()>>>(
+            query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, outGradient.buffer.deviceData, logSumExp.buffer.deviceData, deltaWorkspace.buffer.deviceData, queryGradient.buffer.deviceData, keyGradient.buffer.deviceData, valueGradient.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
+        CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaFlashAttentionBackwardQueryWmma64Entry launch");
     } else if (headDimension == 64 && tileBr == 32 && tileBc == 32) {
         launchQueryFixed(CudaFlashAttentionBackwardQueryFixedEntry<64, 32, 32>);
     } else if (headDimension == 64 && tileBr == 16 && tileBc == 16) {

@@ -70,7 +70,7 @@ model.train(source, epochs, logEvery, batchSize, gradAccum);
 ```cpp
 LanguageModel model(vocab, embed, maxPos, Adam(0.001f), blocks, heads);
 model.enableCuda();
-model.enableCudaTrain();  // pack budget, AMP, int8 Adam, ckpt=Selective
+model.enableCudaTrain();  // pack budget, AMP, int8 Adam, ckpt=Off (peak tok/s)
 model.setCudaPreferFlashAttention(true);
 model.train(source, epochs, 1, batchSize, gradAccum);
 ```
@@ -78,14 +78,14 @@ model.train(source, epochs, 1, batchSize, gradAccum);
 
 | Knob                | Default / notes                                                                                                                                                  |
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Pack budget         | `applyVramPackBudget` (default **40%** of usable free VRAM, **≥20%** display floor, slack 1.4×, cap **4096** cols). Override with `setCudaMaxPackedColumns`.     |
+| Pack budget         | `applyVramPackBudget` (default **70%** of usable free VRAM, **≥20%** display floor, slack 1.2×, cap **4096** cols). Override with `setCudaMaxPackedColumns`.     |
 | Flash attention     | Prefer on for train/forward                                                                                                                                      |
 | AMP                 | FP16 GEMMs + saturated FP16 block-input checkpoints; loss scale when embed≥256                                                                                   |
 | Adam                | Int8 moments on GPU; or `setCudaPreferCpuAdamOffload(true)` (host `m`/`v`)                                                                                       |
 | Muon                | `setCudaPreferMuon(true)` — Newton–Schulz on 2D hidden weights; Adam on embed / norms / biases / head                                                            |
 | Large-model offload | `preferFp16GpuWeights` + `preferHostGradients` + `preferHostSgd` — FP16 weights on GPU, FP32 masters/grads on host, SGD (no Adam `m`/`v`). Used by the 4B probe. |
 | Weight tying        | On — LM head shares token embedding                                                                                                                              |
-| Activation ckpt     | `Off` / `Full` / `Selective` (default): keep FFN acts, recompute Attn; `enableActivationCheckpointing(bool)` maps true→Selective, false→Off                      |
+| Activation ckpt     | Default **Off** (retain act scratch across steps). `Selective`/`Full` when VRAM is tight; `enableActivationCheckpointing(bool)` maps true→Selective, false→Off   |
 | CUDA graphs         | Only when checkpointing is **Off** and shapes are stable (`preferTrainGraph`)                                                                                    |
 
 
@@ -108,43 +108,38 @@ Numbers below are **fresh synthetic packed-train probes** (`probeCudaPackedTrain
 | ----- | ------------------------------------------------------------------ |
 | Shape | vocab 4k, d=768, L=8, H=12, maxPos=512                             |
 | Flags | Selective ckpt, FP16 AMP, int8 Adam, flash, auto pack (~4096 cols) |
-| Probe | **~20k** tok/s                                                     |
+| Probe | **~18–20k** tok/s                                                  |
 
 
 
 
 ### ~97M — 12×768 (consumer VRAM proof)
 
-`runScale100M` — full multi-epoch train on `sera_scale.jsonl` (tied embed, no LoRA). Headline probe below matches Adam + Selective @ fixed pack (not Muon).
+`runScale100M` — full multi-epoch train on `sera_scale.jsonl` (tied embed, no LoRA). Headline probe is Adam with **ckpt=off** (act scratch retained; graphs on).
 
 
-|                                |                                                                                                                                                                    |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Model                          | **~97M** (tied), vocab 16k, d=768, L=12, H=12, maxTok=512                                                                                                          |
-| Flags                          | Selective ckpt, FP16 AMP, int8 Adam, flash                                                                                                                         |
-| Pack                           | Forced `maxPackCols=3840` (auto budget is more conservative ≈2.5–2.7k cols)                                                                                        |
-| Probe (Adam + Selective @3840) | **~12.5k** tok/s                                                                                                                                                   |
-| Historical note                | An earlier run hit **~21.8k** probe / **~19k** epoch tok/s before safer pack-budget defaults and later train-path work; treat **~12.5k** as current Adam baseline. |
-
-
+|                         |                                                                                                    |
+| ----------------------- | -------------------------------------------------------------------------------------------------- |
+| Model                   | **~97M** (tied), vocab 16k, d=768, L=12, H=12, maxTok=512                                          |
+| Flags                   | ckpt=off, FP16 AMP, int8 Adam, flash (WMMA TC hot path), train graph on                            |
+| Pack                    | auto budget (~3840–4096 cols on 16 GB)                                                             |
+| Probe (Adam + ckpt=off) | **~25–26k** tok/s                                                                                  |
+| Note                    | Selective is slower here (~11–13k) because Attn is recomputed each layer — use when VRAM is tight. |
 
 
 #### Adam vs Muon × checkpoint (same 12×768 shape)
 
-Fresh one-shot models (`runMuonThroughputProbe`), FP16 AMP + int8 Adam + flash, graphs off:
+Fresh one-shot models (`runMuonThroughputProbe`), FP16 AMP + int8 Adam + flash:
 
 
-| Optimizer | ckpt      | pack         | tok/s      |
-| --------- | --------- | ------------ | ---------- |
-| Adam      | Off       | auto (~1856) | ~9.4k      |
-| Adam      | Selective | auto (~2688) | ~10.7k     |
-| Adam      | Selective | **3840**     | **~12.5k** |
-| Muon      | Off       | auto (~1856) | ~8.2k      |
-| Muon      | Selective | auto (~2624) | ~8.7k      |
-| Muon      | Selective | **3840**     | ~11.2k     |
+| Optimizer | ckpt      | pack              | tok/s       |
+| --------- | --------- | ----------------- | ----------- |
+| Adam      | **Off**   | auto / ~3840–4096 | **~25–26k** |
+| Adam      | Selective | ~3840             | ~11–13k     |
+| Muon      | Off / Sel | auto / ~3840      | lower (NS)  |
 
 
-Muon adds Newton–Schulz cost on hidden weights; comparing a Muon probe to an old Adam README number looks like a 2× “regression” even when Adam is unchanged.
+Muon adds Newton–Schulz cost on hidden weights; comparing a Muon probe to an Adam README number looks like a 2× “regression” even when Adam is unchanged.
 
 Full SERA epoch numbers still need `sera_scale.jsonl` + `runScale100M=true`.
 
@@ -175,4 +170,6 @@ cd sentinel
 ..\x64\Release\sentinel.exe
 ```
 
-Expect smokes/parities OK, **speed 768 ~20k** tok/s, **scale-100M probe ~12k** (Adam @3840).
+Expect smokes/parities OK, **speed 768 ~18–20k** tok/s, **scale-100M probe ~25k** (Adam ckpt=off, WMMA flash).
+
+FlashAttention `headDim=64` / tiles `64×64` uses CUDA WMMA Tensor Cores (toolkit only — no cuDNN). Toggle `runWmmaFaVerify` in `main.cpp` for a quick parity + probe.

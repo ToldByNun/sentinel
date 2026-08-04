@@ -150,7 +150,7 @@ public:
     size_t parameterElementCount() const;
 
     /// <summary>recompute VRAM pack budget on the device train mirror</summary>
-    void applyCudaVramPackBudget(float freeFraction = 0.60f, size_t safetyReserveBytes = 2560ull * 1024ull * 1024ull);
+    void applyCudaVramPackBudget(float freeFraction = 0.70f, size_t safetyReserveBytes = 2560ull * 1024ull * 1024ull);
 
     /// <summary>capture fixed-shape CUDA graph for packed microsteps when possible</summary>
     void setCudaPreferTrainGraph(bool enabled);
