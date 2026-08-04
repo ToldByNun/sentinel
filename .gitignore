@@ -95,6 +95,7 @@ _deps/
 # App / dataset / local runs / checkpoints
 SERA-Data/
 *.snlm
+*.safetensors
 sera_demo.snlm
 sera_100m.snlm
 checkpoint_smoke.snlm

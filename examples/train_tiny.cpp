@@ -58,12 +58,21 @@ int main(int argc, char** argv) {
     LanguageModelDataset emptyTest;
     model.train(train, emptyTest, /*epochs=*/8, /*logEveryEpochs=*/2, /*batchSize=*/4, /*gradientAccumulationSteps=*/1);
     model.saveCheckpoint(checkpointPath, /*includeOptimizer=*/false);
+    const std::string safePath = checkpointPath + ".safetensors";
+    model.saveSafeTensors(safePath);
+
+    LanguageModel roundtrip(tokenizer.vocabSize(), embed, maxPos, Adam(3e-3f), blocks, heads);
+    if (CudaMatmul::isAvailable())
+        roundtrip.enableCuda();
+    roundtrip.loadCheckpoint(safePath);
+    const float safeLoss = roundtrip.averageLoss(train);
 
     const float loss = model.averageLoss(train);
     std::cout << "train_tiny: examples=" << train.size()
               << " vocab=" << tokenizer.vocabSize()
               << " params≈" << (model.parameterElementCount() / 1.0e6) << "M"
               << " avgLoss=" << loss
-              << " wrote " << checkpointPath << "\n";
+              << " safeLoss=" << safeLoss
+              << " wrote " << checkpointPath << " + " << safePath << "\n";
     return 0;
 }

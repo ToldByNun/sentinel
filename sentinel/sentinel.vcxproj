@@ -30,6 +30,7 @@
     <ClCompile Include="NeuralNet\Data\LanguageModelChunkSource.cpp" />
     <ClCompile Include="NeuralNet\Data\LanguageModelDataset.cpp" />
     <ClCompile Include="NeuralNet\Initializers\UniformInit.cpp" />
+    <ClCompile Include="NeuralNet\IO\SafeTensors.cpp" />
     <ClCompile Include="NeuralNet\Utils\TextUtil.cpp" />
     <ClCompile Include="NeuralNet\Layers\Dense.cpp" />
     <ClCompile Include="NeuralNet\Layers\Dropout.cpp" />

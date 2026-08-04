@@ -188,6 +188,12 @@ public:
     /// <summary>load weights (+ Adam moments if present) from a binary checkpoint file</summary>
     void loadCheckpoint(const std::string& path);
 
+    /// <summary>export weights as safetensors (F32); no optimizer state</summary>
+    void saveSafeTensors(const std::string& path);
+
+    /// <summary>import weights from safetensors (F32); architecture must already match</summary>
+    void loadSafeTensors(const std::string& path);
+
     /// <summary>save/load roundtrip smoke on a tiny model</summary>
     static void runCheckpointSmokeDemo();
 

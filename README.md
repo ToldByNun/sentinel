@@ -143,9 +143,13 @@ model.train(source, epochs, 1, batchSize, gradAccum);
 model.setActivationCheckpointMode(ActivationCheckpointMode::Selective); // or Full / Off
 model.saveCheckpoint("run.snlm", true);
 model.loadCheckpoint("run.snlm");
+model.saveSafeTensors("run.safetensors");   // weights only, HF-compatible container
+model.loadSafeTensors("run.safetensors");   // or loadCheckpoint("*.safetensors")
 ```
 
-Checkpoint file: `SNLM` (weights + optional Adam; int8 moments stored as FP32).
+Checkpoint files:
+- **`.snlm`** — native `SNLM` (weights + optional Adam/Muon)
+- **`.safetensors`** — zero-dep F32 safetensors export (`token_embedding.weight`, `blocks.{i}.attn.*`, `ffn.*`, `final_norm.weight`, `lm_head.*`); metadata carries arch dims / `tie_embedding`
 
 ## Measured throughput (RTX 5070 Ti 16 GB)
 

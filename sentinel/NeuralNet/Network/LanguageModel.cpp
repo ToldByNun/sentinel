@@ -18,6 +18,7 @@
 #include "../Cuda/CudaMatmul.hpp"
 #include "../Cuda/CudaMuon.hpp"
 #include "../Initializers/UniformInit.hpp"
+#include "../IO/SafeTensors.hpp"
 #include "../Losses/CrossEntropy.hpp"
 #include "../Tokenizer/BPETokenizer.hpp"
 #include "../Utils/SmokeLog.hpp"
@@ -1119,6 +1120,16 @@ void LanguageModel::loadCheckpoint(const std::string& path) {
     if (path.empty()) throw std::invalid_argument("LanguageModel::loadCheckpoint empty path");
     if (this->blocks.empty()) throw std::logic_error("LanguageModel::loadCheckpoint no blocks");
 
+    // Extension / magic dispatch: .safetensors or safetensors header → SafeTensors path.
+    const auto endsWith = [](const std::string& value, const char* suffix) -> bool {
+        const size_t n = std::char_traits<char>::length(suffix);
+        return value.size() >= n && value.compare(value.size() - n, n, suffix) == 0;
+    };
+    if (endsWith(path, ".safetensors") || endsWith(path, ".safe") || SafeTensors::isSafeTensorsFile(path)) {
+        this->loadSafeTensors(path);
+        return;
+    }
+
     std::ifstream in(path, std::ios::binary);
     if (!in) throw std::runtime_error("LanguageModel::loadCheckpoint cannot open file");
 
@@ -1264,6 +1275,120 @@ void LanguageModel::loadCheckpoint(const std::string& path) {
     }
 }
 
+void LanguageModel::saveSafeTensors(const std::string& path) {
+    if (path.empty()) throw std::invalid_argument("LanguageModel::saveSafeTensors empty path");
+    if (this->blocks.empty()) throw std::logic_error("LanguageModel::saveSafeTensors no blocks");
+
+    if (this->cudaEnabled() && this->device != nullptr && !this->deviceStale)
+        this->device->downloadTo(*this);
+    else if (this->cudaTrainEnabled() && this->device != nullptr)
+        this->device->downloadTo(*this);
+
+    SafeTensors::File file;
+    file.metadata["format"] = "sentinel";
+    file.metadata["arch"] = "causal_lm_rope_swiglu";
+    file.metadata["vocab_size"] = std::to_string(this->tokenEmbedding.vocabSize());
+    file.metadata["embedding_dim"] = std::to_string(this->tokenEmbedding.embeddingDim());
+    file.metadata["max_position"] = std::to_string(this->maximumPositionCount);
+    file.metadata["block_count"] = std::to_string(this->blocks.size());
+    file.metadata["head_count"] = std::to_string(this->blocks[0].attention.headCount);
+    file.metadata["tie_embedding"] = this->tieEmbeddingProjection ? "1" : "0";
+
+    SafeTensors::putMatrix(file, "token_embedding.weight", this->tokenEmbedding.weight);
+    for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+        const TransformerBlock& block = this->blocks[blockIndex];
+        const std::string prefix = "blocks." + std::to_string(blockIndex) + ".";
+        SafeTensors::putMatrix(file, prefix + "attn.q_proj.weight", block.attention.queryWeight);
+        SafeTensors::putMatrix(file, prefix + "attn.k_proj.weight", block.attention.keyWeight);
+        SafeTensors::putMatrix(file, prefix + "attn.v_proj.weight", block.attention.valueWeight);
+        SafeTensors::putMatrix(file, prefix + "attn.o_proj.weight", block.attention.outputWeight);
+        SafeTensors::putMatrix(file, prefix + "attn_norm.weight", block.attentionNorm.gamma);
+        SafeTensors::putMatrix(file, prefix + "ffn_norm.weight", block.feedForwardNorm.gamma);
+        SafeTensors::putMatrix(file, prefix + "ffn.gate_proj.weight", block.feedForward.gateWeight);
+        SafeTensors::putMatrix(file, prefix + "ffn.gate_proj.bias", block.feedForward.gateBias);
+        SafeTensors::putMatrix(file, prefix + "ffn.up_proj.weight", block.feedForward.upWeight);
+        SafeTensors::putMatrix(file, prefix + "ffn.up_proj.bias", block.feedForward.upBias);
+        SafeTensors::putMatrix(file, prefix + "ffn.down_proj.weight", block.feedForward.downWeight);
+        SafeTensors::putMatrix(file, prefix + "ffn.down_proj.bias", block.feedForward.downBias);
+    }
+    SafeTensors::putMatrix(file, "final_norm.weight", this->finalNorm.gamma);
+    if (!this->tieEmbeddingProjection)
+        SafeTensors::putMatrix(file, "lm_head.weight", this->outputProjection.weight);
+    SafeTensors::putMatrix(file, "lm_head.bias", this->outputProjection.bias);
+
+    SafeTensors::save(path, file);
+}
+
+void LanguageModel::loadSafeTensors(const std::string& path) {
+    if (path.empty()) throw std::invalid_argument("LanguageModel::loadSafeTensors empty path");
+    if (this->blocks.empty()) throw std::logic_error("LanguageModel::loadSafeTensors no blocks");
+
+    const SafeTensors::File file = SafeTensors::load(path);
+
+    auto metaInt = [&](const char* key, int fallback) -> int {
+        const auto it = file.metadata.find(key);
+        if (it == file.metadata.end()) return fallback;
+        return std::stoi(it->second);
+    };
+
+    const int vocabularySize = metaInt("vocab_size", this->tokenEmbedding.vocabSize());
+    const int embeddingDim = metaInt("embedding_dim", this->tokenEmbedding.embeddingDim());
+    const int maximumPositionCount = metaInt("max_position", this->maximumPositionCount);
+    const int blockCount = metaInt("block_count", static_cast<int>(this->blocks.size()));
+    const int headCount = metaInt("head_count", this->blocks[0].attention.headCount);
+    if (vocabularySize != this->tokenEmbedding.vocabSize()
+        || embeddingDim != this->tokenEmbedding.embeddingDim()
+        || maximumPositionCount != this->maximumPositionCount
+        || blockCount != static_cast<int>(this->blocks.size())
+        || headCount != this->blocks[0].attention.headCount)
+        throw std::runtime_error("LanguageModel::loadSafeTensors architecture mismatch");
+
+    const auto tieIt = file.metadata.find("tie_embedding");
+    const bool tieWeights = tieIt == file.metadata.end()
+        ? this->tieEmbeddingProjection
+        : (tieIt->second == "1" || tieIt->second == "true");
+
+    this->tokenEmbedding.weight = SafeTensors::requireMatrix(
+        file, "token_embedding.weight",
+        static_cast<size_t>(vocabularySize), static_cast<size_t>(embeddingDim));
+
+    for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+        TransformerBlock& block = this->blocks[blockIndex];
+        const std::string prefix = "blocks." + std::to_string(blockIndex) + ".";
+        const size_t d = static_cast<size_t>(embeddingDim);
+        block.attention.queryWeight = SafeTensors::requireMatrix(file, prefix + "attn.q_proj.weight", block.attention.queryWeight.rows, block.attention.queryWeight.cols);
+        block.attention.keyWeight = SafeTensors::requireMatrix(file, prefix + "attn.k_proj.weight", block.attention.keyWeight.rows, block.attention.keyWeight.cols);
+        block.attention.valueWeight = SafeTensors::requireMatrix(file, prefix + "attn.v_proj.weight", block.attention.valueWeight.rows, block.attention.valueWeight.cols);
+        block.attention.outputWeight = SafeTensors::requireMatrix(file, prefix + "attn.o_proj.weight", block.attention.outputWeight.rows, block.attention.outputWeight.cols);
+        block.attentionNorm.gamma = SafeTensors::requireMatrixFlexible(file, prefix + "attn_norm.weight", d, 1);
+        block.feedForwardNorm.gamma = SafeTensors::requireMatrixFlexible(file, prefix + "ffn_norm.weight", d, 1);
+        block.feedForward.gateWeight = SafeTensors::requireMatrix(file, prefix + "ffn.gate_proj.weight", block.feedForward.gateWeight.rows, block.feedForward.gateWeight.cols);
+        block.feedForward.gateBias = SafeTensors::requireMatrixFlexible(file, prefix + "ffn.gate_proj.bias", block.feedForward.gateBias.rows, 1);
+        block.feedForward.upWeight = SafeTensors::requireMatrix(file, prefix + "ffn.up_proj.weight", block.feedForward.upWeight.rows, block.feedForward.upWeight.cols);
+        block.feedForward.upBias = SafeTensors::requireMatrixFlexible(file, prefix + "ffn.up_proj.bias", block.feedForward.upBias.rows, 1);
+        block.feedForward.downWeight = SafeTensors::requireMatrix(file, prefix + "ffn.down_proj.weight", block.feedForward.downWeight.rows, block.feedForward.downWeight.cols);
+        block.feedForward.downBias = SafeTensors::requireMatrixFlexible(file, prefix + "ffn.down_proj.bias", block.feedForward.downBias.rows, 1);
+    }
+
+    this->finalNorm.gamma = SafeTensors::requireMatrixFlexible(file, "final_norm.weight", static_cast<size_t>(embeddingDim), 1);
+    this->tieEmbeddingProjection = tieWeights;
+    if (tieWeights) {
+        this->outputProjection.weight = Matrix();
+        this->projectionWeightState = AdamState{};
+    } else {
+        this->outputProjection.weight = SafeTensors::requireMatrix(
+            file, "lm_head.weight",
+            static_cast<size_t>(vocabularySize), static_cast<size_t>(embeddingDim));
+    }
+    this->outputProjection.bias = SafeTensors::requireMatrixFlexible(
+        file, "lm_head.bias", static_cast<size_t>(vocabularySize), 1);
+
+    if (this->device != nullptr) {
+        this->device->uploadFrom(*this);
+        this->deviceStale = false;
+    }
+}
+
 void LanguageModel::runCheckpointSmokeDemo() {
     LanguageModel model(64, 32, 16, Adam(0.001f), 1, 2);
     model.enableCuda();
@@ -1306,7 +1431,20 @@ void LanguageModel::runCheckpointSmokeDemo() {
     SmokeLog::result("LanguageModel checkpoint", "path=%s  logitsDiff=%.2e  timeStep=%d  optOk=%s",
         path.c_str(), maximumDifference, restored.optimizer.timeStep, optimizerMatch ? "yes" : "no");
 
+    const std::string safePath = "checkpoint_smoke.safetensors";
+    model.saveSafeTensors(safePath);
+    LanguageModel fromSafe(64, 32, 16, Adam(0.001f), 1, 2);
+    if (model.cudaEnabled())
+        fromSafe.enableCuda();
+    fromSafe.loadCheckpoint(safePath); // extension dispatch
+    Matrix afterSafe = fromSafe.forward(tokenIds);
+    float safeDiff = 0.0f;
+    for (size_t index = 0; index < before.data.size(); ++index)
+        safeDiff = (std::max)(safeDiff, std::fabs(before.data[index] - afterSafe.data[index]));
+    SmokeLog::result("LanguageModel safetensors", "path=%s  logitsDiff=%.2e", safePath.c_str(), safeDiff);
+
     std::remove(path.c_str());
+    std::remove(safePath.c_str());
 }
 
 void LanguageModel::runStreamingSmokeDemo() {
