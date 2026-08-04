@@ -216,7 +216,8 @@
     </Link>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
-      <CodeGeneration>compute_120,sm_120</CodeGeneration>
+      <!-- GeForce 20/30/40/50: Turing→Blackwell (CUDA 13 floor is sm_75) -->
+      <CodeGeneration>compute_75,sm_75;compute_80,sm_80;compute_86,sm_86;compute_89,sm_89;compute_120,sm_120</CodeGeneration>
       <AdditionalOptions>-Xcompiler "/openmp" %(AdditionalOptions)</AdditionalOptions>
     </CudaCompile>
     <Manifest>
@@ -241,7 +242,8 @@
     </Link>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
-      <CodeGeneration>compute_120,sm_120</CodeGeneration>
+      <!-- GeForce 20/30/40/50: Turing→Blackwell (CUDA 13 floor is sm_75) -->
+      <CodeGeneration>compute_75,sm_75;compute_80,sm_80;compute_86,sm_86;compute_89,sm_89;compute_120,sm_120</CodeGeneration>
       <AdditionalOptions>-Xcompiler "/openmp" %(AdditionalOptions)</AdditionalOptions>
     </CudaCompile>
     <Manifest>

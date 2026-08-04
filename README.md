@@ -4,14 +4,29 @@ C++/CUDA framework for **full-train** causal LMs (no LoRA): CPU/OpenMP plus a de
 
 ## Requirements
 
-- Windows, Visual Studio 2022+ (`v145`)
-- CUDA Toolkit (project targets **v13.3**)
-- NVIDIA GPU — vcxproj currently builds `sm_120` (RTX 50-series); change `CodeGeneration` for other arches (intended floor: Turing `sm_75`+)
+- C++20 compiler (MSVC, clang, or gcc) + **CMake ≥ 3.24**, or Visual Studio 2022+ (`v145`)
+- CUDA Toolkit (**13.x**; project was developed against v13.3)
+- NVIDIA GPU — GeForce **20 / 30 / 40 / 50** series (`sm_75` / `sm_80`+`sm_86` / `sm_89` / `sm_120`). CUDA 13 floor is Turing.
 - Data (not included): `SERA-Data/sera_best_subset` (HF Arrow) and/or `*.jsonl`
 
 
 
 ## Build & run
+
+### CMake (recommended)
+
+```bat
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release -j
+cd sentinel
+..\build\bin\sentinel.exe
+```
+
+On Ninja/Make the same `build/bin/sentinel` path is used.  
+Fast local rebuild for your GPU only: `-DSENTINEL_CUDA_ARCHITECTURES=native`.  
+Default fat binary arches: `75;80;86;89;120` (RTX 20 / 30 / 40 / 50).
+
+### MSBuild / Visual Studio
 
 ```bat
 msbuild sentinel\sentinel.vcxproj /p:Configuration=Release /p:Platform=x64
@@ -164,10 +179,13 @@ Smaller smoke: `CudaLanguageModel::runConsumerVramDemo()` (~8k/256/4L).
 ## Verify
 
 ```bat
+:: CMake
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release -j
+:: or MSBuild: msbuild sentinel\sentinel.vcxproj /p:Configuration=Release /p:Platform=x64
 :: in main.cpp: runSmallSuite = true  (other scale flags false)
-msbuild sentinel\sentinel.vcxproj /p:Configuration=Release /p:Platform=x64
 cd sentinel
-..\x64\Release\sentinel.exe
+..\build\bin\sentinel.exe
 ```
 
 Expect smokes/parities OK, **speed 768 ~18–20k** tok/s, **scale-100M probe ~25k** (Adam ckpt=off, WMMA flash).

@@ -69,6 +69,8 @@
 # Local dumps / logs / tee output (never commit)
 *.txt
 !**/README.txt
+!CMakeLists.txt
+!**/CMakeLists.txt
 build_out.txt
 sentinel/_*.txt
 sentinel/scale*.log*
@@ -76,6 +78,17 @@ sentinel/sera_*.log*
 sentinel/cpu_*.log*
 sentinel/fa_*.txt
 sentinel/msbuild_*.log
+
+# CMake
+build/
+cmake-build-*/
+out/
+CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+_deps/
 
 # App / dataset / local runs / checkpoints
 SERA-Data/
