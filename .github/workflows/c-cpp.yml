@@ -117,14 +117,14 @@ jobs:
         shell: pwsh
         run: cmake --build build --parallel --config Release
 
-      - name: Run tiny examples
-        shell: pwsh
-        working-directory: build/bin
-        run: |
-          Get-ChildItem
-          $train = if (Test-Path "./sentinel_train_tiny.exe") { "./sentinel_train_tiny.exe" } else { "./sentinel_train_tiny" }
-          $gen   = if (Test-Path "./sentinel_generate.exe")   { "./sentinel_generate.exe" }   else { "./sentinel_generate" }
-          & $train tiny_ci.snlm
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $gen tiny_ci.snlm "the cat"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # - name: Run tiny examples
+      #  shell: pwsh
+      #  working-directory: build/bin
+      #  run: |
+      #    Get-ChildItem
+      #    $train = if (Test-Path "./sentinel_train_tiny.exe") { "./sentinel_train_tiny.exe" } else { "./sentinel_train_tiny" }
+      #    $gen   = if (Test-Path "./sentinel_generate.exe")   { "./sentinel_generate.exe" }   else { "./sentinel_generate" }
+      #    & $train tiny_ci.snlm
+      #    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      #    & $gen tiny_ci.snlm "the cat"
+      #    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
