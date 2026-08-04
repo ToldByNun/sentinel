@@ -1,11 +1,9 @@
 name: CMake C++ CUDA CI
-
 on:
   push:
     branches: [ "main", "master" ]
   pull_request:
     branches: [ "main", "master" ]
-
 jobs:
   build:
     strategy:
@@ -14,14 +12,11 @@ jobs:
         include:
           - os: ubuntu-latest
             name: Linux
-
           - os: windows-latest
             name: Windows
-
     runs-on: ${{ matrix.os }}
     name: Build (${{ matrix.name }})
     timeout-minutes: 45
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -31,24 +26,20 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-
           wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
-
           sudo apt-get update
-
-          sudo apt-get install -y \
-            cuda-toolkit-13-0
-
+          sudo apt-get install -y cuda-toolkit-13-0
           echo "/usr/local/cuda/bin" >> $GITHUB_PATH
 
-      - name: Install CUDA (Windows)
+      - name: Install CUDA 13 (Windows)
         if: runner.os == 'Windows'
         shell: powershell
         run: |
-          choco install cuda -y
-          $cudaPath = (Get-ChildItem "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.*" | Select-Object -First 1).FullName
+          $url = "https://developer.download.nvidia.com/compute/cuda/13.0.0/network_installers/cuda_13.0.0_windows_network.exe"
+          Invoke-WebRequest -Uri $url -OutFile cuda_installer.exe
+          Start-Process -FilePath ".\cuda_installer.exe" -ArgumentList "-s" -Wait -NoNewWindow
+          $cudaPath = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0"
           echo "CUDA_PATH=$cudaPath" >> $env:GITHUB_ENV
           echo "$cudaPath\bin" >> $env:GITHUB_PATH
 
@@ -61,10 +52,10 @@ jobs:
 
       - name: CUDA Version
         shell: bash
-        run: |
-          nvcc --version
+        run: nvcc --version
 
       - name: Configure CMake
+        shell: bash
         run: |
           cmake \
             -S . \
@@ -73,7 +64,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DSENTINEL_CUDA_ARCHITECTURES=75
 
-
       - name: Build
+        shell: bash          # ← Auch hier konsistent
         run: |
           cmake --build build --parallel
