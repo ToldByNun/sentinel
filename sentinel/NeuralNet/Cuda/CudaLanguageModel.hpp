@@ -493,7 +493,7 @@ public:
     /// set maxPackedColumns from cudaMemGetInfo free memory (no-op if maxPackedColumnsManual)
     /// reserves static train overhead + WDDM/display safety headroom, then applies freeFraction
     /// </summary>
-    void applyVramPackBudget(float freeFraction = 0.40f, size_t safetyReserveBytes = 2560ull * 1024ull * 1024ull);
+    void applyVramPackBudget(float freeFraction = 0.60f, size_t safetyReserveBytes = 2560ull * 1024ull * 1024ull);
 
     /// <summary>largest pack example count for a fixed segment length under current maxPackedColumns</summary>
     int maxPackExamplesForSegment(int segmentLength) const;

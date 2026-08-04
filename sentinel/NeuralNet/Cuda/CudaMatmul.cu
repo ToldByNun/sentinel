@@ -393,7 +393,7 @@ bool CudaMatrix::multiplyBiasInto(const CudaMatrix& left, const CudaMatrix& righ
     return false;
 }
 
-void CudaMatrix::multiplyPointersInto(const float* left, size_t leftRows, size_t leftCols, const float* right, size_t rightRows, size_t rightCols, float* out, bool transposeLeft, bool transposeRight) {
+void CudaMatrix::multiplyPointersInto(const float* left, size_t leftRows, size_t leftCols, const float* right, size_t rightRows, size_t rightCols, float* out, bool transposeLeft, bool transposeRight, float beta) {
     if (left == nullptr || right == nullptr || out == nullptr) throw std::invalid_argument("CudaMatrix::multiplyPointersInto null pointer");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaMatrix::multiplyPointersInto no CUDA device");
     if (leftRows == 0 || leftCols == 0 || rightRows == 0 || rightCols == 0) throw std::invalid_argument("CudaMatrix::multiplyPointersInto empty shape");
@@ -404,7 +404,7 @@ void CudaMatrix::multiplyPointersInto(const float* left, size_t leftRows, size_t
     const size_t rightShared = transposeRight ? rightCols : rightRows;
     if (sharedCount != rightShared) throw std::invalid_argument("CudaMatrix::multiplyPointersInto shape mismatch");
 
-    CudaMatmul::launchSharedMemoryMatmul(left, right, out, static_cast<int>(outRows), static_cast<int>(outCols), static_cast<int>(sharedCount), transposeLeft, transposeRight, nullptr);
+    CudaMatmul::launchSharedMemoryMatmul(left, right, out, static_cast<int>(outRows), static_cast<int>(outCols), static_cast<int>(sharedCount), transposeLeft, transposeRight, nullptr, beta);
 }
 
 void CudaMatrix::multiplyIntoTimed(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& out, double& kernelMilliseconds, bool transposeLeft, bool transposeRight) {
@@ -418,7 +418,7 @@ void CudaMatrix::multiplyIntoTimed(const CudaMatrix& left, const CudaMatrix& rig
     if (leftCols != rightRows) throw std::invalid_argument("CudaMatrix::multiplyIntoTimed shape mismatch");
 
     out.ensureSize(leftRows, rightCols);
-    CudaMatmul::launchSharedMemoryMatmul(left.buffer.deviceData, right.buffer.deviceData, out.buffer.deviceData, static_cast<int>(leftRows), static_cast<int>(rightCols), static_cast<int>(leftCols), transposeLeft, transposeRight, &kernelMilliseconds);
+    CudaMatmul::launchSharedMemoryMatmul(left.buffer.deviceData, right.buffer.deviceData, out.buffer.deviceData, static_cast<int>(leftRows), static_cast<int>(rightCols), static_cast<int>(leftCols), transposeLeft, transposeRight, &kernelMilliseconds, 0.0f);
 }
 
 double CudaMatmulTiming::totalMilliseconds() const {
@@ -474,7 +474,7 @@ void CudaMatmul::throwIfCublasLtFailed(int status, const char* operationName) {
     throw std::runtime_error(std::string(operationName) + ": cuBLASLt status " + std::to_string(status));
 }
 
-__device__ void CudaMatmul::runSharedMemoryMatmul(const float* left, const float* right, float* out, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight) {
+__device__ void CudaMatmul::runSharedMemoryMatmul(const float* left, const float* right, float* out, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, float beta) {
     __shared__ float leftTile[CudaMatmul::tileSize][CudaMatmul::tileSize];
     __shared__ float rightTile[CudaMatmul::tileSize][CudaMatmul::tileSize];
 
@@ -515,14 +515,18 @@ __device__ void CudaMatmul::runSharedMemoryMatmul(const float* left, const float
 
     if (outputRow >= rowCount) return;
     if (outputColumn >= columnCount) return;
-    out[outputRow * columnCount + outputColumn] = accumulator;
+    const int outputIndex = outputRow * columnCount + outputColumn;
+    if (beta == 0.0f)
+        out[outputIndex] = accumulator;
+    else
+        out[outputIndex] = accumulator + beta * out[outputIndex];
 }
 
-__global__ void CudaMatmulSharedMemoryEntry(const float* left, const float* right, float* out, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight) {
-    CudaMatmul::runSharedMemoryMatmul(left, right, out, rowCount, columnCount, sharedCount, transposeLeft, transposeRight);
+__global__ void CudaMatmulSharedMemoryEntry(const float* left, const float* right, float* out, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, float beta) {
+    CudaMatmul::runSharedMemoryMatmul(left, right, out, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, beta);
 }
 
-bool CudaMatmul::launchCublasLtMatmul(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds, const float* deviceBiasOrNull) {
+bool CudaMatmul::launchCublasLtMatmul(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds, const float* deviceBiasOrNull, float beta) {
     if (!ensureCublasLtHandle()) return false;
 
     CublasLtGemmState& state = cublasLtGemmState();
@@ -598,7 +602,7 @@ bool CudaMatmul::launchCublasLtMatmul(const float* deviceLeft, const float* devi
         cacheEntry->lastUsed = state.descCacheClock;
 
         const float alpha = 1.0f;
-        const float beta = 0.0f;
+        const float cublasBeta = beta;
         const cublasStatus_t cachedStatus = cublasLtMatmul(
             state.handle,
             cacheEntry->matmulDesc,
@@ -607,7 +611,7 @@ bool CudaMatmul::launchCublasLtMatmul(const float* deviceLeft, const float* devi
             cacheEntry->layoutLeft,
             deviceRight,
             cacheEntry->layoutRight,
-            &beta,
+            &cublasBeta,
             deviceOut,
             cacheEntry->layoutOut,
             deviceOut,
@@ -698,7 +702,7 @@ bool CudaMatmul::launchCublasLtMatmul(const float* deviceLeft, const float* devi
     }
 
     const float alpha = 1.0f;
-    const float beta = 0.0f;
+    const float cublasBeta = beta;
     void* workspacePointer = state.workspace.deviceData;
     const size_t workspaceSize = state.workspace.capacityBytes;
 
@@ -762,7 +766,7 @@ bool CudaMatmul::launchCublasLtMatmul(const float* deviceLeft, const float* devi
         }
     }
 
-    const cublasStatus_t matmulStatus = cublasLtMatmul(state.handle, matmulDesc, &alpha, deviceLeft, layoutLeft, deviceRight, layoutRight, &beta, deviceOut, layoutOut, deviceOut, layoutOut, algoPointer, workspacePointer, workspaceSize, CudaMatmul::activeStream());
+    const cublasStatus_t matmulStatus = cublasLtMatmul(state.handle, matmulDesc, &alpha, deviceLeft, layoutLeft, deviceRight, layoutRight, &cublasBeta, deviceOut, layoutOut, deviceOut, layoutOut, algoPointer, workspacePointer, workspaceSize, CudaMatmul::activeStream());
 
     if (matmulStatus != CUBLAS_STATUS_SUCCESS) {
         if (kernelStartEvent != nullptr) cudaEventDestroy(kernelStartEvent);
@@ -796,12 +800,12 @@ bool CudaMatmul::launchCublasLtMatmul(const float* deviceLeft, const float* devi
     return true;
 }
 
-void CudaMatmul::launchSharedMemoryMatmulKernel(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds) {
+void CudaMatmul::launchSharedMemoryMatmulKernel(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds, float beta) {
     const dim3 blockDimension(CudaMatmul::tileSize, CudaMatmul::tileSize);
     const dim3 gridDimension((columnCount + CudaMatmul::tileSize - 1) / CudaMatmul::tileSize, (rowCount + CudaMatmul::tileSize - 1) / CudaMatmul::tileSize);
 
     if (kernelMilliseconds == nullptr) {
-        CudaMatmulSharedMemoryEntry<<<gridDimension, blockDimension, 0, CudaMatmul::activeStream()>>>(deviceLeft, deviceRight, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight);
+        CudaMatmulSharedMemoryEntry<<<gridDimension, blockDimension, 0, CudaMatmul::activeStream()>>>(deviceLeft, deviceRight, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, beta);
         CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaMatmulSharedMemoryEntry launch");
         return;
     }
@@ -812,7 +816,7 @@ void CudaMatmul::launchSharedMemoryMatmulKernel(const float* deviceLeft, const f
     CudaMatmul::throwIfCudaFailed(cudaEventCreate(&kernelStopEvent), "cudaEventCreate stop");
     CudaMatmul::throwIfCudaFailed(cudaEventRecord(kernelStartEvent), "cudaEventRecord start");
 
-    CudaMatmulSharedMemoryEntry<<<gridDimension, blockDimension, 0, CudaMatmul::activeStream()>>>(deviceLeft, deviceRight, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight);
+    CudaMatmulSharedMemoryEntry<<<gridDimension, blockDimension, 0, CudaMatmul::activeStream()>>>(deviceLeft, deviceRight, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, beta);
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaMatmulSharedMemoryEntry launch");
     CudaMatmul::throwIfCudaFailed(cudaEventRecord(kernelStopEvent), "cudaEventRecord stop");
     CudaMatmul::throwIfCudaFailed(cudaEventSynchronize(kernelStopEvent), "cudaEventSynchronize stop");
@@ -825,14 +829,14 @@ void CudaMatmul::launchSharedMemoryMatmulKernel(const float* deviceLeft, const f
     cudaEventDestroy(kernelStopEvent);
 }
 
-void CudaMatmul::launchSharedMemoryMatmul(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds) {
+void CudaMatmul::launchSharedMemoryMatmul(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds, float beta) {
     if (deviceLeft == nullptr || deviceRight == nullptr || deviceOut == nullptr) throw std::invalid_argument("CudaMatmul::launchSharedMemoryMatmul null device pointer");
     if (rowCount <= 0 || columnCount <= 0 || sharedCount <= 0) throw std::invalid_argument("CudaMatmul::launchSharedMemoryMatmul invalid shape");
 
-    if (CudaAmp::launchCublasLtMatmulFp16(deviceLeft, deviceRight, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, kernelMilliseconds)) return;
-    if (CudaMatmul::launchCublasLtMatmul(deviceLeft, deviceRight, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, kernelMilliseconds)) return;
+    if (beta == 0.0f && CudaAmp::launchCublasLtMatmulFp16(deviceLeft, deviceRight, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, kernelMilliseconds)) return;
+    if (CudaMatmul::launchCublasLtMatmul(deviceLeft, deviceRight, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, kernelMilliseconds, nullptr, beta)) return;
 
-    CudaMatmul::launchSharedMemoryMatmulKernel(deviceLeft, deviceRight, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, kernelMilliseconds);
+    CudaMatmul::launchSharedMemoryMatmulKernel(deviceLeft, deviceRight, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, kernelMilliseconds, beta);
 }
 
 Matrix CudaMatmul::makeRandomMatrix(size_t rowCount, size_t columnCount, unsigned seed) {

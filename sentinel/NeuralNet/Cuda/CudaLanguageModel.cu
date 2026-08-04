@@ -550,7 +550,7 @@ void CudaLanguageModel::materializeFp16GpuWorkingWeights() {
     if (!CudaAdam::preferCpuOffload || !CudaAdam::preferFp16GpuWeights)
         throw std::logic_error("CudaLanguageModel::materializeFp16GpuWorkingWeights requires cpu offload + fp16 weights");
 
-    // Idempotent: applyVramPackBudget → ensureTrainState again must not re-seed after FP32 buffers are freed.
+    // Idempotent: applyVramPackBudget ? ensureTrainState again must not re-seed after FP32 buffers are freed.
     if (!this->blocks.empty()
         && this->blocks[0].attention.qkvWeight.ampWeightSlot >= 0
         && !this->hostTokenEmbeddingMaster.empty()
@@ -586,7 +586,7 @@ void CudaLanguageModel::materializeFp16GpuWorkingWeights() {
     // Drop sticky FP32 AMP mirrors; working-weight slots own the table after this.
     CudaAmp::clearMasterWeights();
 
-    // LM head / embedding stay FP32 on GPU (CE path uses raw float* rows). Other 2D weights → FP16.
+    // LM head / embedding stay FP32 on GPU (CE path uses raw float* rows). Other 2D weights ? FP16.
     seedFp32Keep(this->tokenEmbeddingWeight, this->hostTokenEmbeddingMaster);
     seedFp32Keep(this->finalNorm.gamma, this->hostFinalNormGammaMaster);
     seedFp32Keep(this->projectionBias, this->hostProjectionBiasMaster);
@@ -667,8 +667,6 @@ void CudaLanguageModel::ensureTrainWorkspaces() {
     // Chunked CE scratch always; full logits when single-pass cache fits (mirrors accumulateChunkedProjection).
     this->logitChunk.ensureSize(chunkRows, maxColumns);
     this->logitGradientChunk.ensureSize(chunkRows, maxColumns);
-    this->projectionWeightGradientChunk.ensureSize(chunkRows, embeddingDim);
-    this->hiddenGradientChunk.ensureSize(embeddingDim, maxColumns);
     this->onlineSoftmaxMax.ensureSize(1, maxColumns);
     this->onlineSoftmaxSumExp.ensureSize(1, maxColumns);
     this->targetLogits.ensureSize(1, maxColumns);
@@ -735,7 +733,6 @@ size_t CudaLanguageModel::bytesPerPackedColumn() const {
     size_t bytes = 0;
     bytes += 5 * embeddingDim * floatBytes; // hidden, normalized, hiddenGradient, blockInputGrad, normInputGrad
     bytes += 2 * chunkRows * floatBytes;    // logitChunk, logitGradientChunk
-    bytes += embeddingDim * floatBytes;     // hiddenGradientChunk
     bytes += 3 * floatBytes;                // onlineSoftmaxMax, onlineSoftmaxSumExp, targetLogits
     bytes += 3 * intBytes;                  // tokenIds, targets, meanDivisors
     bytes += 3 * intBytes;                  // packH2d fused staging
@@ -759,7 +756,7 @@ size_t CudaLanguageModel::bytesPerPackedColumn() const {
 
     // Column scratch footprint depends on checkpoint mode:
     // Off: every block may hold Attn+FFN acts after forward (L * (attn+ffn)).
-    // Full: releaseTrainActivationScratch after each fwd → peak ~1 layer (attn+ffn).
+    // Full: releaseTrainActivationScratch after each fwd ? peak ~1 layer (attn+ffn).
     // Selective: FFN kept for all blocks; Attn QKV/Flash released after each block
     //   (peak ~1 Attn workspace during fwd/recompute).
     if (this->activationCheckpointMode == ActivationCheckpointMode::Selective) {
@@ -891,7 +888,7 @@ size_t CudaLanguageModel::estimatePendingTrainStaticBytes() const {
             pending += muonWeightBytes;
     }
 
-    // Adam moments stay lazy until first applyGradients — always reserve unless CPU offload.
+    // Adam moments stay lazy until first applyGradients ? always reserve unless CPU offload.
     if (!CudaAdam::preferCpuOffload) {
         if (CudaAdam::preferInt8Moments)
             pending += adamWeightBytes / 2ull + adamWeightBytes / 128ull;
@@ -952,7 +949,7 @@ void CudaLanguageModel::applyVramPackBudget(float freeFraction, size_t safetyRes
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaLanguageModel::applyVramPackBudget no CUDA device");
 
     // Return pack-scaled workspace to the free pool before measuring; otherwise a second
-    // applyVramPackBudget (e.g. after enableCudaTrain) sees free≈0 and collapses to minCols.
+    // applyVramPackBudget (e.g. after enableCudaTrain) sees free?0 and collapses to minCols.
     this->releasePackedTrainWorkspaces();
     CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaLanguageModel::applyVramPackBudget sync after workspace release");
 
@@ -960,7 +957,7 @@ void CudaLanguageModel::applyVramPackBudget(float freeFraction, size_t safetyRes
     size_t totalBytes = 0;
     CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeBytes, &totalBytes), "CudaLanguageModel::applyVramPackBudget memGetInfo");
 
-    // WDDM shares VRAM with the desktop — keep a hard floor so DWM/apps don't thrash the train working set.
+    // WDDM shares VRAM with the desktop ? keep a hard floor so DWM/apps don't thrash the train working set.
     const size_t displayFloor = (std::max)(safetyReserveBytes, totalBytes / 5ull); // >=20% of card or explicit safety
     const size_t pendingStatic = this->estimatePendingTrainStaticBytes();
     const size_t reserved = pendingStatic + displayFloor;
@@ -1128,7 +1125,7 @@ void CudaLanguageModel::downloadOptimizerTo(LanguageModel& host) {
     };
 
     auto downloadBlockMuon = [&](TransformerBlock& hostBlock, const CudaTransformerBlock& block, const CudaTransformerBlockMuonStates& muonStates) {
-        // fused device momentum → split host Q/K/V and gate/up for checkpoint compatibility
+        // fused device momentum ? split host Q/K/V and gate/up for checkpoint compatibility
         MuonState qkvHost;
         MuonState gateUpHost;
         downloadMuonOrZero(muonStates.qkvWeight, qkvHost, block.attention.queryWeight.rows * 3ull, block.attention.queryWeight.cols);
@@ -1467,7 +1464,7 @@ float CudaLanguageModel::flushPackedHostBuffers(int segmentLength, int exampleCo
         && this->trainGraphExec == nullptr) {
         try {
             this->captureTrainGraph(tokenCount, segmentLength, exampleCount, gradients);
-            // Capture records only — launch once so this microstep still applies grads.
+            // Capture records only ? launch once so this microstep still applies grads.
             CudaMatmul::throwIfCudaFailed(cudaGraphLaunch(this->trainGraphExec, this->trainStream), "flushPackedHostBuffers post-capture launch");
             CudaMatmul::throwIfCudaFailed(cudaStreamSynchronize(this->trainStream), "flushPackedHostBuffers capture sync");
             return 0.0f;
@@ -1710,7 +1707,7 @@ size_t CudaLanguageModel::estimateHostMasterAndGradBytes() const {
 }
 
 static void ensureHostGradMatrix(Matrix& grad, size_t rows, size_t cols) {
-    // preferHostSgd overwrites via downloadIntoHost — skip fill(0) of multi-hundred-MiB grads.
+    // preferHostSgd overwrites via downloadIntoHost ? skip fill(0) of multi-hundred-MiB grads.
     if (CudaAdam::preferHostSgd) {
         grad.ensureSize(rows, cols);
         return;
@@ -1884,7 +1881,6 @@ void CudaLanguageModel::accumulateChunkedProjection(size_t tokenCount, int segme
 
     this->targetLogits.ensureSize(1, tokenCount);
     this->hiddenGradient.ensureSize(static_cast<size_t>(embeddingDim), tokenCount);
-    this->hiddenGradientChunk.ensureSize(static_cast<size_t>(embeddingDim), tokenCount);
     CudaOps::onlineSoftmaxReset(this->onlineSoftmaxMax, this->onlineSoftmaxSumExp, tokenCount);
     CudaOps::zeroInPlace(this->targetLogits);
     CudaOps::zeroInPlace(this->hiddenGradient);
@@ -1896,7 +1892,7 @@ void CudaLanguageModel::accumulateChunkedProjection(size_t tokenCount, int segme
 
     auto projectChunk = [&](int rowStart, int chunkRows, float* destination) {
         const float* weightRows = headWeight.buffer.deviceData + static_cast<size_t>(rowStart) * static_cast<size_t>(embeddingDim);
-        // LM-head stays FP32 even when amp is on — CE is numerically fragile in FP16
+        // LM-head stays FP32 even when amp is on ? CE is numerically fragile in FP16
         const bool previousAmp = CudaAmp::preferMixedPrecision;
         CudaAmp::preferMixedPrecision = false;
         CudaMatrix::multiplyPointersInto(
@@ -1935,23 +1931,23 @@ void CudaLanguageModel::accumulateChunkedProjection(size_t tokenCount, int segme
                 this->onlineSoftmaxMax, this->onlineSoftmaxSumExp, this->logitGradientChunk, gradScale, segmentLength,
                 CudaLanguageModel::padTargetId, &this->meanDivisorBuffer);
 
-            this->projectionWeightGradientChunk.ensureSize(static_cast<size_t>(chunkRows), static_cast<size_t>(embeddingDim));
+            float* headWeightGradientRows = headWeightGradient.buffer.deviceData + static_cast<size_t>(rowStart) * static_cast<size_t>(embeddingDim);
             const bool previousAmpGrad = CudaAmp::preferMixedPrecision;
             CudaAmp::preferMixedPrecision = false;
-            CudaMatrix::multiplyInto(this->logitGradientChunk, this->normalized, this->projectionWeightGradientChunk, false, true);
-            CudaOps::addRowsInPlace(headWeightGradient, rowStart, this->projectionWeightGradientChunk);
+            CudaMatrix::multiplyPointersInto(
+                this->logitGradientChunk.buffer.deviceData, static_cast<size_t>(chunkRows), tokenCount,
+                this->normalized.buffer.deviceData, static_cast<size_t>(embeddingDim), tokenCount,
+                headWeightGradientRows,
+                false, true, 1.0f);
             CudaOps::sumColumnsAddIntoRows(this->logitGradientChunk, gradients.projectionBias, rowStart);
 
             const float* weightRows = headWeight.buffer.deviceData + static_cast<size_t>(rowStart) * static_cast<size_t>(embeddingDim);
             CudaMatrix::multiplyPointersInto(
                 weightRows, static_cast<size_t>(chunkRows), static_cast<size_t>(embeddingDim),
                 this->logitGradientChunk.buffer.deviceData, static_cast<size_t>(chunkRows), tokenCount,
-                this->hiddenGradientChunk.buffer.deviceData,
-                true, false);
+                this->hiddenGradient.buffer.deviceData,
+                true, false, 1.0f);
             CudaAmp::preferMixedPrecision = previousAmpGrad;
-            this->hiddenGradientChunk.rows = static_cast<size_t>(embeddingDim);
-            this->hiddenGradientChunk.cols = tokenCount;
-            CudaOps::addInPlace(this->hiddenGradient, this->hiddenGradientChunk);
         }
         return;
     }
@@ -1997,23 +1993,23 @@ void CudaLanguageModel::accumulateChunkedProjection(size_t tokenCount, int segme
             CudaLanguageModel::padTargetId,
             &this->meanDivisorBuffer);
 
-        this->projectionWeightGradientChunk.ensureSize(static_cast<size_t>(chunkRows), static_cast<size_t>(embeddingDim));
+        float* headWeightGradientRows = headWeightGradient.buffer.deviceData + static_cast<size_t>(rowStart) * static_cast<size_t>(embeddingDim);
         const bool previousAmp = CudaAmp::preferMixedPrecision;
         CudaAmp::preferMixedPrecision = false;
-        CudaMatrix::multiplyInto(this->logitGradientChunk, this->normalized, this->projectionWeightGradientChunk, false, true);
-        CudaOps::addRowsInPlace(headWeightGradient, rowStart, this->projectionWeightGradientChunk);
+        CudaMatrix::multiplyPointersInto(
+            this->logitGradientChunk.buffer.deviceData, static_cast<size_t>(chunkRows), tokenCount,
+            this->normalized.buffer.deviceData, static_cast<size_t>(embeddingDim), tokenCount,
+            headWeightGradientRows,
+            false, true, 1.0f);
         CudaOps::sumColumnsAddIntoRows(this->logitGradientChunk, gradients.projectionBias, rowStart);
 
         const float* weightRows = headWeight.buffer.deviceData + static_cast<size_t>(rowStart) * static_cast<size_t>(embeddingDim);
         CudaMatrix::multiplyPointersInto(
             weightRows, static_cast<size_t>(chunkRows), static_cast<size_t>(embeddingDim),
             this->logitGradientChunk.buffer.deviceData, static_cast<size_t>(chunkRows), tokenCount,
-            this->hiddenGradientChunk.buffer.deviceData,
-            true, false);
+            this->hiddenGradient.buffer.deviceData,
+            true, false, 1.0f);
         CudaAmp::preferMixedPrecision = previousAmp;
-        this->hiddenGradientChunk.rows = static_cast<size_t>(embeddingDim);
-        this->hiddenGradientChunk.cols = tokenCount;
-        CudaOps::addInPlace(this->hiddenGradient, this->hiddenGradientChunk);
     }
 }
 
@@ -3599,7 +3595,7 @@ void CudaLanguageModel::uploadFromFp16CpuOffload(LanguageModel& host) {
         if ((blockIndex + 1ull) == 1ull || (blockIndex + 1ull) == host.blocks.size() || ((blockIndex + 1ull) % 8ull) == 0ull) {
             SmokeLog::result(
                 "4B upload",
-                "block %zu/%zu  used≈%.0f MiB",
+                "block %zu/%zu  used?%.0f MiB",
                 blockIndex + 1ull,
                 host.blocks.size(),
                 memMiB());
@@ -4090,7 +4086,7 @@ void CudaLanguageModel::runScale4BVramProbeDemo() {
                 cudaGetErrorString(status));
             cudaGetLastError();
             freeHolds();
-            SmokeLog::note("blocker: FP32 weight residency (and mirrors) before grads/opt — layout change required for 4B");
+            SmokeLog::note("blocker: FP32 weight residency (and mirrors) before grads/opt ? layout change required for 4B");
             return;
         }
         holds.push_back(pointer);
@@ -4156,7 +4152,7 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
 
     try {
         memSnapshot("before host ctor");
-        SmokeLog::note("constructing ~4B host LanguageModel (CPU)�");
+        SmokeLog::note("constructing ~4B host LanguageModel (CPU)?");
         const auto ctorStart = std::chrono::steady_clock::now();
 
         CudaLanguageModel device;
@@ -4186,7 +4182,7 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
             CudaAdam::preferHostSgd = true;
             SmokeLog::note("optimizer=SGD host large weights + GPU SGD for FP32-resident (embed/bias/gamma)");
 
-            SmokeLog::note("streaming FP16 upload (moves host weights ? masters)�");
+            SmokeLog::note("streaming FP16 upload (moves host weights ? masters)?");
             const auto uploadStart = std::chrono::steady_clock::now();
             device.uploadFromFp16CpuOffload(host);
             const double uploadSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - uploadStart).count();
@@ -4218,7 +4214,7 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
             packPtrs[static_cast<size_t>(e)] = &example;
         }
 
-        SmokeLog::note("running 1 packed train step (accumulate + applyGradients)�");
+        SmokeLog::note("running 1 packed train step (accumulate + applyGradients)?");
         device.zeroAccumulatedGradients();
         device.epochLossSum.ensureSize(1, 1);
         CudaOps::zeroInPlace(device.epochLossSum);

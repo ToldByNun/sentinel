@@ -1327,8 +1327,8 @@ int main() {
             return 1;
         }
         try {
-            // vocab=4000 embed=768 seq=256 blocks=8 heads=12 pack=32 ckpt=off flash=on chunked CE
-            CudaLanguageModel::runTrainProfileDemo(4000, 768, 256, 8, 12, true, 0, 32, false);
+            // Match the ~100M probe as closely as possible: vocab=16000 embed=768 seq=256 blocks=12 heads=12 pack=15 ckpt=selective.
+            CudaLanguageModel::runTrainProfileDemo(16000, 768, 256, 12, 12, true, 3840, 15, true);
         } catch (const std::exception& ex) {
             SmokeLog::result("scale profile", "FAILED: %s", ex.what());
             return 1;

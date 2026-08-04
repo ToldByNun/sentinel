@@ -148,8 +148,8 @@ public:
     /// </summary>
     static bool multiplyBiasInto(const CudaMatrix& left, const CudaMatrix& right, const CudaMatrix& bias, CudaMatrix& out, bool transposeLeft = false, bool transposeRight = false);
 
-    /// <summary>C = op(A) * op(B) from raw device pointers row major shapes are physical before transpose flags</summary>
-    static void multiplyPointersInto(const float* left, size_t leftRows, size_t leftCols, const float* right, size_t rightRows, size_t rightCols, float* out, bool transposeLeft = false, bool transposeRight = false);
+    /// <summary>C = op(A) * op(B) from raw device pointers row major shapes are physical before transpose flags; beta scales existing out</summary>
+    static void multiplyPointersInto(const float* left, size_t leftRows, size_t leftCols, const float* right, size_t rightRows, size_t rightCols, float* out, bool transposeLeft = false, bool transposeRight = false, float beta = 0.0f);
 
     /// <summary>C = op(A) * op(B) on device measuring kernel time with cuda events</summary>
     static void multiplyIntoTimed(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& out, double& kernelMilliseconds, bool transposeLeft = false, bool transposeRight = false);
@@ -241,29 +241,29 @@ private:
     /// <summary>maximum absolute difference between same shape matrices</summary>
     static float maximumAbsoluteDifference(const Matrix& left, const Matrix& right);
 
-    /// <summary>launch cuBLASLt TF32 row major matmul; optional bias epilogue (length=rowCount)</summary>
-    static bool launchCublasLtMatmul(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds, const float* deviceBiasOrNull = nullptr);
+    /// <summary>launch cuBLASLt TF32 row major matmul; optional bias epilogue (length=rowCount); beta scales existing out</summary>
+    static bool launchCublasLtMatmul(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds, const float* deviceBiasOrNull = nullptr, float beta = 0.0f);
 
-    /// <summary>launch shared memory matmul kernel optionally filling kernelMilliseconds</summary>
-    static void launchSharedMemoryMatmulKernel(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds);
+    /// <summary>launch shared memory matmul kernel optionally filling kernelMilliseconds; beta scales existing out</summary>
+    static void launchSharedMemoryMatmulKernel(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds, float beta);
 
-    /// <summary>launch GEMM preferring cuBLASLt TF32 falling back to shared memory kernel</summary>
-    static void launchSharedMemoryMatmul(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds);
+    /// <summary>launch GEMM preferring cuBLASLt TF32 falling back to shared memory kernel; beta scales existing out</summary>
+    static void launchSharedMemoryMatmul(const float* deviceLeft, const float* deviceRight, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds, float beta = 0.0f);
 
     /// <summary>grow owned buffers then copy launch and copy back optionally filling timing</summary>
     void multiplyIntoInternal(const Matrix& left, const Matrix& right, Matrix& out, CudaMatmulTiming* timing);
 
 #ifdef __CUDACC__
     /// <summary>device body for shared memory tiled matmul CUDA forbids __global__ members</summary>
-    __device__ static void runSharedMemoryMatmul(const float* left, const float* right, float* out, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight);
+    __device__ static void runSharedMemoryMatmul(const float* left, const float* right, float* out, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, float beta);
 
-    friend __global__ void CudaMatmulSharedMemoryEntry(const float* left, const float* right, float* out, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight);
+    friend __global__ void CudaMatmulSharedMemoryEntry(const float* left, const float* right, float* out, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, float beta);
 #endif
 };
 
 #ifdef __CUDACC__
 /// <summary>CUDA language requires a free __global__ entry trampoline into CudaMatmul</summary>
-__global__ void CudaMatmulSharedMemoryEntry(const float* left, const float* right, float* out, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight);
+__global__ void CudaMatmulSharedMemoryEntry(const float* left, const float* right, float* out, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, float beta);
 #endif
 
 #endif // CUDAMATMUL_HPP
