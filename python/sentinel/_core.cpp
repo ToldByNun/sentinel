@@ -1,0 +1,176 @@
+#include <nanobind/nanobind.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
+
+#include "NeuralNet/Cuda/CudaMatmul.hpp"
+#include "NeuralNet/Data/LanguageModelDataset.hpp"
+#include "NeuralNet/Network/LanguageModel.hpp"
+#include "NeuralNet/Optimizers/Adam.hpp"
+#include "NeuralNet/Tokenizer/BPETokenizer.hpp"
+
+namespace nb = nanobind;
+
+namespace {
+
+LanguageModel makeLanguageModel(
+    int vocabularySize,
+    int embeddingDim,
+    int maximumPositionCount,
+    float learningRate = 3e-4f,
+    int blockCount = 2,
+    int headCount = 4) {
+    return LanguageModel(vocabularySize, embeddingDim, maximumPositionCount, Adam(learningRate), blockCount, headCount);
+}
+
+} // namespace
+
+NB_MODULE(_core, m) {
+    m.doc() = "Sentinel C++/CUDA language-model bindings";
+    m.attr("__version__") = "0.1.0";
+    m.def("cuda_available", &CudaMatmul::isAvailable, "True if a CUDA device is usable");
+
+    nb::enum_<ActivationCheckpointMode>(m, "ActivationCheckpointMode")
+        .value("Off", ActivationCheckpointMode::Off)
+        .value("Full", ActivationCheckpointMode::Full)
+        .value("Selective", ActivationCheckpointMode::Selective);
+
+    nb::class_<BPETokenizer>(m, "BPETokenizer")
+        .def(nb::init<>())
+        .def(
+            "train",
+            nb::overload_cast<const std::vector<std::string>&, int>(&BPETokenizer::train),
+            nb::arg("corpus"),
+            nb::arg("vocab_size"),
+            "Learn BPE merges from a list of strings")
+        .def("encode", &BPETokenizer::encode, nb::arg("text"))
+        .def("decode", &BPETokenizer::decode, nb::arg("token_ids"))
+        .def_prop_ro("vocab_size", &BPETokenizer::vocabSize)
+        .def_prop_ro("unknown_token_id", &BPETokenizer::unknownTokenId);
+
+    nb::class_<LanguageModelDataset>(m, "LanguageModelDataset")
+        .def(nb::init<>())
+        .def_static(
+            "build",
+            &LanguageModelDataset::build,
+            nb::arg("texts"),
+            nb::arg("tokenizer"),
+            nb::arg("maximum_token_count") = 0,
+            nb::arg("build_one_hot") = false,
+            "Encode texts and build shifted next-token examples")
+        .def_prop_ro("size", &LanguageModelDataset::size)
+        .def_prop_ro("total_prediction_count", &LanguageModelDataset::totalPredictionCount)
+        .def_rw("vocabulary_size", &LanguageModelDataset::vocabularySize);
+
+    nb::class_<LanguageModel>(m, "LanguageModel")
+        .def(
+            "__init__",
+            [](LanguageModel* self,
+               int vocabularySize,
+               int embeddingDim,
+               int maximumPositionCount,
+               float learningRate,
+               int blockCount,
+               int headCount) {
+                new (self) LanguageModel(makeLanguageModel(
+                    vocabularySize, embeddingDim, maximumPositionCount, learningRate, blockCount, headCount));
+            },
+            nb::arg("vocabulary_size"),
+            nb::arg("embedding_dim"),
+            nb::arg("maximum_position_count"),
+            nb::arg("learning_rate") = 3e-4f,
+            nb::arg("block_count") = 2,
+            nb::arg("head_count") = 4)
+        .def("enable_cuda", &LanguageModel::enableCuda)
+        .def("enable_cuda_train", &LanguageModel::enableCudaTrain)
+        .def(
+            "set_activation_checkpoint_mode",
+            &LanguageModel::setActivationCheckpointMode,
+            nb::arg("mode"))
+        .def(
+            "set_prefer_flash_attention",
+            &LanguageModel::setCudaPreferFlashAttention,
+            nb::arg("enabled"))
+        .def(
+            "set_prefer_muon",
+            &LanguageModel::setCudaPreferMuon,
+            nb::arg("enabled"))
+        .def(
+            "set_prefer_int8_adam_moments",
+            &LanguageModel::setCudaPreferInt8AdamMoments,
+            nb::arg("enabled"))
+        .def(
+            "set_prefer_cpu_adam_offload",
+            &LanguageModel::setCudaPreferCpuAdamOffload,
+            nb::arg("enabled"))
+        .def(
+            "set_prefer_train_graph",
+            &LanguageModel::setCudaPreferTrainGraph,
+            nb::arg("enabled"))
+        .def(
+            "apply_vram_pack_budget",
+            &LanguageModel::applyCudaVramPackBudget,
+            nb::arg("free_fraction") = 0.70f,
+            nb::arg("safety_reserve_bytes") = 2560ull * 1024ull * 1024ull)
+        .def_prop_ro("cuda_enabled", &LanguageModel::cudaEnabled)
+        .def_prop_ro("cuda_train_enabled", &LanguageModel::cudaTrainEnabled)
+        .def_prop_ro("parameter_count", &LanguageModel::parameterElementCount)
+        .def_prop_ro("max_packed_columns", &LanguageModel::cudaMaxPackedColumns)
+        .def(
+            "average_loss",
+            &LanguageModel::averageLoss,
+            nb::arg("dataset"))
+        .def(
+            "train",
+            [](LanguageModel& model,
+               const LanguageModelDataset& train,
+               int epochs,
+               int batchSize,
+               int gradientAccumulationSteps,
+               int logEveryEpochs,
+               nb::object testObj) {
+                LanguageModelDataset empty;
+                if (testObj.is_none()) {
+                    model.train(train, empty, epochs, logEveryEpochs, batchSize, gradientAccumulationSteps);
+                } else {
+                    model.train(
+                        train,
+                        nb::cast<const LanguageModelDataset&>(testObj),
+                        epochs,
+                        logEveryEpochs,
+                        batchSize,
+                        gradientAccumulationSteps);
+                }
+            },
+            nb::arg("train"),
+            nb::arg("epochs") = 1,
+            nb::arg("batch_size") = 32,
+            nb::arg("gradient_accumulation_steps") = 1,
+            nb::arg("log_every_epochs") = 1,
+            nb::arg("test") = nb::none(),
+            "Train on an in-memory dataset (optional test set)")
+        .def(
+            "generate",
+            &LanguageModel::generate,
+            nb::arg("prompt_token_ids"),
+            nb::arg("new_token_count"),
+            nb::arg("temperature") = 1.0f,
+            nb::arg("top_k") = 40,
+            nb::arg("seed") = 42u)
+        .def(
+            "save_checkpoint",
+            &LanguageModel::saveCheckpoint,
+            nb::arg("path"),
+            nb::arg("include_optimizer") = true)
+        .def(
+            "load_checkpoint",
+            &LanguageModel::loadCheckpoint,
+            nb::arg("path"))
+        .def(
+            "save_safetensors",
+            &LanguageModel::saveSafeTensors,
+            nb::arg("path"))
+        .def(
+            "load_safetensors",
+            &LanguageModel::loadSafeTensors,
+            nb::arg("path"));
+}

@@ -83,8 +83,17 @@ sentinel/msbuild_*.log
 
 # CMake
 build/
+build/pip/
 cmake-build-*/
 out/
+*.egg-info/
+.eggs/
+dist/
+python/sentinel/_core*.pyd
+python/sentinel/_core*.so
+python/sentinel/__pycache__/
+**/__pycache__/
+.pytest_cache/
 CMakeUserPresets.json
 CMakeCache.txt
 CMakeFiles/

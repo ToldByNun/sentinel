@@ -27,7 +27,15 @@ set(CMAKE_CUDA_ARCHITECTURES "${SENTINEL_CUDA_ARCHITECTURES}")
 option(SENTINEL_BUILD_SHARED "Build sentinel as a shared library" OFF)
 option(SENTINEL_BUILD_DEMO "Build the main demo harness (sentinel executable)" ON)
 option(SENTINEL_BUILD_EXAMPLES "Build example programs" ON)
+option(SENTINEL_BUILD_PYTHON "Build Python nanobind module (sentinel._core)" OFF)
 option(SENTINEL_INSTALL "Generate install/export rules" ON)
+
+# pip/scikit-build-core sets SKBUILD; prefer a lean wheel (lib + Python only).
+if(DEFINED SKBUILD)
+    set(SENTINEL_BUILD_DEMO OFF CACHE BOOL "" FORCE)
+    set(SENTINEL_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(SENTINEL_BUILD_PYTHON ON CACHE BOOL "" FORCE)
+endif()
 
 find_package(CUDAToolkit REQUIRED)
 find_package(OpenMP)
@@ -183,7 +191,37 @@ if(SENTINEL_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
-if(SENTINEL_INSTALL)
+if(SENTINEL_BUILD_PYTHON)
+    find_package(Python 3.10 REQUIRED COMPONENTS Interpreter Development.Module)
+    find_package(nanobind CONFIG REQUIRED)
+
+    nanobind_add_module(sentinel_core NB_STATIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/sentinel/_core.cpp"
+    )
+    set_target_properties(sentinel_core PROPERTIES OUTPUT_NAME "_core")
+    target_link_libraries(sentinel_core PRIVATE Sentinel::sentinel)
+    # Extension lives inside the Python package directory (python/sentinel/).
+    if(DEFINED SKBUILD)
+        install(TARGETS sentinel_core
+            LIBRARY DESTINATION sentinel
+            RUNTIME DESTINATION sentinel
+            ARCHIVE DESTINATION sentinel
+        )
+    else()
+        set_target_properties(sentinel_core PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/python/sentinel"
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/python/sentinel"
+        )
+        add_custom_command(TARGET sentinel_core POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/python/sentinel/__init__.py"
+                "$<TARGET_FILE_DIR:sentinel_core>/__init__.py"
+            COMMENT "Copy python/sentinel/__init__.py next to _core extension"
+        )
+    endif()
+endif()
+
+if(SENTINEL_INSTALL AND NOT DEFINED SKBUILD)
     install(TARGETS sentinel
         EXPORT SentinelTargets
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -226,6 +264,10 @@ if(SENTINEL_INSTALL)
     )
 endif()
 
+if(SENTINEL_BUILD_EXAMPLES AND SENTINEL_INSTALL AND NOT DEFINED SKBUILD)
+    # examples install handled in examples/CMakeLists.txt
+endif()
+
 message(STATUS "sentinel ${PROJECT_VERSION} platform: ${CMAKE_SYSTEM_NAME}")
 if(SENTINEL_BUILD_SHARED)
     message(STATUS "sentinel library type: shared")
@@ -235,4 +277,4 @@ endif()
 message(STATUS "sentinel CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 message(STATUS "CUDA Toolkit: ${CUDAToolkit_VERSION} (${CUDAToolkit_LIBRARY_ROOT})")
 message(STATUS "C++ compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER}")
-message(STATUS "Build demo=${SENTINEL_BUILD_DEMO} examples=${SENTINEL_BUILD_EXAMPLES}")
+message(STATUS "Build demo=${SENTINEL_BUILD_DEMO} examples=${SENTINEL_BUILD_EXAMPLES} python=${SENTINEL_BUILD_PYTHON}")

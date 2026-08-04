@@ -2,7 +2,9 @@
 
 C++/CUDA framework for **full-train** causal LMs (no LoRA): CPU/OpenMP plus a device train path with packed batches, flash attention, FP16 AMP, int8 Adam / Muon, selective activation checkpointing, and a consumer-GPU **~4B offload** path (FP16 GPU weights + host masters/grads + host SGD).
 
-**v0.1** ships as an installable library (`Sentinel::sentinel`) plus a demo harness and tiny examples.
+**v0.1** ships as an installable C++ library (`Sentinel::sentinel`), a demo harness, examples, and a **pip-installable Python package** (`sentinel-lm`).
+
+> **Note on “zero-dependency”:** That claim (e.g. in the GitHub *About* blurb — *zero-dependency C++/CUDA DL framework focused on single consumer GPUs*) refers to the **engine runtime itself**: the C++/CUDA library links only against the CUDA toolkit (cuBLAS / cuBLASLt), OpenMP, and the C++ standard library — no cuDNN, no PyTorch/TensorFlow, no other third-party DL stacks at train/infer time. It does **not** mean the optional **Python bindings** are dependency-free: building `sentinel-lm` needs a Python toolchain plus build-time packages (`scikit-build-core`, `nanobind`, CMake, a CUDA-capable compiler). At Python *runtime* there are still no extra PyPI deps — only the same CUDA / driver / OpenMP requirements as the C++ engine.
 
 ## Requirements
 
@@ -11,13 +13,69 @@ C++/CUDA framework for **full-train** causal LMs (no LoRA): CPU/OpenMP plus a de
 - CUDA Toolkit (**13.x**; developed against v13.3) with matching NVIDIA driver
 - NVIDIA GPU — GeForce **20 / 30 / 40 / 50** (`sm_75` / `sm_80`+`sm_86` / `sm_89` / `sm_120`). CUDA 13 floor is Turing.
 - OpenMP (libgomp / LLVM OpenMP / MSVC OpenMP)
+- **Python ≥ 3.10** (only for the Python package)
 - Data for the SERA demo only (not included): `SERA-Data/sera_best_subset` (HF Arrow) and/or `*.jsonl`
 
-## Build & run
+## Python (pip)
+
+Needs CUDA toolkit on the **build** machine (compiles the same C++/CUDA core) and at **runtime** (cuBLASLt DLLs / `.so`). No extra PyPI runtime deps.
+
+On Windows, `import sentinel` auto-adds `$CUDA_PATH\bin\x64` (and `bin`) via `os.add_dll_directory` so Python 3.8+ can load `cublasLt64_*.dll`. Set `CUDA_PATH` if the toolkit is not under the default `Program Files\NVIDIA GPU Computing Toolkit\CUDA` layout.
+
+```bash
+# From repo root (editable / local wheel)
+pip install .
+
+# Or editable while hacking bindings (needs build deps already installed):
+pip install -e . --no-build-isolation
+
+python examples/python/train_tiny.py
+python examples/python/generate.py tiny_demo.snlm "the cat"
+```
+
+```python
+import sentinel as S
+
+tok = S.BPETokenizer()
+tok.train(["the cat sat on the mat", "cuda packs batches"], vocab_size=256)
+data = S.LanguageModelDataset.build(["the cat sat on the mat"], tok, maximum_token_count=48)
+
+model = S.LanguageModel(tok.vocab_size, embedding_dim=64, maximum_position_count=64, learning_rate=3e-3)
+if S.cuda_available():
+    model.enable_cuda()
+    model.set_prefer_flash_attention(True)
+    model.enable_cuda_train()
+
+model.train(data, epochs=4, batch_size=4)
+model.save_safetensors("toy.safetensors")
+print(tok.decode(model.generate(tok.encode("the"), new_token_count=16)))
+```
+
+Override CUDA arches (e.g. faster local build for your GPU only):
+
+```bash
+pip install . -C cmake.define.SENTINEL_CUDA_ARCHITECTURES=native
+# or a subset:
+pip install . -C cmake.define.SENTINEL_CUDA_ARCHITECTURES="75;86;89;120"
+```
+
+### Publishing wheels (GitHub → PyPI)
+
+Workflow: [`.github/workflows/publish.yml`](.github/workflows/publish.yml). Builds **sdist** + **cp310–cp312** wheels for **Linux** and **Windows** (CUDA 13 toolkit on the runner; fat binary arches). Publishes on a GitHub **Release**, or via *workflow_dispatch* with `publish_to_pypi=true`.
+
+One-time setup:
+
+1. On [PyPI Trusted Publishers](https://pypi.org/manage/account/publishing/), add publisher for project **`sentinel-lm`**: repo + workflow `publish.yml` + environment `pypi`.
+2. In GitHub → Settings → Environments, create **`pypi`** (optional protection rules).
+3. Cut a release (or run the workflow manually).
+
+Wheels do **not** bundle the CUDA runtime — installers still need CUDA 13 + a matching driver, same as the C++ engine.
+
+## Build & run (C++)
 
 ### CMake (recommended)
 
-Builds **`libsentinel`** (static by default), the **`sentinel`** demo harness, and examples.
+Builds **`libsentinel`** (static by default), the **`sentinel`** demo harness, and C++ examples.
 
 **Linux**
 
@@ -53,6 +111,7 @@ Useful options:
 | `SENTINEL_BUILD_SHARED` | `OFF` | Shared library instead of static |
 | `SENTINEL_BUILD_DEMO` | `ON` | `sentinel` harness from `main.cpp` |
 | `SENTINEL_BUILD_EXAMPLES` | `ON` | `sentinel_train_tiny`, `sentinel_generate` |
+| `SENTINEL_BUILD_PYTHON` | `OFF` (`ON` via pip) | nanobind module `sentinel._core` |
 
 ### Install / consume from another CMake project
 
@@ -93,14 +152,13 @@ Default SERA demo (when suite flags are off): Arrow corpus, ~8×768. Working dir
 | Path                   | Role                                                                 |
 | ---------------------- | -------------------------------------------------------------------- |
 | `CMakeLists.txt`       | `Sentinel::sentinel` library, demo, examples, install/export         |
-| `examples/`            | `train_tiny`, `generate` — no external data                          |
+| `pyproject.toml`       | pip package `sentinel-lm` (scikit-build-core + nanobind)             |
+| `python/sentinel/`     | Python package + nanobind `_core` (import name still `sentinel`)     |
+| `sentinel/`            | C++/CUDA engine sources (`NeuralNet/`, demo `main.cpp`, …)           |
+| `examples/`            | C++ + `examples/python/` — no external data                          |
 | `cmake/`               | `find_package(Sentinel)` package config                              |
-| `NeuralNet/Network/`   | `LanguageModel`, host train, `.snlm` checkpoints                     |
-| `NeuralNet/Cuda/`      | Device mirror, flash attn, AMP, Adam, Muon, packed train, 4B offload |
-| `NeuralNet/Layers/`    | Attention, SwiGLU FFN, RMSNorm, embedding, …                         |
-| `NeuralNet/Data/`      | `TextRowReader`, JSONL + from-scratch Arrow IPC reader, chunk source |
-| `NeuralNet/Tokenizer/` | BPE (freq-based train, ranked encode)                                |
-| `main.cpp`             | Smokes / scale harness / SERA demo                                   |
+| `sentinel/NeuralNet/`  | Engine: Network, Cuda, Layers, Data, Tokenizer, …                    |
+| `sentinel/main.cpp`    | Smokes / scale harness / SERA demo                                   |
 
 ## Data
 

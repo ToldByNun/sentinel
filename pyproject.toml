@@ -1,0 +1,61 @@
+[build-system]
+requires = [
+    "scikit-build-core>=0.10",
+    "nanobind>=2.0",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "sentinel-lm"
+version = "0.1.0"
+description = "C++/CUDA full-train causal language model framework (Python bindings)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "ToldByNun" },
+]
+keywords = ["cuda", "llm", "training", "safetensors", "transformer"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# Runtime: no PyPI deps — CUDA toolkit + driver must already be installed.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/ToldByNun/sentinel"
+Documentation = "https://github.com/ToldByNun/sentinel#readme"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "build/pip/{wheel_tag}"
+# Importable package lives under python/ (not confused with C++ tree sentinel/).
+wheel.packages = ["python/sentinel"]
+# CMake options for wheel builds. CUDA arches use the CMake default fat binary
+# (75;80;86;89;120). For a faster local build only: -C cmake.define.SENTINEL_CUDA_ARCHITECTURES=native
+cmake.args = [
+    "-DSENTINEL_BUILD_DEMO=OFF",
+    "-DSENTINEL_BUILD_EXAMPLES=OFF",
+    "-DSENTINEL_BUILD_PYTHON=ON",
+    "-DSENTINEL_INSTALL=ON",
+]
+cmake.version = ">=3.24"
+
+[tool.scikit-build.cmake.define]
+# Ensure CUDA language is enabled when pip-invoked.
+CMAKE_BUILD_TYPE = "Release"
+
+[tool.cibuildwheel]
+build-verbosity = 1
+# Prefer .github/workflows/publish.yml for CUDA wheels (host toolkit + fat arches).
+# If using cibuildwheel locally, override arches explicitly — never ship "native".
+environment = { CMAKE_GENERATOR = "Ninja" }

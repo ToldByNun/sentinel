@@ -60,7 +60,7 @@ int main() {
     // One-shot: smokes + parities + small speed + cpuAdam (no 4B / no full SERA train).
     const bool runSmallSuite = false;
     // Temporary WMMA FA verify (flash parity + synthetic ~100M tok/s). Flip false after check.
-    const bool runWmmaFaVerify = false;
+    const bool runWmmaFaVerify = true;
 
     if (runWmmaFaVerify) {
         SmokeLog::section("wmma FA verify");
