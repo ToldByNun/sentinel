@@ -1,0 +1,24 @@
+name: CMake C++ CUDA CI
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Create Build Directory
+      run: cmake -B build -S .
+
+    - name: Compile Project
+      run: cmake --build build --config Release
+
+    - name: Run Tests (optional)
+      run: ctest --test-dir build --output-on-failure
