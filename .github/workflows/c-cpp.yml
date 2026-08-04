@@ -14,6 +14,11 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
+    - name: CUDA Toolkit installieren
+      uses: Jimver/cuda-toolkit@v0.2.15
+      with:
+        cuda: '13.0.0'
+
     - name: Create Build Directory
       run: cmake -B build -S .
 
