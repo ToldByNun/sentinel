@@ -191,6 +191,9 @@ public:
     /// <summary>fold logit chunk pointer (chunkRows x tokenCount row-major) into online softmax stats</summary>
     static void onlineSoftmaxUpdateFromChunk(const float* logitChunk, int chunkRows, size_t tokenCount, CudaMatrix& maximumLogits, CudaMatrix& sumExp);
 
+    /// <summary>fold chunk+bias into online softmax stats and capture target logits in one pass</summary>
+    static void onlineSoftmaxBiasedUpdateAndCaptureTargetFromChunk(const float* logitChunk, const CudaMatrix& bias, int rowStart, int chunkRows, const CudaIntBuffer& targetTokenIds, size_t tokenCount, CudaMatrix& maximumLogits, CudaMatrix& sumExp, CudaMatrix& targetLogits);
+
     /// <summary>if target id falls in chunk write that logit into targetLogits</summary>
     static void captureTargetLogitFromChunk(const CudaMatrix& logitChunk, const CudaIntBuffer& targetTokenIds, int rowStart, int chunkRows, size_t tokenCount, CudaMatrix& targetLogits);
 
@@ -205,6 +208,9 @@ public:
 
     /// <summary>write chunk logit grads from logit chunk pointer (chunkRows x tokenCount)</summary>
     static void onlineSoftmaxLogitGradientChunkInto(const float* logitChunk, const CudaIntBuffer& targetTokenIds, int rowStart, int chunkRows, size_t tokenCount, const CudaMatrix& maximumLogits, const CudaMatrix& sumExp, CudaMatrix& logitGradientChunk, float gradScale, int meanDivisor, int ignoreIndex = -1, const CudaIntBuffer* perColumnMeanDivisor = nullptr);
+
+    /// <summary>write chunk logit grads from raw chunk + bias rows without a separate bias-add kernel</summary>
+    static void onlineSoftmaxBiasedLogitGradientChunkInto(const float* logitChunk, const CudaMatrix& bias, const CudaIntBuffer& targetTokenIds, int rowStart, int chunkRows, size_t tokenCount, const CudaMatrix& maximumLogits, const CudaMatrix& sumExp, CudaMatrix& logitGradientChunk, float gradScale, int meanDivisor, int ignoreIndex = -1, const CudaIntBuffer* perColumnMeanDivisor = nullptr);
 
     /// <summary>sum gradient columns into biasGradient rows starting at rowStart</summary>
     static void sumColumnsAddIntoRows(const CudaMatrix& gradient, CudaMatrix& biasGradient, int rowStart);
@@ -276,6 +282,8 @@ private:
     friend __global__ void CudaOpsCrossEntropyAddMeanLossFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* lossSum, int vocabularySize, int tokenCount);
     friend __global__ void CudaOpsCrossEntropyLogitGradientFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* logitGradient, int vocabularySize, int tokenCount);
     friend __global__ void CudaOpsSoftmaxCrossEntropyFromLogitsEntry(const float* logits, const int* targetTokenIds, float* probabilities, float* logitGradient, float* lossSum, int vocabularySize, int tokenCount, float lossScale, int meanDivisor);
+    friend __global__ void CudaOpsOnlineSoftmaxBiasedUpdateCaptureEntry(const float* logitChunk, const float* bias, int rowStart, int chunkRows, const int* targetTokenIds, int tokenCount, float* maximumLogits, float* sumExp, float* targetLogits);
+    friend __global__ void CudaOpsOnlineSoftmaxBiasedLogitGradChunkEntry(const float* logitChunk, const float* bias, const int* targetTokenIds, int rowStart, int chunkRows, int tokenCount, const float* maximumLogits, const float* sumExp, float* logitGradientChunk, float gradScale, int meanDivisor, int ignoreIndex, const int* perColumnMeanDivisor);
 #endif
 };
 
@@ -311,6 +319,8 @@ __global__ void CudaOpsCrossEntropyLossFromIdsEntry(const float* probabilities, 
 __global__ void CudaOpsCrossEntropyAddMeanLossFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* lossSum, int vocabularySize, int tokenCount);
 __global__ void CudaOpsCrossEntropyLogitGradientFromIdsEntry(const float* probabilities, const int* targetTokenIds, float* logitGradient, int vocabularySize, int tokenCount);
 __global__ void CudaOpsSoftmaxCrossEntropyFromLogitsEntry(const float* logits, const int* targetTokenIds, float* probabilities, float* logitGradient, float* lossSum, int vocabularySize, int tokenCount, float lossScale, int meanDivisor);
+__global__ void CudaOpsOnlineSoftmaxBiasedUpdateCaptureEntry(const float* logitChunk, const float* bias, int rowStart, int chunkRows, const int* targetTokenIds, int tokenCount, float* maximumLogits, float* sumExp, float* targetLogits);
+__global__ void CudaOpsOnlineSoftmaxBiasedLogitGradChunkEntry(const float* logitChunk, const float* bias, const int* targetTokenIds, int rowStart, int chunkRows, int tokenCount, const float* maximumLogits, const float* sumExp, float* logitGradientChunk, float gradScale, int meanDivisor, int ignoreIndex, const int* perColumnMeanDivisor);
 #endif
 
 #endif // CUDAOPS_HPP

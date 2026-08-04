@@ -1519,6 +1519,45 @@ __global__ void CudaOpsCaptureTargetLogitEntry(const float* logitChunk, const in
     targetLogits[column] = logitChunk[(targetId - rowStart) * tokenCount + column];
 }
 
+__global__ void CudaOpsOnlineSoftmaxBiasedUpdateCaptureEntry(const float* logitChunk, const float* bias, int rowStart, int chunkRows, const int* targetTokenIds, int tokenCount, float* maximumLogits, float* sumExp, float* targetLogits) {
+    const int column = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (column >= tokenCount) return;
+
+    float chunkMax = logitChunk[column] + bias[rowStart];
+    for (int row = 1; row < chunkRows; ++row) {
+        const float value = logitChunk[row * tokenCount + column] + bias[rowStart + row];
+        if (value > chunkMax)
+            chunkMax = value;
+    }
+    if (!isfinite(chunkMax))
+        chunkMax = 0.0f;
+
+    float chunkSum = 0.0f;
+    for (int row = 0; row < chunkRows; ++row)
+        chunkSum += expf(logitChunk[row * tokenCount + column] + bias[rowStart + row] - chunkMax);
+
+    const float oldMax = maximumLogits[column];
+    const float oldSum = sumExp[column];
+    float newMax = chunkMax;
+    if (isfinite(oldMax) && oldMax > newMax)
+        newMax = oldMax;
+
+    float combined = chunkSum;
+    if (isfinite(oldMax) && oldSum > 0.0f)
+        combined = oldSum * expf(oldMax - newMax) + chunkSum * expf(chunkMax - newMax);
+    else if (chunkMax != newMax)
+        combined = chunkSum * expf(chunkMax - newMax);
+
+    if (!isfinite(combined) || combined < 0.0f)
+        combined = 0.0f;
+    sumExp[column] = combined;
+    maximumLogits[column] = newMax;
+
+    const int targetId = targetTokenIds[column];
+    if (targetId >= rowStart && targetId < rowStart + chunkRows)
+        targetLogits[column] = logitChunk[(targetId - rowStart) * tokenCount + column] + bias[targetId];
+}
+
 __global__ void CudaOpsOnlineSoftmaxAddCeEntry(const float* targetLogits, const float* maximumLogits, const float* sumExp, float* lossSum, int tokenCount, float lossScale, int meanDivisor, const int* targetTokenIds, int ignoreIndex, const int* perColumnMeanDivisor) {
     const int column = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
     if (column >= tokenCount) return;
@@ -1550,6 +1589,35 @@ __global__ void CudaOpsOnlineSoftmaxLogitGradChunkEntry(const float* logitChunk,
     float safeSum = sumExp[column];
     if (safeSum < 1e-20f) safeSum = 1e-20f;
     const float probability = expf(logitChunk[index] - maximumLogits[column]) / safeSum;
+    int divisor = meanDivisor;
+    if (perColumnMeanDivisor != nullptr) divisor = perColumnMeanDivisor[column];
+    if (divisor <= 0) {
+        logitGradientChunk[index] = 0.0f;
+        return;
+    }
+    const float inverseMeanDivisor = 1.0f / static_cast<float>(divisor);
+    float gradient = probability * inverseMeanDivisor;
+    if (rowStart + row == targetTokenIds[column])
+        gradient -= inverseMeanDivisor;
+    logitGradientChunk[index] = gradient * gradScale;
+}
+
+__global__ void CudaOpsOnlineSoftmaxBiasedLogitGradChunkEntry(const float* logitChunk, const float* bias, const int* targetTokenIds, int rowStart, int chunkRows, int tokenCount, const float* maximumLogits, const float* sumExp, float* logitGradientChunk, float gradScale, int meanDivisor, int ignoreIndex, const int* perColumnMeanDivisor) {
+    const int elementCount = chunkRows * tokenCount;
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+
+    const int row = index / tokenCount;
+    const int column = index - row * tokenCount;
+    if (targetTokenIds[column] == ignoreIndex) {
+        logitGradientChunk[index] = 0.0f;
+        return;
+    }
+
+    float safeSum = sumExp[column];
+    if (safeSum < 1e-20f) safeSum = 1e-20f;
+    const float biasedLogit = logitChunk[index] + bias[rowStart + row];
+    const float probability = expf(biasedLogit - maximumLogits[column]) / safeSum;
     int divisor = meanDivisor;
     if (perColumnMeanDivisor != nullptr) divisor = perColumnMeanDivisor[column];
     if (divisor <= 0) {
@@ -1638,6 +1706,25 @@ void CudaOps::onlineSoftmaxUpdateFromChunk(const float* logitChunk, int chunkRow
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsOnlineSoftmaxUpdateEntry launch");
 }
 
+void CudaOps::onlineSoftmaxBiasedUpdateAndCaptureTargetFromChunk(const float* logitChunk, const CudaMatrix& bias, int rowStart, int chunkRows, const CudaIntBuffer& targetTokenIds, size_t tokenCount, CudaMatrix& maximumLogits, CudaMatrix& sumExp, CudaMatrix& targetLogits) {
+    if (logitChunk == nullptr) throw std::invalid_argument("CudaOps::onlineSoftmaxBiasedUpdateAndCaptureTargetFromChunk null logitChunk");
+    if (bias.empty()) throw std::invalid_argument("CudaOps::onlineSoftmaxBiasedUpdateAndCaptureTargetFromChunk empty bias");
+    if (targetTokenIds.deviceData == nullptr) throw std::invalid_argument("CudaOps::onlineSoftmaxBiasedUpdateAndCaptureTargetFromChunk empty targets");
+    if (chunkRows <= 0) throw std::invalid_argument("CudaOps::onlineSoftmaxBiasedUpdateAndCaptureTargetFromChunk invalid chunkRows");
+    if (rowStart < 0 || rowStart + chunkRows > static_cast<int>(bias.rows)) throw std::invalid_argument("CudaOps::onlineSoftmaxBiasedUpdateAndCaptureTargetFromChunk bias range");
+    if (maximumLogits.cols != tokenCount || sumExp.cols != tokenCount) throw std::invalid_argument("CudaOps::onlineSoftmaxBiasedUpdateAndCaptureTargetFromChunk stats shape");
+    if (tokenCount > targetTokenIds.capacityCount) throw std::invalid_argument("CudaOps::onlineSoftmaxBiasedUpdateAndCaptureTargetFromChunk target capacity");
+    targetLogits.ensureSize(1, tokenCount);
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::onlineSoftmaxBiasedUpdateAndCaptureTargetFromChunk no CUDA device");
+
+    const int tokenCountInt = static_cast<int>(tokenCount);
+    const int blockCount = (tokenCountInt + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsOnlineSoftmaxBiasedUpdateCaptureEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(
+        logitChunk, bias.buffer.deviceData, rowStart, chunkRows, targetTokenIds.deviceData, tokenCountInt,
+        maximumLogits.buffer.deviceData, sumExp.buffer.deviceData, targetLogits.buffer.deviceData);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsOnlineSoftmaxBiasedUpdateCaptureEntry launch");
+}
+
 void CudaOps::captureTargetLogitFromChunk(const CudaMatrix& logitChunk, const CudaIntBuffer& targetTokenIds, int rowStart, int chunkRows, size_t tokenCount, CudaMatrix& targetLogits) {
     if (logitChunk.empty()) throw std::invalid_argument("CudaOps::captureTargetLogitFromChunk empty logitChunk");
     CudaOps::captureTargetLogitFromChunk(logitChunk.buffer.deviceData, targetTokenIds, rowStart, chunkRows, tokenCount, targetLogits);
@@ -1718,6 +1805,39 @@ void CudaOps::onlineSoftmaxLogitGradientChunkInto(const float* logitChunk, const
         perColumnMeanDivisor != nullptr ? perColumnMeanDivisor->deviceData : nullptr
     );
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsOnlineSoftmaxLogitGradChunkEntry launch");
+}
+
+void CudaOps::onlineSoftmaxBiasedLogitGradientChunkInto(const float* logitChunk, const CudaMatrix& bias, const CudaIntBuffer& targetTokenIds, int rowStart, int chunkRows, size_t tokenCount, const CudaMatrix& maximumLogits, const CudaMatrix& sumExp, CudaMatrix& logitGradientChunk, float gradScale, int meanDivisor, int ignoreIndex, const CudaIntBuffer* perColumnMeanDivisor) {
+    if (logitChunk == nullptr) throw std::invalid_argument("CudaOps::onlineSoftmaxBiasedLogitGradientChunkInto null logitChunk");
+    if (bias.empty()) throw std::invalid_argument("CudaOps::onlineSoftmaxBiasedLogitGradientChunkInto empty bias");
+    if (chunkRows <= 0) throw std::invalid_argument("CudaOps::onlineSoftmaxBiasedLogitGradientChunkInto invalid chunkRows");
+    if (meanDivisor <= 0) meanDivisor = static_cast<int>(tokenCount);
+    if (rowStart < 0 || rowStart + chunkRows > static_cast<int>(bias.rows)) throw std::invalid_argument("CudaOps::onlineSoftmaxBiasedLogitGradientChunkInto bias range");
+    if (tokenCount > targetTokenIds.capacityCount) throw std::invalid_argument("CudaOps::onlineSoftmaxBiasedLogitGradientChunkInto target capacity");
+    if (perColumnMeanDivisor != nullptr && tokenCount > perColumnMeanDivisor->capacityCount)
+        throw std::invalid_argument("CudaOps::onlineSoftmaxBiasedLogitGradientChunkInto meanDivisor capacity");
+    logitGradientChunk.ensureSize(static_cast<size_t>(chunkRows), tokenCount);
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::onlineSoftmaxBiasedLogitGradientChunkInto no CUDA device");
+
+    const int tokenCountInt = static_cast<int>(tokenCount);
+    const int elementCount = chunkRows * tokenCountInt;
+    const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsOnlineSoftmaxBiasedLogitGradChunkEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(
+        logitChunk,
+        bias.buffer.deviceData,
+        targetTokenIds.deviceData,
+        rowStart,
+        chunkRows,
+        tokenCountInt,
+        maximumLogits.buffer.deviceData,
+        sumExp.buffer.deviceData,
+        logitGradientChunk.buffer.deviceData,
+        gradScale,
+        meanDivisor,
+        ignoreIndex,
+        perColumnMeanDivisor != nullptr ? perColumnMeanDivisor->deviceData : nullptr
+    );
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsOnlineSoftmaxBiasedLogitGradChunkEntry launch");
 }
 
 void CudaOps::sumColumnsAddIntoRows(const CudaMatrix& gradient, CudaMatrix& biasGradient, int rowStart) {
