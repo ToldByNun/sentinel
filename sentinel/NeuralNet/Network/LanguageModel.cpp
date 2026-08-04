@@ -201,20 +201,45 @@ double LanguageModel::probeCudaPackedTrainTokensPerSecond(int sequenceLength, in
     for (int exampleIndex = 0; exampleIndex < packBatch; ++exampleIndex)
         packPointers[static_cast<size_t>(exampleIndex)] = &examples[static_cast<size_t>(exampleIndex)];
 
+    device.preferTrainProgress = true;
+    device.trainProgressIntervalSec = 5.0;
+    device.trainProgressEpochStart = {};
+    device.trainProgressLastPrint = {};
+
+    char stepLabel[64];
     for (int step = 0; step < warmupSteps; ++step) {
+        std::snprintf(stepLabel, sizeof(stepLabel), "probe warmup");
+        device.trainProgressLabel = stepLabel;
+        device.trainProgressStep = step + 1;
+        device.trainProgressStepTotal = warmupSteps;
         device.trainGradients.zeroInPlace();
         device.accumulatePackedExamples(packPointers.data(), packBatch, device.trainGradients);
         device.applyGradients(device.trainGradients, 1.0f / static_cast<float>(packBatch));
+        SmokeLog::progressDone();
+        std::cout << "probe: warmup " << (step + 1) << "/" << warmupSteps
+                  << "  pack=" << packBatch << " seq=" << sequenceLength << " done" << std::endl;
     }
     if (cudaDeviceSynchronize() != cudaSuccess)
         throw std::runtime_error("LanguageModel::probeCudaPackedTrainTokensPerSecond warmup sync failed");
 
+    device.trainProgressEpochStart = {};
+    device.trainProgressLastPrint = {};
     const auto start = std::chrono::steady_clock::now();
     for (int step = 0; step < timedSteps; ++step) {
+        std::snprintf(stepLabel, sizeof(stepLabel), "probe timed");
+        device.trainProgressLabel = stepLabel;
+        device.trainProgressStep = step + 1;
+        device.trainProgressStepTotal = timedSteps;
         device.trainGradients.zeroInPlace();
         device.accumulatePackedExamples(packPointers.data(), packBatch, device.trainGradients);
         device.applyGradients(device.trainGradients, 1.0f / static_cast<float>(packBatch));
+        SmokeLog::progressDone();
+        std::cout << "probe: timed " << (step + 1) << "/" << timedSteps
+                  << "  pack=" << packBatch << " seq=" << sequenceLength << " done" << std::endl;
     }
+    device.trainProgressLabel = "";
+    device.trainProgressStep = 0;
+    device.trainProgressStepTotal = 0;
     if (cudaDeviceSynchronize() != cudaSuccess)
         throw std::runtime_error("LanguageModel::probeCudaPackedTrainTokensPerSecond timed sync failed");
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
@@ -523,6 +548,26 @@ void LanguageModel::setCudaPreferCpuAdamOffload(bool enabled) {
               << "  hostGrads=" << (CudaAdam::preferHostGradients ? "on" : "off")
               << "  amp=" << (CudaAmp::preferMixedPrecision ? "on" : "off")
               << "  int8 adam " << (CudaAdam::preferInt8Moments ? "on" : "off") << '\n';
+}
+
+void LanguageModel::setCudaPreferHostSgd(bool enabled) {
+    CudaAdam::preferHostSgd = enabled;
+    if (enabled) {
+        CudaAdam::preferCpuOffload = true;
+        CudaAdam::preferFp16GpuWeights = true;
+        CudaAdam::preferHostGradients = true;
+        CudaAdam::preferInt8Moments = false;
+    }
+    if (this->device != nullptr) {
+        this->device->trainStateReady = false;
+        if (this->deviceTrainEnabled) {
+            this->device->ensureTrainState();
+            this->device->applyVramPackBudget();
+            this->device->trainStateReady = false;
+            this->device->ensureTrainState();
+        }
+    }
+    std::cout << "LanguageModel::setCudaPreferHostSgd: " << (enabled ? "on" : "off") << '\n';
 }
 
 void LanguageModel::setCudaPreferFlashAttention(bool enabled) {

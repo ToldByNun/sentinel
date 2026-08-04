@@ -103,14 +103,29 @@ NB_MODULE(_core, m) {
             &LanguageModel::setCudaPreferCpuAdamOffload,
             nb::arg("enabled"))
         .def(
+            "set_prefer_host_sgd",
+            &LanguageModel::setCudaPreferHostSgd,
+            nb::arg("enabled"))
+        .def(
             "set_prefer_train_graph",
             &LanguageModel::setCudaPreferTrainGraph,
             nb::arg("enabled"))
+        .def(
+            "set_max_packed_columns",
+            &LanguageModel::setCudaMaxPackedColumns,
+            nb::arg("columns"))
         .def(
             "apply_vram_pack_budget",
             &LanguageModel::applyCudaVramPackBudget,
             nb::arg("free_fraction") = 0.70f,
             nb::arg("safety_reserve_bytes") = 2560ull * 1024ull * 1024ull)
+        .def(
+            "probe_cuda_packed_train_tokens_per_second",
+            &LanguageModel::probeCudaPackedTrainTokensPerSecond,
+            nb::arg("sequence_length"),
+            nb::arg("warmup_steps") = 3,
+            nb::arg("timed_steps") = 8,
+            "Synthetic packed-train throughput probe (tok/s)")
         .def_prop_ro("cuda_enabled", &LanguageModel::cudaEnabled)
         .def_prop_ro("cuda_train_enabled", &LanguageModel::cudaTrainEnabled)
         .def_prop_ro("parameter_count", &LanguageModel::parameterElementCount)

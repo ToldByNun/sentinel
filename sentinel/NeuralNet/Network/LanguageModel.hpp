@@ -127,6 +127,9 @@ public:
     /// <summary>ZeRO-Offload Stage-1: keep Adam m/v on host RAM (disables int8 device moments)</summary>
     void setCudaPreferCpuAdamOffload(bool enabled);
 
+    /// <summary>4B PoC path: SGD on host masters (requires cpu-adam / FP16 GPU weights offload)</summary>
+    void setCudaPreferHostSgd(bool enabled);
+
     /// <summary>toggle flash attention on device blocks</summary>
     void setCudaPreferFlashAttention(bool enabled);
 

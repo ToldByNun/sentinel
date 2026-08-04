@@ -24,8 +24,7 @@
 
 #include "CudaTransformerBlock.hpp"
 
-
-
+#include <chrono>
 #include <vector>
 
 
@@ -242,6 +241,18 @@ public:
 
     /// <summary>accumulate fwd/bwd/D2H/SGD/H2D wall times during packed train</summary>
     bool preferTrainPhaseTrace;
+
+    /// <summary>rate-limited console progress during fwd/bwd blocks (default on, ~5s)</summary>
+    bool preferTrainProgress;
+    double trainProgressIntervalSec;
+    const char* trainProgressLabel;
+    int trainProgressStep;
+    int trainProgressStepTotal;
+    std::chrono::steady_clock::time_point trainProgressLastPrint{};
+    std::chrono::steady_clock::time_point trainProgressEpochStart{};
+
+    /// <summary>print phase/block progress at most every trainProgressIntervalSec</summary>
+    void maybeReportTrainProgress(const char* phase, int current, int total);
 
     /// <summary>last packed-train phase timers (seconds); filled when preferTrainPhaseTrace</summary>
     struct TrainPhaseTimers {

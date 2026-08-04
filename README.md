@@ -33,6 +33,13 @@ python examples/python/train_tiny.py
 python examples/python/generate.py tiny_demo.snlm "the cat"
 ```
 
+On Windows, `cmake` is often only on PATH inside a **VS Developer** shell. If pip fails with `CMakeNotFoundError`, open *x64 Native Tools Command Prompt for VS*, or prepend the VS CMake bin once:
+
+```powershell
+$env:PATH = "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;$env:CUDA_PATH\bin;$env:PATH"
+pip install -e . --no-build-isolation
+```
+
 ```python
 import sentinel as S
 
@@ -156,6 +163,7 @@ Default SERA demo (when suite flags are off): Arrow corpus, ~8×768. Working dir
 | `python/sentinel/`     | Python package + nanobind `_core` (import name still `sentinel`)     |
 | `sentinel/`            | C++/CUDA engine sources (`NeuralNet/`, demo `main.cpp`, …)           |
 | `examples/`            | C++ + `examples/python/` — no external data                          |
+| `benchmarks/`          | Paper: sentinel / pytorch / deepspeed / fsdp (shared `paper_config`) |
 | `cmake/`               | `find_package(Sentinel)` package config                              |
 | `sentinel/NeuralNet/`  | Engine: Network, Cuda, Layers, Data, Tokenizer, …                    |
 | `sentinel/main.cpp`    | Smokes / scale harness / SERA demo                                   |

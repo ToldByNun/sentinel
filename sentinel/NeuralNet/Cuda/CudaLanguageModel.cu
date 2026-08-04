@@ -36,6 +36,11 @@ CudaLanguageModel::CudaLanguageModel()
       preferMuon(false),
       preferTrainMemTrace(false),
       preferTrainPhaseTrace(false),
+      preferTrainProgress(true),
+      trainProgressIntervalSec(5.0),
+      trainProgressLabel(""),
+      trainProgressStep(0),
+      trainProgressStepTotal(0),
       adam(0.001f),
       muon(0.001f),
       trainStateReady(false),
@@ -53,6 +58,42 @@ CudaLanguageModel::CudaLanguageModel()
 
 bool CudaLanguageModel::activationCheckpointingActive() const {
     return this->activationCheckpointMode != ActivationCheckpointMode::Off;
+}
+
+void CudaLanguageModel::maybeReportTrainProgress(const char* phase, int current, int total) {
+    if (!this->preferTrainProgress || phase == nullptr || total <= 0) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (this->trainProgressEpochStart.time_since_epoch().count() == 0)
+        this->trainProgressEpochStart = now;
+    const bool first = this->trainProgressLastPrint.time_since_epoch().count() == 0;
+    const double since = std::chrono::duration<double>(now - this->trainProgressLastPrint).count();
+    if (!first && since < this->trainProgressIntervalSec) return;
+    this->trainProgressLastPrint = now;
+    const double elapsed = std::chrono::duration<double>(now - this->trainProgressEpochStart).count();
+    const char* label = (this->trainProgressLabel != nullptr && this->trainProgressLabel[0] != '\0')
+        ? this->trainProgressLabel
+        : "train";
+    if (this->trainProgressStepTotal > 0) {
+        SmokeLog::progress(
+            label,
+            "step %d/%d  %s  block %d/%d  (%.0f%%)  elapsed=%.1fs",
+            this->trainProgressStep,
+            this->trainProgressStepTotal,
+            phase,
+            current + 1,
+            total,
+            100.0 * static_cast<double>(current + 1) / static_cast<double>(total),
+            elapsed);
+    } else {
+        SmokeLog::progress(
+            label,
+            "%s  block %d/%d  (%.0f%%)  elapsed=%.1fs",
+            phase,
+            current + 1,
+            total,
+            100.0 * static_cast<double>(current + 1) / static_cast<double>(total),
+            elapsed);
+    }
 }
 
 const char* CudaLanguageModel::activationCheckpointModeName(ActivationCheckpointMode mode) {
@@ -202,6 +243,10 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
     };
 
     for (int blockIndex = static_cast<int>(this->blocks.size()) - 1; blockIndex >= 0; --blockIndex) {
+        this->maybeReportTrainProgress(
+            "bwd",
+            static_cast<int>(this->blocks.size()) - 1 - blockIndex,
+            static_cast<int>(this->blocks.size()));
         CudaTransformerBlock& block = this->blocks[static_cast<size_t>(blockIndex)];
         CudaTransformerBlockHostWeightGrads hostGrads{};
         CudaTransformerBlockHostWeightGrads* hostGradsPtr = nullptr;
@@ -1626,6 +1671,7 @@ void CudaLanguageModel::forwardTrunkFromDevice(size_t tokenCount, int segmentLen
     }
 
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+        this->maybeReportTrainProgress("fwd", static_cast<int>(blockIndex), static_cast<int>(this->blocks.size()));
         if (this->activationCheckpointingActive()) {
             if (this->useHalfActivationCheckpoints())
                 CudaAmp::castToHalfSaturated(this->hidden, this->blockInputCheckpointsHalf[blockIndex]);
@@ -2462,7 +2508,7 @@ void CudaLanguageModel::trainOnExamples(
 
             const auto now = std::chrono::steady_clock::now();
             const double sinceProgress = std::chrono::duration<double>(now - lastProgress).count();
-            if (sinceProgress >= 15.0 || doneExamples == exampleCount) {
+            if (sinceProgress >= 5.0 || doneExamples == exampleCount) {
                 const double elapsed = std::chrono::duration<double>(now - progressStart).count();
                 const double tokPerSec = elapsed > 0.0 ? static_cast<double>(donePredictions) / elapsed : 0.0;
                 const double size1Percent = packCount > 0
