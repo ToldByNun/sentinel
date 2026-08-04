@@ -8,22 +8,34 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Linux
+          - os: windows-latest
+            name: Windows
+
+    runs-on: ${{ matrix.os }}
+    name: Build (${{ matrix.name }})
 
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    - name: CUDA Toolkit installieren
-      uses: Jimver/cuda-toolkit@v0.2.24
-      with:
-        cuda: '13.0.0'
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        id: cuda-toolkit
+        with:
+          cuda: '13.0.0'
+          method: network
 
-    - name: Create Build Directory
-      run: cmake -B build -S .
+      - name: Show CUDA version
+        run: nvcc -V
 
-    - name: Compile Project
-      run: cmake --build build --config Release
+      - name: Configure (compile only, no GPU on runners)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSENTINEL_CUDA_ARCHITECTURES=75
 
-    - name: Run Tests (optional)
-      run: ctest --test-dir build --output-on-failure
+      - name: Build
+        run: cmake --build build --config Release --parallel
