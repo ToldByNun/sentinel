@@ -477,6 +477,15 @@ void LanguageModel::setCudaPreferMuon(bool enabled) {
     std::cout << "LanguageModel::setCudaPreferMuon: " << (enabled ? "on" : "off") << '\n';
 }
 
+void LanguageModel::setCudaMuonNsSteps(int steps) {
+    if (steps <= 0)
+        throw std::invalid_argument("LanguageModel::setCudaMuonNsSteps steps must be > 0");
+    if (this->device == nullptr) this->enableCuda();
+    if (this->device == nullptr) return;
+    this->device->muon.nsSteps = steps;
+    std::cout << "LanguageModel::setCudaMuonNsSteps: " << steps << '\n';
+}
+
 void LanguageModel::setCudaPreferCpuAdamOffload(bool enabled) {
     if (this->device == nullptr) this->enableCuda();
     if (this->device == nullptr) return;

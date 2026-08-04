@@ -291,29 +291,34 @@ void CudaMuon::newtonSchulz5InPlace(CudaMatrix& matrix) {
     const bool previousAmp = CudaAmp::preferMixedPrecision;
     CudaAmp::preferMixedPrecision = false;
 
-    ScopedCudaEventPair nsTimer;
-    nsTimer.begin(this->profileEnabled);
+    ScopedCudaEventPair normalizeTimer;
+    ScopedCudaEventPair nsGemmTimer;
+    ScopedCudaEventPair nsElemwiseTimer;
 
     const bool transposeBack = matrix.rows > matrix.cols;
     CudaMatrix* working = &matrix;
     if (transposeBack) {
-        transposeInto(matrix, this->nsWork);
-        working = &this->nsWork;
+        this->nsX.ensureSize(matrix.cols, matrix.rows);
+        transposeInto(matrix, this->nsX);
+        working = &this->nsX;
     }
 
+    normalizeTimer.begin(this->profileEnabled);
     normalizeFrobeniusInPlace(*working, this->frobeniusScratch);
-    this->nsX.ensureSize(working->rows, working->cols);
-    CudaOps::copyInto(*working, this->nsX);
+    this->profile.normalizeMs += normalizeTimer.endMs();
 
     for (int step = 0; step < this->nsSteps; ++step) {
-        this->nsA.ensureSize(this->nsX.rows, this->nsX.rows);
-        CudaMatrix::multiplyInto(this->nsX, this->nsX, this->nsA, false, true);
+        this->nsA.ensureSize(working->rows, working->rows);
+        nsGemmTimer.begin(this->profileEnabled);
+        CudaMatrix::multiplyInto(*working, *working, this->nsA, false, true);
 
         this->nsAA.ensureSize(this->nsA.rows, this->nsA.cols);
         CudaMatrix::multiplyInto(this->nsA, this->nsA, this->nsAA, false, false);
+        this->profile.nsGemmMs += nsGemmTimer.endMs();
 
         this->nsB.ensureSize(this->nsA.rows, this->nsA.cols);
         const int bCount = static_cast<int>(this->nsB.elementCount());
+        nsElemwiseTimer.begin(this->profileEnabled);
         muonPolyCombine<<<elementwiseBlocks(bCount), 256, 0, CudaMatmul::activeStream()>>>(
             this->nsB.buffer.deviceData,
             this->nsA.buffer.deviceData,
@@ -323,25 +328,24 @@ void CudaMuon::newtonSchulz5InPlace(CudaMatrix& matrix) {
             kNsC);
         throwIfFailed(cudaGetLastError(), "muonPolyCombine B");
 
-        this->nsBX.ensureSize(this->nsX.rows, this->nsX.cols);
-        CudaMatrix::multiplyInto(this->nsB, this->nsX, this->nsBX, false, false);
+        this->nsBX.ensureSize(working->rows, working->cols);
+        nsGemmTimer.begin(this->profileEnabled);
+        CudaMatrix::multiplyInto(this->nsB, *working, this->nsBX, false, false);
+        this->profile.nsGemmMs += nsGemmTimer.endMs();
 
-        const int xCount = static_cast<int>(this->nsX.elementCount());
+        const int xCount = static_cast<int>(working->elementCount());
         muonScaleAddInPlace<<<elementwiseBlocks(xCount), 256, 0, CudaMatmul::activeStream()>>>(
-            this->nsX.buffer.deviceData,
+            working->buffer.deviceData,
             this->nsBX.buffer.deviceData,
             xCount,
             kNsA);
         throwIfFailed(cudaGetLastError(), "muonScaleAddInPlace X");
+        this->profile.nsElemwiseMs += nsElemwiseTimer.endMs();
     }
 
     if (transposeBack)
-        transposeInto(this->nsX, matrix);
-    else
-        CudaOps::copyInto(this->nsX, matrix);
+        transposeInto(*working, matrix);
 
-    // Attribute whole NS (normalize + gemms + elemwise) to nsGemmMs for coarse profile.
-    this->profile.nsGemmMs += nsTimer.endMs();
     CudaAmp::preferMixedPrecision = previousAmp;
 }
 
