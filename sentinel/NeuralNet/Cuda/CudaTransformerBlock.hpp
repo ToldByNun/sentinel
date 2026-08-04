@@ -14,7 +14,7 @@
 
 #include "CudaRMSNorm.hpp"
 
-
+class CudaTransformerBlock;
 
 /// <summary>device resident gradients for one transformer block</summary>
 

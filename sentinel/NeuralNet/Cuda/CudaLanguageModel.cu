@@ -961,7 +961,7 @@ void CudaLanguageModel::applyVramPackBudget(float freeFraction, size_t safetyRes
     CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeBytes, &totalBytes), "CudaLanguageModel::applyVramPackBudget memGetInfo");
 
     // WDDM shares VRAM with the desktop ? keep a hard floor so DWM/apps don't thrash the train working set.
-    const size_t displayFloor = (std::max)(safetyReserveBytes, totalBytes / 5ull); // >=20% of card or explicit safety
+    const size_t displayFloor = (std::max)(safetyReserveBytes, totalBytes / size_t{5}); // >=20% of card or explicit safety
     const size_t pendingStatic = this->estimatePendingTrainStaticBytes();
     const size_t reserved = pendingStatic + displayFloor;
     size_t usableBytes = freeBytes > reserved ? freeBytes - reserved : 0;
