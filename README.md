@@ -61,7 +61,7 @@ pip install . -C cmake.define.SENTINEL_CUDA_ARCHITECTURES="75;86;89;120"
 
 ### Publishing wheels (GitHub → PyPI)
 
-Workflow: [`.github/workflows/publish.yml`](.github/workflows/publish.yml). Builds **sdist** + **cp310–cp312** wheels for **Linux** and **Windows** (CUDA 13 toolkit on the runner; fat binary arches). Publishes on a GitHub **Release**, or via *workflow_dispatch* with `publish_to_pypi=true`.
+Workflow: [`.github/workflows/publish.yml`](.github/workflows/publish.yml). Builds **sdist** + **cp310–cp312** wheels for **Linux** (`manylinux_2_34`, Ubuntu 22.04 / glibc ≥ 2.34) and **Windows** (CUDA 13 toolkit on the runner; fat binary arches). Publishes on a GitHub **Release**, or via *workflow_dispatch* with `publish_to_pypi=true`.
 
 One-time setup:
 

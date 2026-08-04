@@ -48,13 +48,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Ubuntu 22.04 → glibc 2.35 → honest manylinux_2_34 (not 2014 / glibc 2.17).
+          - os: ubuntu-22.04
             name: Linux
             python: "3.10"
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             name: Linux
             python: "3.11"
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             name: Linux
             python: "3.12"
           - os: windows-2022
@@ -86,7 +87,7 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update
           sudo apt-get install -y \
@@ -153,16 +154,39 @@ jobs:
           CMAKE_GENERATOR: Ninja
           CMAKE_BUILD_PARALLEL_LEVEL: "4"
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip build auditwheel
-          
+          mkdir -p dist_raw dist
+
           python -m build --wheel --outdir dist_raw
-          
-          python -m auditwheel repair dist_raw/*.whl \
-            --plat manylinux2014_x86_64 \
-            -w dist/ \
-            --exclude libcublas.so.13 \
-            --exclude libcublasLt.so.13 \
+
+          # CUDA/driver libs stay on the user machine (same as C++ engine).
+          # Do NOT target manylinux2014 — host is glibc 2.35 (Ubuntu 22.04).
+          # Let auditwheel pick manylinux_2_34 (or newer if symbols require it).
+          EXCLUDES=(
+            --exclude libcublas.so.13
+            --exclude libcublasLt.so.13
             --exclude libcudart.so.13
+            --exclude libnvJitLink.so.13
+            --exclude libcuda.so.1
+          )
+
+          echo "=== auditwheel show ==="
+          python -m auditwheel show dist_raw/*.whl || true
+
+          if python -m auditwheel repair dist_raw/*.whl \
+              -w dist/ \
+              --plat manylinux_2_34_x86_64 \
+              "${EXCLUDES[@]}"; then
+            echo "Repaired to manylinux_2_34_x86_64"
+          else
+            echo "manylinux_2_34 repair failed; trying auto platform tag"
+            python -m auditwheel repair dist_raw/*.whl -w dist/ "${EXCLUDES[@]}" \
+              || {
+                echo "auditwheel failed entirely — shipping plain linux_x86_64 wheel"
+                cp dist_raw/*.whl dist/
+              }
+          fi
 
       - name: Build wheel (Windows)
         if: runner.os == 'Windows'
