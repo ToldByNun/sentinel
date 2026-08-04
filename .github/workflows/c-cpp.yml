@@ -2,9 +2,9 @@ name: CMake C++ CUDA CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [ "main", "master" ]
   pull_request:
-    branches: [main, master]
+    branches: [ "main", "master" ]
 
 jobs:
   build:
@@ -20,9 +20,11 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     name: Build (${{ matrix.name }})
+    timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
       - name: Install CUDA 13 (Linux)
         if: runner.os == 'Linux'
@@ -31,12 +33,13 @@ jobs:
           sudo apt-get update
 
           wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
 
           sudo apt-get update
 
           sudo apt-get install -y \
-              cuda-toolkit-13
+            cuda-toolkit-13-0
 
           echo "/usr/local/cuda/bin" >> $GITHUB_PATH
 
@@ -45,23 +48,36 @@ jobs:
         shell: powershell
         run: |
 
-          choco install cuda --version=13.0.0 -y
+          $url="https://developer.download.nvidia.com/compute/cuda/13.0.0/network_installers/cuda_13.0.0_windows_network.exe"
+
+          Invoke-WebRequest `
+            -Uri $url `
+            -OutFile cuda_installer.exe
+
+
+          Start-Process `
+            -FilePath .\cuda_installer.exe `
+            -ArgumentList "-s" `
+            -Wait
+
 
           echo "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0" >> $env:GITHUB_ENV
+
           echo "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0\bin" >> $env:GITHUB_PATH
 
-      - name: Setup MSVC
+      - name: Setup MSVC dev environment
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      - uses: seanmiddleditch/gha-setup-ninja@v4
+      - name: Setup Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v4
 
-      - name: Verify CUDA
+      - name: CUDA Version
         shell: bash
         run: |
           nvcc --version
 
-      - name: Configure
+      - name: Configure CMake
         run: |
           cmake \
             -S . \
@@ -69,6 +85,7 @@ jobs:
             -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DSENTINEL_CUDA_ARCHITECTURES=75
+
 
       - name: Build
         run: |
