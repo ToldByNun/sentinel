@@ -1,4 +1,8 @@
-"""One-step 4B host-SGD profile target for nsys (warmup outside profile window)."""
+"""4B host-SGD nsys target: setup+warmup outside capture, one timed step inside.
+
+Use:
+  nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop ...
+"""
 
 from __future__ import annotations
 
@@ -11,7 +15,33 @@ if str(ROOT) not in sys.path:
 
 import sentinel as S
 
+try:
+    from cuda.bindings import runtime as cudart  # type: ignore
+except Exception:
+    cudart = None
+
 VOCAB, EMBED, BLOCKS, HEADS, POS, SEQ, LR = 32000, 3072, 34, 48, 2048, 512, 3e-4
+
+
+def _profiler_start() -> None:
+    if cudart is not None:
+        cudart.cudaProfilerStart()
+        return
+    # Fallback: ctypes cuda.dll
+    import ctypes
+
+    lib = ctypes.CDLL("cudart64_13.dll")
+    lib.cudaProfilerStart()
+
+
+def _profiler_stop() -> None:
+    if cudart is not None:
+        cudart.cudaProfilerStop()
+        return
+    import ctypes
+
+    lib = ctypes.CDLL("cudart64_13.dll")
+    lib.cudaProfilerStop()
 
 
 def main() -> int:
@@ -27,9 +57,17 @@ def main() -> int:
     model.set_prefer_host_sgd(True)
     model.set_prefer_train_graph(False)
     print(f"max_packed_columns={model.max_packed_columns}", flush=True)
-    # Warmup outside nsys capture if launched with --capture-range; here always 1+1.
-    _ = model.probe_cuda_packed_train_tokens_per_second(SEQ, 1, 1)
-    print("profile step done", flush=True)
+
+    print("warmup outside capture", flush=True)
+    _ = model.probe_cuda_packed_train_tokens_per_second(SEQ, 1, 0)
+
+    print("capture start", flush=True)
+    _profiler_start()
+    try:
+        _ = model.probe_cuda_packed_train_tokens_per_second(SEQ, 0, 1)
+    finally:
+        _profiler_stop()
+    print("capture stop / profile step done", flush=True)
     return 0
 
 

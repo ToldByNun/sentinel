@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cuda_runtime.h>
 #include <cublasLt.h>
@@ -63,6 +64,25 @@ static CublasLtGemmState& cublasLtGemmState() {
     return state;
 }
 
+namespace {
+bool g_asyncAllocReady = false;
+bool g_asyncAllocOk = false;
+
+void ensureAsyncDeviceAllocator() {
+    if (g_asyncAllocReady) return;
+    g_asyncAllocReady = true;
+    // Disabled: cudaMallocAsync + retained mempool makes cudaMemGetInfo report ~0 free
+    // on WDDM even after TrimTo, which collapses pack budgeting (4B Full@4096 → 2048)
+    // and tanks tok/s. Prefer sync alloc; cut Free tax via buffer recycle instead.
+    g_asyncAllocOk = false;
+}
+
+cudaStream_t allocStreamOrDefault() {
+    cudaStream_t stream = CudaMatmul::activeStream();
+    return stream != nullptr ? stream : static_cast<cudaStream_t>(0);
+}
+} // namespace
+
 static bool ensureCublasLtHandle() {
     CublasLtGemmState& state = cublasLtGemmState();
     if (state.initAttempted) return state.initSucceeded;
@@ -102,8 +122,15 @@ void CudaDeviceBuffer::ensureCapacity(size_t requiredBytes) {
 
     this->free();
 
+    ensureAsyncDeviceAllocator();
     float* allocated = nullptr;
-    CudaMatmul::throwIfCudaFailed(cudaMalloc(&allocated, requiredBytes), "cudaMalloc");
+    if (g_asyncAllocOk) {
+        CudaMatmul::throwIfCudaFailed(
+            cudaMallocAsync(reinterpret_cast<void**>(&allocated), requiredBytes, allocStreamOrDefault()),
+            "cudaMallocAsync");
+    } else {
+        CudaMatmul::throwIfCudaFailed(cudaMalloc(&allocated, requiredBytes), "cudaMalloc");
+    }
     this->deviceData = allocated;
     this->capacityBytes = requiredBytes;
 }
@@ -139,8 +166,18 @@ void CudaDeviceBuffer::releaseToPool() {
 void CudaDeviceBuffer::free() {
     if (this->deviceData == nullptr) return;
 
-    CudaAmp::invalidateActivationHalfCaches();
-    cudaFree(this->deviceData);
+    CudaAmp::invalidateActivationHalfCachesFor(this->deviceData);
+    ensureAsyncDeviceAllocator();
+    if (g_asyncAllocOk) {
+        // Best-effort async free into the retained default mempool.
+        const cudaError_t status = cudaFreeAsync(this->deviceData, allocStreamOrDefault());
+        if (status != cudaSuccess) {
+            cudaGetLastError();
+            cudaFree(this->deviceData);
+        }
+    } else {
+        cudaFree(this->deviceData);
+    }
     this->deviceData = nullptr;
     this->capacityBytes = 0;
 }
@@ -887,6 +924,22 @@ bool CudaMatmul::isAvailable() {
     if (cudaGetDeviceCount(&deviceCount) != cudaSuccess) return false;
     if (deviceCount <= 0) return false;
     return true;
+}
+
+void CudaMatmul::trimAsyncMemPool(size_t bytesToKeep) {
+    ensureAsyncDeviceAllocator();
+    if (!g_asyncAllocOk) return;
+    int device = 0;
+    if (cudaGetDevice(&device) != cudaSuccess) return;
+    cudaMemPool_t pool = nullptr;
+    if (cudaDeviceGetDefaultMemPool(&pool, device) != cudaSuccess || pool == nullptr) return;
+    // Temporarily force release so MemGetInfo sees reclaimable VRAM (WDDM + budgeting).
+    std::uint64_t zero = 0;
+    cudaMemPoolSetAttribute(pool, cudaMemPoolAttrReleaseThreshold, &zero);
+    cudaMemPoolTrimTo(pool, bytesToKeep);
+    cudaDeviceSynchronize();
+    std::uint64_t threshold = 4ull << 30; // restore bounded retain for train churn
+    cudaMemPoolSetAttribute(pool, cudaMemPoolAttrReleaseThreshold, &threshold);
 }
 
 void CudaMatmul::multiplyIntoInternal(const Matrix& left, const Matrix& right, Matrix& out, CudaMatmulTiming* timing) {

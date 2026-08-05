@@ -46,6 +46,8 @@ public:
     size_t byteCount() const;
     void ensureSize(size_t rowCount, size_t columnCount);
     void free();
+    /// <summary>move donor device half buffer into this; clears shapes</summary>
+    void takeDeviceStorageFrom(CudaHalfMatrix& donor);
 };
 
 /// <summary>
@@ -94,6 +96,12 @@ public:
 
     /// <summary>cast activations to half into reusable scratch; returns device half pointer</summary>
     static const void* castActivationToHalfScratch(const float* source, size_t elementCount);
+
+    /// <summary>
+    /// persist FP16 view of an FP32 activation (reuses sticky scratch if present).
+    /// Used so Full-ckpt bwd weight GEMMs skip a second float→half cast of inputCache.
+    /// </summary>
+    static void persistActivationHalf(const float* source, size_t rows, size_t cols, CudaHalfMatrix& destination);
 
     /// <summary>register FP32 master weight for sticky FP16 GEMM casts (same pointer until free)</summary>
     static void registerMasterWeight(const float* deviceData, size_t elementCount);
@@ -148,9 +156,12 @@ public:
     static void invalidateMasterWeightHalves();
 
     /// <summary>
-    /// drop sticky activation FP16 scratch identity (call when any device buffer is freed/pooled;
-    /// pointers may be recycled with new contents)
+    /// drop sticky activation FP16 identity for any slot whose FP32 source is devicePtr
+    /// (call when that buffer is freed; other slots stay warm)
     /// </summary>
+    static void invalidateActivationHalfCachesFor(const void* devicePtr);
+
+    /// <summary>drop all sticky activation FP16 identities</summary>
     static void invalidateActivationHalfCaches();
 
     /// <summary>drop all master-weight registrations</summary>

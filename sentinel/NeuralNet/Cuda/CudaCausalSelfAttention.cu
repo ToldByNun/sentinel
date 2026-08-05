@@ -282,7 +282,15 @@ void CudaCausalSelfAttention::forward(const CudaMatrix& input, CudaMatrix& out, 
     this->attendFullSequence(out);
 }
 
-void CudaCausalSelfAttention::backward(const CudaMatrix& outputGradient, CudaMatrix& inputGradient, CudaMatrix& queryWeightGradient, CudaMatrix& keyWeightGradient, CudaMatrix& valueWeightGradient, CudaMatrix& outputWeightGradient) {
+void CudaCausalSelfAttention::backward(
+    const CudaMatrix& outputGradient,
+    CudaMatrix& inputGradient,
+    CudaMatrix& queryWeightGradient,
+    CudaMatrix& keyWeightGradient,
+    CudaMatrix& valueWeightGradient,
+    CudaMatrix& outputWeightGradient,
+    bool materializeSplitWeightGrads
+) {
     if (this->inputCache.empty()) throw std::logic_error("CudaCausalSelfAttention::backward called before forward");
     if (outputGradient.rows != this->outputWeight.rows || outputGradient.cols != this->attended.cols)
         throw std::invalid_argument("CudaCausalSelfAttention::backward output gradient shape mismatch");
@@ -416,13 +424,15 @@ void CudaCausalSelfAttention::backward(const CudaMatrix& outputGradient, CudaMat
     CudaMatmul::memcpyDevice(this->qkvProjected.buffer.deviceData + 2ull * sliceElements, this->valueGradient.buffer.deviceData, sliceBytes);
 
     CudaMatrix::multiplyInto(this->qkvProjected, this->inputCache, this->qkvWeightGradient, false, true);
-    queryWeightGradient.ensureSize(this->queryWeight.rows, this->queryWeight.cols);
-    keyWeightGradient.ensureSize(this->keyWeight.rows, this->keyWeight.cols);
-    valueWeightGradient.ensureSize(this->valueWeight.rows, this->valueWeight.cols);
-    const size_t weightSliceBytes = this->queryWeight.byteCount();
-    CudaMatmul::memcpyDevice(queryWeightGradient.buffer.deviceData, this->qkvWeightGradient.buffer.deviceData, weightSliceBytes);
-    CudaMatmul::memcpyDevice(keyWeightGradient.buffer.deviceData, this->qkvWeightGradient.buffer.deviceData + this->queryWeight.elementCount(), weightSliceBytes);
-    CudaMatmul::memcpyDevice(valueWeightGradient.buffer.deviceData, this->qkvWeightGradient.buffer.deviceData + 2ull * this->queryWeight.elementCount(), weightSliceBytes);
+    if (materializeSplitWeightGrads) {
+        queryWeightGradient.ensureSize(this->queryWeight.rows, this->queryWeight.cols);
+        keyWeightGradient.ensureSize(this->keyWeight.rows, this->keyWeight.cols);
+        valueWeightGradient.ensureSize(this->valueWeight.rows, this->valueWeight.cols);
+        const size_t weightSliceBytes = this->queryWeight.byteCount();
+        CudaMatmul::memcpyDevice(queryWeightGradient.buffer.deviceData, this->qkvWeightGradient.buffer.deviceData, weightSliceBytes);
+        CudaMatmul::memcpyDevice(keyWeightGradient.buffer.deviceData, this->qkvWeightGradient.buffer.deviceData + this->queryWeight.elementCount(), weightSliceBytes);
+        CudaMatmul::memcpyDevice(valueWeightGradient.buffer.deviceData, this->qkvWeightGradient.buffer.deviceData + 2ull * this->queryWeight.elementCount(), weightSliceBytes);
+    }
 
     CudaMatrix::multiplyInto(this->qkvWeight, this->qkvProjected, inputGradient, true, false);
 }

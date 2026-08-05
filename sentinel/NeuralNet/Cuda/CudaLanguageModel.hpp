@@ -189,6 +189,9 @@ public:
 
     std::vector<CudaTransformerBlock> blocks;
 
+    /// <summary>recycles one layer of deferred Host-SGD weight-grad device buffers</summary>
+    CudaTransformerBlock deferredWeightGradRecycle;
+
     CudaRMSNorm finalNorm;
 
     CudaMatrix projectionWeight;
@@ -387,6 +390,8 @@ public:
     cudaStream_t trainStream;
     /// <summary>non-blocking stream for deferred host-grad D2H (preferHostSgd pipeline)</summary>
     cudaStream_t hostGradCopyStream;
+    /// <summary>separate non-blocking stream for FP16 weight H2D so it never blocks grad D2H</summary>
+    cudaStream_t hostWeightUploadStream;
     cudaEvent_t hostGradComputeEvent;
     cudaEvent_t hostGradD2hEvent;
     cudaEvent_t hostWeightH2dEvent;

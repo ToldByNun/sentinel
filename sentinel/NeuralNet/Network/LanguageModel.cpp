@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -202,7 +203,7 @@ double LanguageModel::probeCudaPackedTrainTokensPerSecond(int sequenceLength, in
         packPointers[static_cast<size_t>(exampleIndex)] = &examples[static_cast<size_t>(exampleIndex)];
 
     device.preferTrainProgress = false;
-    device.preferTrainPhaseTrace = false;
+    device.preferTrainPhaseTrace = (std::getenv("SENTINEL_PHASE_TRACE") != nullptr);
     device.trainProgressIntervalSec = 5.0;
     device.trainProgressEpochStart = {};
     device.trainProgressLastPrint = {};

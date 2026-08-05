@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cuda_runtime.h>
+#include <future>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -61,6 +62,7 @@ CudaLanguageModel::CudaLanguageModel()
       trainStateReady(false),
       trainStream(nullptr),
       hostGradCopyStream(nullptr),
+      hostWeightUploadStream(nullptr),
       hostGradComputeEvent(nullptr),
       hostGradD2hEvent(nullptr),
       hostWeightH2dEvent(nullptr),
@@ -168,6 +170,10 @@ void CudaLanguageModel::ensureHostGradCopyPipeline() {
         CudaMatmul::throwIfCudaFailed(
             cudaStreamCreateWithFlags(&this->hostGradCopyStream, cudaStreamNonBlocking),
             "cudaStreamCreate hostGradCopyStream");
+    if (this->hostWeightUploadStream == nullptr)
+        CudaMatmul::throwIfCudaFailed(
+            cudaStreamCreateWithFlags(&this->hostWeightUploadStream, cudaStreamNonBlocking),
+            "cudaStreamCreate hostWeightUploadStream");
     if (this->hostGradComputeEvent == nullptr)
         CudaMatmul::throwIfCudaFailed(
             cudaEventCreateWithFlags(&this->hostGradComputeEvent, cudaEventDisableTiming),
@@ -356,6 +362,21 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
     const auto bwdLoopStart = std::chrono::steady_clock::now();
 
     int pendingHostSgdBlock = -1;
+    int asyncHostSgdBlock = -1;
+    std::future<void> asyncHostSgdFuture;
+    auto finishAsyncHostSgd = [&]() {
+        if (!asyncHostSgdFuture.valid()) return;
+        const auto sgdWaitStart = std::chrono::steady_clock::now();
+        asyncHostSgdFuture.get();
+        if (phaseTrace)
+            this->trainPhaseTimers.sgdSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - sgdWaitStart).count();
+        if (asyncHostSgdBlock >= 0 && pipelineHostSgd && CudaAdam::preferFp16GpuWeights) {
+            this->uploadHostBlockFp16WeightsAsync(
+                static_cast<size_t>(asyncHostSgdBlock),
+                this->hostWeightUploadStream != nullptr ? this->hostWeightUploadStream : this->hostGradCopyStream);
+        }
+        asyncHostSgdBlock = -1;
+    };
     auto flushPendingHostSgd = [&]() {
         if (pendingHostSgdBlock < 0) return;
         const auto d2hWaitStart = std::chrono::steady_clock::now();
@@ -364,16 +385,21 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
             "runPackedTrainDevice hostGrad D2H sync");
         if (phaseTrace)
             this->trainPhaseTimers.d2hSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - d2hWaitStart).count();
+        CudaOps::flushPinnedD2hToHost();
 
-        // Keep host grads pinned through SGD (CPU can touch pinned pages). Unregister only on free.
-        this->blocks[static_cast<size_t>(pendingHostSgdBlock)].releaseDeferredHostWeightGradDevice();
-        this->applyHostSgdForBlockAndFree(static_cast<size_t>(pendingHostSgdBlock), 1.0f);
-        if (pipelineHostSgd && CudaAdam::preferFp16GpuWeights) {
-            this->uploadHostBlockFp16WeightsAsync(
-                static_cast<size_t>(pendingHostSgdBlock),
-                this->hostGradCopyStream);
-        }
+        // Recycle device weight-grad buffers into the next layer instead of cudaFree.
+        this->deferredWeightGradRecycle.stealDeferredWeightGradDeviceFrom(
+            this->blocks[static_cast<size_t>(pendingHostSgdBlock)]);
+
+        // Finish prior CPU SGD (+ FP16 upload) then run this block's SGD on a worker
+        // so the next layer's GPU bwd overlaps host SGD.
+        finishAsyncHostSgd();
+        const int blockToSgd = pendingHostSgdBlock;
         pendingHostSgdBlock = -1;
+        asyncHostSgdBlock = blockToSgd;
+        asyncHostSgdFuture = std::async(std::launch::async, [this, blockToSgd]() {
+            this->applyHostSgdForBlockAndFree(static_cast<size_t>(blockToSgd), 1.0f);
+        });
     };
 
     for (int blockIndex = static_cast<int>(this->blocks.size()) - 1; blockIndex >= 0; --blockIndex) {
@@ -382,6 +408,11 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
             static_cast<int>(this->blocks.size()) - 1 - blockIndex,
             static_cast<int>(this->blocks.size()));
         CudaTransformerBlock& block = this->blocks[static_cast<size_t>(blockIndex)];
+        // Install recycled weight-grad device buffers before this layer allocates.
+        if (this->deferredWeightGradRecycle.hasDeferredWeightGradDevice()
+            && !block.hasDeferredWeightGradDevice())
+            block.stealDeferredWeightGradDeviceFrom(this->deferredWeightGradRecycle);
+
         CudaTransformerBlockHostWeightGrads hostGrads{};
         CudaTransformerBlockHostWeightGrads* hostGradsPtr = nullptr;
         if (hostLarge) {
@@ -466,6 +497,7 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
                 hostGrads,
                 this->hostGradCopyStream,
                 this->hostGradComputeEvent);
+            CudaOps::commitPinnedD2hBatch();
             CudaMatmul::throwIfCudaFailed(
                 cudaEventRecord(this->hostGradD2hEvent, this->hostGradCopyStream),
                 "runPackedTrainDevice record hostGradD2hEvent");
@@ -484,6 +516,8 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
     }
 
     flushPendingHostSgd();
+    finishAsyncHostSgd();
+    // Keep deferredWeightGradRecycle across steps (first bwd layer reuses it).
 
     {
         CudaOps::embeddingScatterAddInto(gradients.tokenEmbedding, this->tokenIdsBuffer, tokenCount, this->hiddenGradient);
@@ -1157,6 +1191,7 @@ void CudaLanguageModel::applyVramPackBudget(float freeFraction, size_t safetyRes
     // applyVramPackBudget (e.g. after enableCudaTrain) sees free?0 and collapses to minCols.
     this->releasePackedTrainWorkspaces();
     CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaLanguageModel::applyVramPackBudget sync after workspace release");
+    CudaMatmul::trimAsyncMemPool(0);
 
     size_t freeBytes = 0;
     size_t totalBytes = 0;
@@ -1255,6 +1290,7 @@ void CudaLanguageModel::tuneOffloadCheckpointAndPack(int targetMaxCols) {
         try {
             this->ensureTrainState();
             CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "tuneOffloadCheckpointAndPack alloc sync");
+            CudaMatmul::trimAsyncMemPool(0);
             size_t freeBytes = 0;
             size_t totalBytes = 0;
             CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeBytes, &totalBytes), "tuneOffloadCheckpointAndPack memGetInfo");
@@ -2059,10 +2095,10 @@ size_t CudaLanguageModel::estimateHostMasterAndGradBytes() const {
     return bytes;
 }
 
-// Recycle pinned host-grad buffers across blocks/steps (2 sets ≈ peak pipeline depth).
-// Avoids malloc + cudaHostRegister of ~450 MiB/block every reverse-pass iteration.
+// Recycle pinned host-grad buffers across blocks/steps.
+// Need ≥3 block-sets: in-flight D2H + async SGD + next layer ensure.
 struct HostGradFreelist {
-    static constexpr int kSlots = 14; // 2 blocks × 7 matrices
+    static constexpr int kSlots = 28; // 4 blocks × 7 matrices
     Matrix slots[kSlots];
 };
 static HostGradFreelist gHostGradFreelist;
@@ -2155,11 +2191,9 @@ void CudaLanguageModel::applyHostSgdForBlockAndFree(size_t blockIndex, float gra
         invLoss = 1.0f / scale;
     }
     const float stepScale = this->adam.learningRate * gradientScale * invLoss;
-    const bool phaseTrace = this->preferTrainPhaseTrace;
 
     // Skip host-grad NaN sampling on the hot path — loss-scale overflow is rare and
     // the OpenMP stride scan of ~7×100MiB grads/block was eating pipeline overlap.
-    const auto sgdStart = std::chrono::steady_clock::now();
     CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[blockIndex];
 
     applyHostSgdInPlace(hosts.queryWeightMaster, hosts.queryWeightGrad, stepScale);
@@ -2169,8 +2203,6 @@ void CudaLanguageModel::applyHostSgdForBlockAndFree(size_t blockIndex, float gra
     applyHostSgdInPlace(hosts.feedForwardGateWeightMaster, hosts.feedForwardGateWeightGrad, stepScale);
     applyHostSgdInPlace(hosts.feedForwardUpWeightMaster, hosts.feedForwardUpWeightGrad, stepScale);
     applyHostSgdInPlace(hosts.feedForwardDownWeightMaster, hosts.feedForwardDownWeightGrad, stepScale);
-    if (phaseTrace)
-        this->trainPhaseTimers.sgdSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - sgdStart).count();
 
     this->releaseHostWeightGradsForBlock(blockIndex);
 }

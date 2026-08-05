@@ -188,6 +188,15 @@ public:
     /// </summary>
     void stealTrainActivationScratchFrom(CudaTransformerBlock& donor);
 
+    /// <summary>
+    /// move deferred large weight-grad device buffers from donor (Host-SGD D2H done).
+    /// Recycles ~1 layer of grads across the bwd sweep without cudaFree.
+    /// </summary>
+    void stealDeferredWeightGradDeviceFrom(CudaTransformerBlock& donor);
+
+    /// <summary>true when deferred large weight-grad buffers hold device storage</summary>
+    bool hasDeferredWeightGradDevice() const;
+
     /// <summary>recompute AttnNorm+Attn+residual from saved block input (FFN untouched)</summary>
     void recomputeAttention(const CudaMatrix& blockInput, int segmentLength = 0);
 
@@ -206,7 +215,9 @@ public:
         CudaTransformerBlockGradients& gradients,
         CudaTransformerBlockHostWeightGrads* hostWeightGrads = nullptr,
         bool deferHostWeightDownload = false,
-        bool retainActivationScratch = false);
+        bool retainActivationScratch = false,
+        cudaStream_t hostGradCopyStream = nullptr,
+        cudaEvent_t hostGradComputeEvent = nullptr);
 
     /// <summary>
     /// Selective bwd: FFN from kept acts, then recompute Attn from blockInput, then Attn bwd
@@ -222,6 +233,18 @@ public:
 
     /// <summary>queue D2H of deferred large weight grads into host on copyStream (after compute event)</summary>
     void enqueueDeferredHostWeightGradDownloads(
+        CudaTransformerBlockHostWeightGrads& hostWeightGrads,
+        cudaStream_t copyStream,
+        cudaEvent_t gradsReadyOnCompute);
+
+    /// <summary>queue only FFN weight-grad D2H (call after FFN bwd so it overlaps Attn bwd)</summary>
+    void enqueueDeferredFfnHostWeightGradDownloads(
+        CudaTransformerBlockHostWeightGrads& hostWeightGrads,
+        cudaStream_t copyStream,
+        cudaEvent_t gradsReadyOnCompute);
+
+    /// <summary>queue only Attn weight-grad D2H</summary>
+    void enqueueDeferredAttnHostWeightGradDownloads(
         CudaTransformerBlockHostWeightGrads& hostWeightGrads,
         cudaStream_t copyStream,
         cudaEvent_t gradsReadyOnCompute);

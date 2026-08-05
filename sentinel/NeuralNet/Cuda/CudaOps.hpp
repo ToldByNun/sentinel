@@ -101,6 +101,27 @@ public:
     /// </summary>
     static void downloadIntoHostAsync(Matrix& hostOut, const CudaMatrix& deviceSource, cudaStream_t stream);
 
+    /// <summary>async D2H of a contiguous float slice from deviceSource[elementOffset ..) into hostOut (rows×cols)</summary>
+    static void downloadIntoHostAsyncSlice(
+        Matrix& hostOut,
+        const CudaMatrix& deviceSource,
+        size_t elementOffset,
+        size_t rows,
+        size_t cols,
+        cudaStream_t stream);
+
+    /// <summary>
+    /// seal the open pinned-D2H batch (call after enqueueing one block's downloads,
+    /// before recording the D2H-complete event)
+    /// </summary>
+    static void commitPinnedD2hBatch();
+
+    /// <summary>
+    /// after the matching D2H copy-stream event is complete: memcpy oldest pinned
+    /// batch → host matrices and release staging slots
+    /// </summary>
+    static void flushPinnedD2hToHost();
+
     /// <summary>cudaHostUnregister for a matrix previously passed to downloadIntoHostAsync (no-op if empty)</summary>
     static void unregisterHostMatrix(Matrix& host);
 

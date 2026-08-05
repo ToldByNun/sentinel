@@ -67,8 +67,8 @@ CudaFeedForward CudaFeedForward::createFrom(const FeedForward& host) {
 void CudaFeedForward::releaseActivationScratch() {
     this->gateUpPreActivation.releaseDeviceToPool();
     this->gateUpHiddenGradient.releaseDeviceToPool();
-    // Weight grads: hard-free — pooling them fills the 1-layer pool and causes WDDM thrash.
-    this->gateUpWeightGradient.free();
+    // gateUpWeightGradient is owned by the block deferred-grad path (Host-SGD
+    // may D2H from the fused buffer). Freed via releaseTrainActivationScratch.
     this->gatePreActivation.releaseDeviceToPool();
     this->gateActivated.releaseDeviceToPool();
     this->up.releaseDeviceToPool();
@@ -245,7 +245,17 @@ void CudaFeedForward::forward(const CudaMatrix& input, CudaMatrix& out) {
     CudaOps::copyInto(input, this->inputCache);
 }
 
-void CudaFeedForward::backward(const CudaMatrix& outputGradient, CudaMatrix& inputGradient, CudaMatrix& gateWeightGradient, CudaMatrix& gateBiasGradient, CudaMatrix& upWeightGradient, CudaMatrix& upBiasGradient, CudaMatrix& downWeightGradient, CudaMatrix& downBiasGradient) {
+void CudaFeedForward::backward(
+    const CudaMatrix& outputGradient,
+    CudaMatrix& inputGradient,
+    CudaMatrix& gateWeightGradient,
+    CudaMatrix& gateBiasGradient,
+    CudaMatrix& upWeightGradient,
+    CudaMatrix& upBiasGradient,
+    CudaMatrix& downWeightGradient,
+    CudaMatrix& downBiasGradient,
+    bool materializeSplitWeightGrads
+) {
     if (this->inputCache.empty()) throw std::logic_error("CudaFeedForward::backward called before forward");
     if (outputGradient.rows != this->downWeight.rows || outputGradient.cols != this->inputCache.cols)
         throw std::invalid_argument("CudaFeedForward::backward shape mismatch");
@@ -268,11 +278,13 @@ void CudaFeedForward::backward(const CudaMatrix& outputGradient, CudaMatrix& inp
 
     // One GEMM for stacked [dW_gate; dW_up] = stackedGrad @ X^T
     CudaMatrix::multiplyInto(this->gateUpHiddenGradient, this->inputCache, this->gateUpWeightGradient, false, true);
-    gateWeightGradient.ensureSize(this->gateWeight.rows, this->gateWeight.cols);
-    upWeightGradient.ensureSize(this->upWeight.rows, this->upWeight.cols);
-    const size_t sliceBytes = this->gateWeight.byteCount();
-    CudaMatmul::memcpyDevice(gateWeightGradient.buffer.deviceData, this->gateUpWeightGradient.buffer.deviceData, sliceBytes);
-    CudaMatmul::memcpyDevice(upWeightGradient.buffer.deviceData, this->gateUpWeightGradient.buffer.deviceData + this->gateWeight.elementCount(), sliceBytes);
+    if (materializeSplitWeightGrads) {
+        gateWeightGradient.ensureSize(this->gateWeight.rows, this->gateWeight.cols);
+        upWeightGradient.ensureSize(this->upWeight.rows, this->upWeight.cols);
+        const size_t sliceBytes = this->gateWeight.byteCount();
+        CudaMatmul::memcpyDevice(gateWeightGradient.buffer.deviceData, this->gateUpWeightGradient.buffer.deviceData, sliceBytes);
+        CudaMatmul::memcpyDevice(upWeightGradient.buffer.deviceData, this->gateUpWeightGradient.buffer.deviceData + this->gateWeight.elementCount(), sliceBytes);
+    }
     CudaOps::sumColumnsStackedHalvesInto(this->gateUpHiddenGradient, gateBiasGradient, upBiasGradient);
 
     // One GEMM for dX = gateUpWeight^T @ stackedGrad

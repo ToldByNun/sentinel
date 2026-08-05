@@ -30,26 +30,47 @@ CudaAmp::MasterWeightHalf CudaAmp::masterWeights[CudaAmp::maxMasterWeights];
 int CudaAmp::masterWeightCount = 0;
 
 namespace {
-// Sticky FP16 views of FP32 activations across consecutive GEMMs that share the same
-// device pointer+count (e.g. fused QKV / repeated bwd uses). Invalidated on any
-// CudaDeviceBuffer free/pool so recycled addresses cannot serve stale halves.
-struct StickyActivationHalf {
+// Two sticky FP16 views of FP32 activations. Separate from GEMM left/right scratch
+// so consecutive GEMMs can reuse the same cast (e.g. grad as left then right)
+// without one operand's cast clobbering the other mid-setup.
+struct ActivationHalfSlot {
     const float* source = nullptr;
     size_t elementCount = 0;
+    CudaDeviceBuffer half;
+    unsigned long long lastUsed = 0;
 };
 
-StickyActivationHalf g_stickyActLeft;
-StickyActivationHalf g_stickyActRight;
+ActivationHalfSlot g_actHalfSlots[4];
+unsigned long long g_actHalfUseCounter = 1;
 
-const void* castActivationSticky(const float* source, size_t elementCount, StickyActivationHalf& sticky, CudaDeviceBuffer& scratch) {
-    if (source == sticky.source
-        && elementCount == sticky.elementCount
-        && scratch.deviceData != nullptr)
-        return scratch.deviceData;
-    CudaAmp::castFloatBufferToHalf(source, elementCount, scratch);
-    sticky.source = source;
-    sticky.elementCount = elementCount;
-    return scratch.deviceData;
+void clearActivationHalfSlots() {
+    for (ActivationHalfSlot& slot : g_actHalfSlots) {
+        slot.source = nullptr;
+        slot.elementCount = 0;
+        slot.lastUsed = 0;
+    }
+}
+
+const void* getOrCastActivationHalf(const float* source, size_t elementCount) {
+    for (ActivationHalfSlot& slot : g_actHalfSlots) {
+        if (slot.source == source
+            && slot.elementCount == elementCount
+            && slot.half.deviceData != nullptr) {
+            slot.lastUsed = ++g_actHalfUseCounter;
+            return slot.half.deviceData;
+        }
+    }
+    int victim = 0;
+    for (int i = 1; i < 4; ++i) {
+        if (g_actHalfSlots[i].lastUsed < g_actHalfSlots[victim].lastUsed)
+            victim = i;
+    }
+    ActivationHalfSlot& slot = g_actHalfSlots[victim];
+    CudaAmp::castFloatBufferToHalf(source, elementCount, slot.half);
+    slot.source = source;
+    slot.elementCount = elementCount;
+    slot.lastUsed = ++g_actHalfUseCounter;
+    return slot.half.deviceData;
 }
 } // namespace
 
@@ -287,9 +308,19 @@ void CudaAmp::invalidateMasterWeightHalves() {
     }
 }
 
+void CudaAmp::invalidateActivationHalfCachesFor(const void* devicePtr) {
+    if (devicePtr == nullptr) return;
+    for (ActivationHalfSlot& slot : g_actHalfSlots) {
+        if (slot.source == devicePtr) {
+            slot.source = nullptr;
+            slot.elementCount = 0;
+            slot.lastUsed = 0;
+        }
+    }
+}
+
 void CudaAmp::invalidateActivationHalfCaches() {
-    g_stickyActLeft = StickyActivationHalf{};
-    g_stickyActRight = StickyActivationHalf{};
+    clearActivationHalfSlots();
 }
 
 void CudaAmp::clearMasterWeights() {
@@ -386,6 +417,16 @@ void CudaHalfMatrix::free() {
     this->buffer.free();
     this->rows = 0;
     this->cols = 0;
+}
+
+void CudaHalfMatrix::takeDeviceStorageFrom(CudaHalfMatrix& donor) {
+    if (this == &donor) return;
+    this->buffer.free();
+    this->buffer = std::move(donor.buffer);
+    this->rows = 0;
+    this->cols = 0;
+    donor.rows = 0;
+    donor.cols = 0;
 }
 
 __global__ void CudaAmpCastFloatToHalfEntry(const float* source, __half* destination, int elementCount) {
@@ -812,10 +853,19 @@ static bool launchCublasLtMatmulFp16Halves(
 const void* CudaAmp::castActivationToHalfScratch(const float* source, size_t elementCount) {
     if (source == nullptr || elementCount == 0) return nullptr;
     try {
-        return castActivationSticky(source, elementCount, g_stickyActRight, CudaAmp::halfScratchRight);
+        return getOrCastActivationHalf(source, elementCount);
     } catch (...) {
         return nullptr;
     }
+}
+
+void CudaAmp::persistActivationHalf(const float* source, size_t rows, size_t cols, CudaHalfMatrix& destination) {
+    if (source == nullptr || rows == 0 || cols == 0)
+        throw std::invalid_argument("CudaAmp::persistActivationHalf empty source");
+    const size_t elementCount = rows * cols;
+    destination.ensureSize(rows, cols);
+    const void* cached = getOrCastActivationHalf(source, elementCount);
+    CudaMatmul::memcpyDevice(destination.buffer.deviceData, cached, elementCount * sizeof(__half));
 }
 
 bool CudaAmp::launchCublasLtMatmulFp16PreCastRight(const float* deviceLeft, const void* rightHalf, float* deviceOut, int rowCount, int columnCount, int sharedCount, bool transposeLeft, bool transposeRight, double* kernelMilliseconds, const float* deviceBiasOrNull) {
@@ -830,9 +880,9 @@ bool CudaAmp::launchCublasLtMatmulFp16PreCastRight(const float* deviceLeft, cons
 
     try {
         const void* cachedLeft = CudaAmp::masterWeightHalfOrNull(deviceLeft, leftElements);
-        const void* leftHalf = cachedLeft;
-        if (leftHalf == nullptr)
-            leftHalf = castActivationSticky(deviceLeft, leftElements, g_stickyActLeft, CudaAmp::halfScratchLeft);
+        const void* leftHalf = cachedLeft != nullptr
+            ? cachedLeft
+            : getOrCastActivationHalf(deviceLeft, leftElements);
         return launchCublasLtMatmulFp16Halves(leftHalf, rightHalf, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, kernelMilliseconds, deviceBiasOrNull);
     } catch (...) {
         return false;
@@ -857,10 +907,10 @@ bool CudaAmp::launchCublasLtMatmulFp16(const float* deviceLeft, const float* dev
         const void* cachedRight = CudaAmp::masterWeightHalfOrNull(deviceRight, rightElements);
         const void* leftHalf = cachedLeft != nullptr
             ? cachedLeft
-            : castActivationSticky(deviceLeft, leftElements, g_stickyActLeft, CudaAmp::halfScratchLeft);
+            : getOrCastActivationHalf(deviceLeft, leftElements);
         const void* rightHalf = cachedRight != nullptr
             ? cachedRight
-            : castActivationSticky(deviceRight, rightElements, g_stickyActRight, CudaAmp::halfScratchRight);
+            : getOrCastActivationHalf(deviceRight, rightElements);
         return launchCublasLtMatmulFp16Halves(leftHalf, rightHalf, deviceOut, rowCount, columnCount, sharedCount, transposeLeft, transposeRight, kernelMilliseconds, deviceBiasOrNull);
     } catch (...) {
         return false;
@@ -889,14 +939,14 @@ bool CudaAmp::launchCublasLtMatmulFp16Matrices(const CudaMatrix& left, const Cud
             const size_t leftElements = left.elementCount();
             leftHalf = CudaAmp::masterWeightHalfOrNull(left.buffer.deviceData, leftElements);
             if (leftHalf == nullptr)
-                leftHalf = castActivationSticky(left.buffer.deviceData, leftElements, g_stickyActLeft, CudaAmp::halfScratchLeft);
+                leftHalf = getOrCastActivationHalf(left.buffer.deviceData, leftElements);
         }
         if (rightHalf == nullptr) {
             if (!right.hasDeviceStorage()) return false;
             const size_t rightElements = right.elementCount();
             rightHalf = CudaAmp::masterWeightHalfOrNull(right.buffer.deviceData, rightElements);
             if (rightHalf == nullptr)
-                rightHalf = castActivationSticky(right.buffer.deviceData, rightElements, g_stickyActRight, CudaAmp::halfScratchRight);
+                rightHalf = getOrCastActivationHalf(right.buffer.deviceData, rightElements);
         }
 
         return launchCublasLtMatmulFp16Halves(
@@ -928,7 +978,7 @@ bool CudaAmp::launchCublasLtMatmulFp16HalfLeft(
     const size_t rightElements = static_cast<size_t>(rightRows) * static_cast<size_t>(rightCols);
 
     try {
-        const void* rightHalf = castActivationSticky(deviceRight, rightElements, g_stickyActRight, CudaAmp::halfScratchRight);
+        const void* rightHalf = getOrCastActivationHalf(deviceRight, rightElements);
         // Prefer the given half pointer directly when 16-byte aligned (fused up-slice of gateUp).
         // Fall back to a base-allocation copy if cuBLASLt rejects the mid-buffer pointer.
         if ((reinterpret_cast<uintptr_t>(leftHalf) & 15u) == 0u) {
@@ -940,7 +990,6 @@ bool CudaAmp::launchCublasLtMatmulFp16HalfLeft(
         const int leftRows = transposeLeft ? sharedCount : rowCount;
         const int leftCols = transposeLeft ? rowCount : sharedCount;
         const size_t leftElements = static_cast<size_t>(leftRows) * static_cast<size_t>(leftCols);
-        g_stickyActLeft = StickyActivationHalf{};
         CudaAmp::halfScratchLeft.ensureCapacity(leftElements * 2u);
         CudaMatmul::memcpyDevice(CudaAmp::halfScratchLeft.deviceData, leftHalf, leftElements * 2u);
         return launchCublasLtMatmulFp16Halves(

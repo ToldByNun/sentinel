@@ -10,6 +10,8 @@
 #include <cuda_runtime.h>
 #include <limits>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 double* CudaOps::downloadAddIntoHostSecondsSink = nullptr;
 
@@ -1088,28 +1090,52 @@ void CudaOps::downloadIntoHost(Matrix& hostOut, const CudaMatrix& deviceSource) 
 
 void CudaOps::downloadIntoHostAsync(Matrix& hostOut, const CudaMatrix& deviceSource, cudaStream_t stream) {
     if (deviceSource.empty()) throw std::invalid_argument("CudaOps::downloadIntoHostAsync empty deviceSource");
-    if (!deviceSource.hasDeviceStorage()) throw std::invalid_argument("CudaOps::downloadIntoHostAsync missing device storage");
-    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::downloadIntoHostAsync no CUDA device");
-    if (stream == nullptr) throw std::invalid_argument("CudaOps::downloadIntoHostAsync null stream");
+    CudaOps::downloadIntoHostAsyncSlice(hostOut, deviceSource, 0, deviceSource.rows, deviceSource.cols, stream);
+}
 
-    hostOut.ensureSize(deviceSource.rows, deviceSource.cols);
-    const size_t bytes = deviceSource.byteCount();
+void CudaOps::commitPinnedD2hBatch() {
+    // no-op when D2H goes straight into host matrices
+}
+
+void CudaOps::flushPinnedD2hToHost() {
+    // no-op when D2H goes straight into host matrices
+}
+
+void CudaOps::downloadIntoHostAsyncSlice(
+    Matrix& hostOut,
+    const CudaMatrix& deviceSource,
+    size_t elementOffset,
+    size_t rows,
+    size_t cols,
+    cudaStream_t stream
+) {
+    if (deviceSource.empty()) throw std::invalid_argument("CudaOps::downloadIntoHostAsyncSlice empty deviceSource");
+    if (!deviceSource.hasDeviceStorage()) throw std::invalid_argument("CudaOps::downloadIntoHostAsyncSlice missing device storage");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::downloadIntoHostAsyncSlice no CUDA device");
+    if (stream == nullptr) throw std::invalid_argument("CudaOps::downloadIntoHostAsyncSlice null stream");
+    if (rows == 0 || cols == 0) throw std::invalid_argument("CudaOps::downloadIntoHostAsyncSlice empty shape");
+    const size_t needElements = elementOffset + rows * cols;
+    if (needElements > deviceSource.elementCount())
+        throw std::invalid_argument("CudaOps::downloadIntoHostAsyncSlice slice out of range");
+
+    hostOut.ensureSize(rows, cols);
+    const size_t bytes = rows * cols * sizeof(float);
     float* hostData = hostOut.data.data();
-    // Pin once; reuse across steps while the allocation lives (AlreadyRegistered is OK).
+    const float* deviceData = deviceSource.buffer.deviceData + elementOffset;
     const cudaError_t reg = cudaHostRegister(hostData, bytes, cudaHostRegisterDefault);
     if (reg != cudaSuccess && reg != cudaErrorHostMemoryAlreadyRegistered) {
         cudaGetLastError();
         CudaMatmul::throwIfCudaFailed(
-            cudaMemcpyAsync(hostData, deviceSource.buffer.deviceData, bytes, cudaMemcpyDeviceToHost, stream),
-            "CudaOps::downloadIntoHostAsync D2H fallback");
-        CudaMatmul::throwIfCudaFailed(cudaStreamSynchronize(stream), "CudaOps::downloadIntoHostAsync fallback sync");
+            cudaMemcpyAsync(hostData, deviceData, bytes, cudaMemcpyDeviceToHost, stream),
+            "CudaOps::downloadIntoHostAsyncSlice D2H fallback");
+        CudaMatmul::throwIfCudaFailed(cudaStreamSynchronize(stream), "CudaOps::downloadIntoHostAsyncSlice fallback sync");
         return;
     }
     if (reg == cudaErrorHostMemoryAlreadyRegistered)
         cudaGetLastError();
     CudaMatmul::throwIfCudaFailed(
-        cudaMemcpyAsync(hostData, deviceSource.buffer.deviceData, bytes, cudaMemcpyDeviceToHost, stream),
-        "CudaOps::downloadIntoHostAsync D2H");
+        cudaMemcpyAsync(hostData, deviceData, bytes, cudaMemcpyDeviceToHost, stream),
+        "CudaOps::downloadIntoHostAsyncSlice D2H");
 }
 
 void CudaOps::unregisterHostMatrix(Matrix& host) {

@@ -94,7 +94,15 @@ public:
     void forward(const CudaMatrix& input, CudaMatrix& out, int segmentLength = 0);
 
     /// <summary>backprop through multi head attention fills weight gradients via out params</summary>
-    void backward(const CudaMatrix& outputGradient, CudaMatrix& inputGradient, CudaMatrix& queryWeightGradient, CudaMatrix& keyWeightGradient, CudaMatrix& valueWeightGradient, CudaMatrix& outputWeightGradient);
+    /// <param name="materializeSplitWeightGrads">when false, keep fused qkvWeightGradient only (Host-SGD D2H path)</param>
+    void backward(
+        const CudaMatrix& outputGradient,
+        CudaMatrix& inputGradient,
+        CudaMatrix& queryWeightGradient,
+        CudaMatrix& keyWeightGradient,
+        CudaMatrix& valueWeightGradient,
+        CudaMatrix& outputWeightGradient,
+        bool materializeSplitWeightGrads = true);
 
     /// <summary>reset cache then run full sequence attention and append rotated KV</summary>
     void prefill(const CudaMatrix& input, CudaKvCache& cache, CudaMatrix& out);

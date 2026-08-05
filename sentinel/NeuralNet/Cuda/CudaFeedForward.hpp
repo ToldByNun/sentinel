@@ -59,7 +59,17 @@ public:
     void releaseActivationScratch();
 
     /// <summary>SwiGLU backward using cached forward activations</summary>
-    void backward(const CudaMatrix& outputGradient, CudaMatrix& inputGradient, CudaMatrix& gateWeightGradient, CudaMatrix& gateBiasGradient, CudaMatrix& upWeightGradient, CudaMatrix& upBiasGradient, CudaMatrix& downWeightGradient, CudaMatrix& downBiasGradient);
+    /// <param name="materializeSplitWeightGrads">when false, keep fused gateUpWeightGradient only (Host-SGD D2H path)</param>
+    void backward(
+        const CudaMatrix& outputGradient,
+        CudaMatrix& inputGradient,
+        CudaMatrix& gateWeightGradient,
+        CudaMatrix& gateBiasGradient,
+        CudaMatrix& upWeightGradient,
+        CudaMatrix& upBiasGradient,
+        CudaMatrix& downWeightGradient,
+        CudaMatrix& downBiasGradient,
+        bool materializeSplitWeightGrads = true);
 
     /// <summary>
     /// Selective ckpt: cast gatePre to FP16 and free heavy FP32 FFN acts.

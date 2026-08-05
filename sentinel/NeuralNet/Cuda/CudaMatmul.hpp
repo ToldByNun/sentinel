@@ -196,6 +196,9 @@ public:
     /// <summary>true if a CUDA device is available</summary>
     static bool isAvailable();
 
+    /// <summary>trim default async mempool so cudaMemGetInfo reflects reclaimable VRAM</summary>
+    static void trimAsyncMemPool(size_t bytesToKeep = 0);
+
     /// <summary>C = A * B on GPU reusing owned device buffers</summary>
     void multiplyInto(const Matrix& left, const Matrix& right, Matrix& out);
 
