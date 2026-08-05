@@ -441,17 +441,29 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
         CudaTransformerBlockHostWeightGrads hostGrads{};
         CudaTransformerBlockHostWeightGrads* hostGradsPtr = nullptr;
         if (hostLarge) {
-            // Fused-half Host-SGD applies directly into FP32 masters (no host grad buffers).
             if (this->hostBlockAdamStates.size() != this->blocks.size())
                 this->hostBlockAdamStates.resize(this->blocks.size());
             CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[static_cast<size_t>(blockIndex)];
-            hostGrads.queryWeight = &hosts.queryWeightMaster;
-            hostGrads.keyWeight = &hosts.keyWeightMaster;
-            hostGrads.valueWeight = &hosts.valueWeightMaster;
-            hostGrads.attentionOutputWeight = &hosts.attentionOutputWeightMaster;
-            hostGrads.feedForwardGateWeight = &hosts.feedForwardGateWeightMaster;
-            hostGrads.feedForwardUpWeight = &hosts.feedForwardUpWeightMaster;
-            hostGrads.feedForwardDownWeight = &hosts.feedForwardDownWeightMaster;
+            if (pipelineHostSgd) {
+                // Fused-half Host-SGD applies directly into FP32 masters (no host grad buffers).
+                hostGrads.queryWeight = &hosts.queryWeightMaster;
+                hostGrads.keyWeight = &hosts.keyWeightMaster;
+                hostGrads.valueWeight = &hosts.valueWeightMaster;
+                hostGrads.attentionOutputWeight = &hosts.attentionOutputWeightMaster;
+                hostGrads.feedForwardGateWeight = &hosts.feedForwardGateWeightMaster;
+                hostGrads.feedForwardUpWeight = &hosts.feedForwardUpWeightMaster;
+                hostGrads.feedForwardDownWeight = &hosts.feedForwardDownWeightMaster;
+            } else {
+                // CPU-Adam offload: accumulate large weight grads on host, then Adam on masters.
+                this->ensureHostWeightGradsForBlock(static_cast<size_t>(blockIndex));
+                hostGrads.queryWeight = &hosts.queryWeightGrad;
+                hostGrads.keyWeight = &hosts.keyWeightGrad;
+                hostGrads.valueWeight = &hosts.valueWeightGrad;
+                hostGrads.attentionOutputWeight = &hosts.attentionOutputWeightGrad;
+                hostGrads.feedForwardGateWeight = &hosts.feedForwardGateWeightGrad;
+                hostGrads.feedForwardUpWeight = &hosts.feedForwardUpWeightGrad;
+                hostGrads.feedForwardDownWeight = &hosts.feedForwardDownWeightGrad;
+            }
             hostGradsPtr = &hostGrads;
         }
 
@@ -2746,18 +2758,33 @@ float CudaLanguageModel::averageLoss(const LanguageModelDataset& dataset) {
     if (dataset.examples.empty()) return 0.0f;
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaLanguageModel::averageLoss no CUDA device");
 
-    // Eval in FP32: train AMP/half-ckpt state must not leak Inf into the reported test metric.
+    // Drain any sticky launch errors from the preceding train step before eval H2D.
+    CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaLanguageModel::averageLoss pre-sync");
+    cudaGetLastError();
+
+    // Eval without train AMP mirrors when weights are FP32-resident. With preferFp16GpuWeights the
+    // large GEMM weights exist only as FP16 working slots (FP32 device storage freed) — keep AMP on.
     const bool previousAmp = CudaAmp::preferMixedPrecision;
-    CudaAmp::preferMixedPrecision = false;
+    if (!CudaAdam::preferFp16GpuWeights)
+        CudaAmp::preferMixedPrecision = false;
 
     this->epochLossSum.ensureSize(1, 1);
     CudaOps::zeroInPlace(this->epochLossSum);
+
+    // Train may have freed full softmax scratch when the pack logits cache is resident.
+    const size_t vocabularySize = this->tokenEmbeddingWeight.rows;
+    this->probabilities.ensureSize(vocabularySize, 1);
+    this->logitGradient.ensureSize(vocabularySize, 1);
 
     for (const LanguageModelExample& example : dataset.examples) {
         if (example.inputTokenIds.empty() || example.targetTokenIds.size() != example.inputTokenIds.size())
             continue;
 
-        this->forwardInto(example.inputTokenIds, this->logits);
+        const int segmentLength = static_cast<int>(example.inputTokenIds.size());
+        this->logits.ensureSize(vocabularySize, example.inputTokenIds.size());
+        this->forwardInto(example.inputTokenIds, this->logits, segmentLength);
+        CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaLanguageModel::averageLoss forward");
+
         this->targetTokenIdsBuffer.ensureCapacity(example.targetTokenIds.size());
         this->targetTokenIdsBuffer.copyFromHost(example.targetTokenIds.data(), example.targetTokenIds.size());
 
@@ -2977,6 +3004,7 @@ void CudaLanguageModel::train(const LanguageModelDataset& trainDataset, const La
 
         if (CudaAmp::lossScalingActive())
             std::printf("  ampScale=%.0f  ampOverflows=%d", CudaAmp::lossScaler.scale, CudaAmp::lossScaler.overflowCount);
+        std::fflush(stdout);
 
         if (!testDataset.examples.empty()) {
             const float testLoss = this->averageLoss(testDataset);
@@ -3071,6 +3099,7 @@ void CudaLanguageModel::train(LanguageModelChunkSource& source, int epochs, int 
 
         if (CudaAmp::lossScalingActive())
             std::printf("  ampScale=%.0f  ampOverflows=%d", CudaAmp::lossScaler.scale, CudaAmp::lossScaler.overflowCount);
+        std::fflush(stdout);
 
         if (!testDataset.examples.empty()) {
             const float testLoss = this->averageLoss(testDataset);

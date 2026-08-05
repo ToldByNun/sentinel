@@ -203,7 +203,19 @@ double LanguageModel::probeCudaPackedTrainTokensPerSecond(int sequenceLength, in
         packPointers[static_cast<size_t>(exampleIndex)] = &examples[static_cast<size_t>(exampleIndex)];
 
     device.preferTrainProgress = false;
+#ifdef _MSC_VER
+    device.preferTrainPhaseTrace = false;
+    {
+        char* _sentinel_phase_trace_val = nullptr;
+        size_t _sentinel_phase_trace_len = 0;
+        if (_dupenv_s(&_sentinel_phase_trace_val, &_sentinel_phase_trace_len, "SENTINEL_PHASE_TRACE") == 0 && _sentinel_phase_trace_val != nullptr) {
+            device.preferTrainPhaseTrace = true;
+            free(_sentinel_phase_trace_val);
+        }
+    }
+#else
     device.preferTrainPhaseTrace = (std::getenv("SENTINEL_PHASE_TRACE") != nullptr);
+#endif
     device.trainProgressIntervalSec = 5.0;
     device.trainProgressEpochStart = {};
     device.trainProgressLastPrint = {};
@@ -820,6 +832,7 @@ void LanguageModel::train(const LanguageModelDataset& trainDataset, const Langua
             this->device->train(trainDataset, testDataset, epochs, logEveryEpochs, batchSize, gradientAccumulationSteps);
             this->device->downloadTo(*this);
         } catch (const std::exception& ex) {
+            std::cerr << "LanguageModel::train cuda path failed: " << ex.what() << std::endl;
             throw std::runtime_error(std::string("LanguageModel::train cuda path failed: ") + ex.what());
         }
         this->optimizer.timeStep = this->device->adam.timeStep;
@@ -878,6 +891,7 @@ void LanguageModel::train(LanguageModelChunkSource& source, int epochs, int logE
             this->device->train(source, epochs, logEveryEpochs, batchSize, gradientAccumulationSteps);
             this->device->downloadTo(*this);
         } catch (const std::exception& ex) {
+            std::cerr << "LanguageModel::train cuda path failed: " << ex.what() << std::endl;
             throw std::runtime_error(std::string("LanguageModel::train cuda path failed: ") + ex.what());
         }
         this->optimizer.timeStep = this->device->adam.timeStep;

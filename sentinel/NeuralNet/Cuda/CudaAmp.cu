@@ -927,8 +927,11 @@ bool CudaAmp::launchCublasLtMatmulFp16Matrices(const CudaMatrix& left, const Cud
 
     const void* leftWorking = CudaAmp::fp16WorkingWeightOrNull(left);
     const void* rightWorking = CudaAmp::fp16WorkingWeightOrNull(right);
-    // Keep the large-GEMM gate even for working weights; tiny shapes fall back to FP32 cast path.
-    if (sharedCount < 256 || rowCount < 32 || columnCount < 32) return false;
+    // Sticky FP16 working weights have no FP32 fallback storage — must take the half path
+    // even for short eval sequences (columnCount < 32) that the train pack never hits.
+    const bool forceWorking = leftWorking != nullptr || rightWorking != nullptr;
+    if (!forceWorking && (sharedCount < 256 || rowCount < 32 || columnCount < 32)) return false;
+    if (forceWorking && (rowCount <= 0 || columnCount <= 0 || sharedCount <= 0)) return false;
 
     try {
         const void* leftHalf = leftWorking;

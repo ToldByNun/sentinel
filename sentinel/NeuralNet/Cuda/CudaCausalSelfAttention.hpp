@@ -129,7 +129,7 @@ private:
     void projectAndRotate(const CudaMatrix& input, int positionOffset, int segmentLength = 0);
     void attendFullSequence(CudaMatrix& out, int segmentLength = -1);
     void attendCachedQuery(const CudaKvCache& cache, CudaMatrix& out);
-    bool canUseFlashAttention(int segmentLength) const;
+    bool canUseFlashAttention(int segmentLength, int strideColumns) const;
 };
 
 #endif // CUDACAUSALSELFATTENTION_HPP

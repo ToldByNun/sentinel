@@ -15,11 +15,16 @@
 CudaCausalSelfAttention::CudaCausalSelfAttention()
     : headCount(0), headDimension(0), pairCount(0), maximumPositionCount(0), windowSize(0), globalTokenCount(0), activeSegmentLength(0), activePackCount(0), preferFlashAttention(true), usedFlashAttention(false) {}
 
-bool CudaCausalSelfAttention::canUseFlashAttention(int segmentLength) const {
+bool CudaCausalSelfAttention::canUseFlashAttention(int segmentLength, int strideColumns) const {
     if (!this->preferFlashAttention) return false;
     if (this->headDimension <= 0 || this->headDimension > CudaFlashAttention::maxHeadDimension) return false;
-    if (segmentLength <= 0) return false;
+    if (segmentLength <= 0 || strideColumns <= 0) return false;
     if (this->windowSize < segmentLength) return false;
+    // Flash cp.async float4 paths need 16-byte-aligned row starts:
+    // address ~ base + 4 * (row * strideColumns + columnStart). With columnStart pack-aligned
+    // to segmentLength, both stride and segmentLength must be multiples of 4. Train packs
+    // usually satisfy this; short eval sequences often do not (→ sticky misalignedAddress).
+    if ((strideColumns & 3) != 0 || (segmentLength & 3) != 0) return false;
     return true;
 }
 
@@ -159,7 +164,7 @@ void CudaCausalSelfAttention::attendFullSequence(CudaMatrix& out, int segmentLen
     this->attended.ensureSize(this->query.rows, sequenceLength);
     CudaOps::zeroInPlace(this->attended);
 
-    if (this->canUseFlashAttention(segmentLength)) {
+    if (this->canUseFlashAttention(segmentLength, static_cast<int>(sequenceLength))) {
         this->usedFlashAttention = true;
         this->releaseDenseAttentionScratch();
         this->flashLogSumExp.ensureSize(static_cast<size_t>(this->headCount), sequenceLength);

@@ -42,7 +42,7 @@ int main() {
     const bool runSpeedBench = false;
     const bool runGate40k = false;
     const bool runFlashParity256 = false;
-    const bool runScale100M = true;
+    const bool runScale100M = false;
     const bool runMuonThroughputProbe = false;
     const bool runGraphCheck = false;
     const bool runEpilogueCheck = false;
