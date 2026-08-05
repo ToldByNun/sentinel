@@ -59,7 +59,7 @@ class TrainProfile:
     fp16_amp: bool
     gradient_checkpointing: bool
     flash_attention: bool
-    # Sentinel ckpt: Selective for fair (keep some acts); Full for feat offload
+    # Sentinel ckpt: Selective for fair; Full for feat offload (safe on 16GB)
     sentinel_ckpt: str
 
 

@@ -383,6 +383,8 @@ public:
     cudaStream_t hostGradCopyStream;
     cudaEvent_t hostGradComputeEvent;
     cudaEvent_t hostGradD2hEvent;
+    cudaEvent_t hostWeightH2dEvent;
+    bool hostWeightH2dPending;
     cudaGraph_t trainGraph;
     cudaGraphExec_t trainGraphExec;
     int trainGraphSegmentLength;
@@ -487,6 +489,15 @@ public:
     /// <summary>SGD on one block's host masters then free its grads (preferHostSgd)</summary>
     void applyHostSgdForBlockAndFree(size_t blockIndex, float gradientScale = 1.0f);
 
+    /// <summary>async FP16 H2D for one block's large weights after host SGD (preferHostSgd pipeline)</summary>
+    void uploadHostBlockFp16WeightsAsync(size_t blockIndex, cudaStream_t stream);
+
+    /// <summary>wait for pipelined block weight H2D before next forward</summary>
+    void waitPendingHostWeightH2d();
+
+    /// <summary>run one synthetic packed accumulate+apply; false on OOM/throw</summary>
+    bool probePackedTrainMicrostep(int segmentLength, int exampleCount);
+
     /// <summary>pre-allocate train activation workspaces to maxPackedColumns</summary>
 
     void ensureTrainWorkspaces();
@@ -505,6 +516,12 @@ public:
     /// reserves static train overhead + WDDM/display safety headroom, then applies freeFraction
     /// </summary>
     void applyVramPackBudget(float freeFraction = 0.70f, size_t safetyReserveBytes = 2560ull * 1024ull * 1024ull);
+
+    /// <summary>
+    /// Host-SGD offload path: prefer Selective ckpt (less recompute), auto pack budget;
+    /// fall back to Full only when Selective cannot allocate train workspaces.
+    /// </summary>
+    void tuneOffloadCheckpointAndPack(int targetMaxCols = 4096);
 
     /// <summary>largest pack example count for a fixed segment length under current maxPackedColumns</summary>
     int maxPackExamplesForSegment(int segmentLength) const;

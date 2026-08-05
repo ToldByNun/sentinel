@@ -106,6 +106,9 @@ public:
     /// <summary>upload host FP32 master into an existing FP16 working-weight slot</summary>
     static void uploadHostMasterToFp16Working(CudaMatrix& matrix, const float* hostMaster);
 
+    /// <summary>same as uploadHostMasterToFp16Working but H2D on stream (for pipelined host-SGD)</summary>
+    static void uploadHostMasterToFp16Working(CudaMatrix& matrix, const float* hostMaster, cudaStream_t stream);
+
     /// <summary>device half pointer for a bound working weight; nullptr if unbound</summary>
     static const void* fp16WorkingWeightOrNull(const CudaMatrix& matrix);
 

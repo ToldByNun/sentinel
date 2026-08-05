@@ -261,13 +261,11 @@ Full SERA epoch numbers still need `sera_scale.jsonl` + `runScale100M=true`.
 
 |            |                                                                                               |
 | ---------- | --------------------------------------------------------------------------------------------- |
-| Shape      | vocab 32k, d=3072, L=34, H=48, maxPos=2048, seq=512, **pack=8** (4096 tokens)                 |
-| Mode       | FP16 GPU weights, host FP32 masters/grads, **host SGD** (no Adam moments), Full ckpt, flash |
+| Shape      | vocab 32k, d=3072, L=34, H=48, maxPos=2048, seq=512, auto pack (target 4096 tokens)        |
+| Mode       | FP16 GPU weights, host FP32 masters/grads, **host SGD** (no Adam moments), **Selective** ckpt (falls back to Full if VRAM tight), flash |
 | Host RAM   | ~15 GiB masters+grads (Adam `m`/`v` would roughly double that)                                |
-| Full step  | **~320–330** tok/s (accumulate alone ~380–420)                                                |
-| Bottleneck | Full-ckpt bwd recompute + end-of-step H2D; async Grad-D2H is mostly overlapped                |
-
-Target ≥600 tok/s full-step is not yet reached on this offload+Full-ckpt path.
+| Full step  | re-measure after selective+auto-pack (was ~320–330 tok/s with Full ckpt + pack=8)             |
+| Bottleneck | was Full-ckpt bwd recompute; selective + stream-sync (not global cudaDeviceSynchronize) in train hot path |
 
 Smaller smoke: `CudaLanguageModel::runConsumerVramDemo()` (~8k/256/4L).
 

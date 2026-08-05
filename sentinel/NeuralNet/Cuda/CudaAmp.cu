@@ -138,8 +138,22 @@ void CudaAmp::bindFp16WorkingWeight(CudaMatrix& matrix) {
 }
 
 void CudaAmp::uploadHostMasterToFp16Working(CudaMatrix& matrix, const float* hostMaster) {
+    cudaStream_t stream = CudaMatmul::activeStream();
+    if (stream == nullptr) {
+        static thread_local cudaStream_t uploadStream = nullptr;
+        if (uploadStream == nullptr)
+            CudaMatmul::throwIfCudaFailed(
+                cudaStreamCreateWithFlags(&uploadStream, cudaStreamNonBlocking),
+                "CudaAmp upload stream create");
+        stream = uploadStream;
+    }
+    CudaAmp::uploadHostMasterToFp16Working(matrix, hostMaster, stream);
+}
+
+void CudaAmp::uploadHostMasterToFp16Working(CudaMatrix& matrix, const float* hostMaster, cudaStream_t stream) {
     if (matrix.empty()) throw std::invalid_argument("CudaAmp::uploadHostMasterToFp16Working empty matrix");
     if (hostMaster == nullptr) throw std::invalid_argument("CudaAmp::uploadHostMasterToFp16Working null host");
+    if (stream == nullptr) throw std::invalid_argument("CudaAmp::uploadHostMasterToFp16Working null stream");
     if (matrix.ampWeightSlot < 0 || matrix.ampWeightSlot >= CudaAmp::masterWeightCount)
         throw std::logic_error("CudaAmp::uploadHostMasterToFp16Working matrix not bound");
     MasterWeightHalf& entry = CudaAmp::masterWeights[matrix.ampWeightSlot];
@@ -151,16 +165,6 @@ void CudaAmp::uploadHostMasterToFp16Working(CudaMatrix& matrix, const float* hos
 
     // Double-buffered pinned staging: cast chunk N+1 while H2D of chunk N runs.
     constexpr size_t kChunkElements = 16ull * 1024ull * 1024ull; // 16M halves ≈ 32 MiB
-    cudaStream_t stream = CudaMatmul::activeStream();
-    if (stream == nullptr) {
-        // Prefer a non-default stream so memcpyAsync can overlap CPU cast without legacy sync.
-        static thread_local cudaStream_t uploadStream = nullptr;
-        if (uploadStream == nullptr)
-            CudaMatmul::throwIfCudaFailed(
-                cudaStreamCreateWithFlags(&uploadStream, cudaStreamNonBlocking),
-                "CudaAmp upload stream create");
-        stream = uploadStream;
-    }
     __half* deviceHalf = reinterpret_cast<__half*>(entry.half.deviceData);
 
     for (size_t offset = 0; offset < elementCount; offset += kChunkElements) {

@@ -201,7 +201,7 @@ double LanguageModel::probeCudaPackedTrainTokensPerSecond(int sequenceLength, in
     for (int exampleIndex = 0; exampleIndex < packBatch; ++exampleIndex)
         packPointers[static_cast<size_t>(exampleIndex)] = &examples[static_cast<size_t>(exampleIndex)];
 
-    device.preferTrainProgress = true;
+    device.preferTrainProgress = false;
     device.trainProgressIntervalSec = 5.0;
     device.trainProgressEpochStart = {};
     device.trainProgressLastPrint = {};
@@ -395,8 +395,11 @@ void LanguageModel::enableCudaTrain() {
 
     this->deviceTrainEnabled = true;
     // Prefer Off when VRAM allows: retaining act scratch avoids free/malloc thrash and enables graphs.
-    // Call setActivationCheckpointMode(Selective/Full) when fitting larger models.
-    this->device->setActivationCheckpointMode(ActivationCheckpointMode::Off);
+    // Host-grad / host-SGD offload: Full from the start — Off keeps all layer acts and OOMs ~4B.
+    if (CudaAdam::preferHostGradients || CudaAdam::preferHostSgd)
+        this->device->setActivationCheckpointMode(ActivationCheckpointMode::Full);
+    else
+        this->device->setActivationCheckpointMode(ActivationCheckpointMode::Off);
     CudaAmp::preferMixedPrecision = true;
     // loss scaling only helps when FP16 GEMMs can run (shared dim gate is 256)
     CudaAmp::useLossScaling = this->tokenEmbedding.embeddingDim() >= 256;
@@ -435,6 +438,10 @@ void LanguageModel::setActivationCheckpointMode(ActivationCheckpointMode mode) {
     if (this->device == nullptr) this->enableCuda();
     if (this->device == nullptr) return;
     this->device->setActivationCheckpointMode(mode);
+    if (this->deviceTrainEnabled) {
+        this->device->trainStateReady = false;
+        this->device->ensureTrainState();
+    }
     std::cout << "LanguageModel::setActivationCheckpointMode: "
               << CudaLanguageModel::activationCheckpointModeName(mode) << '\n';
 }
@@ -561,10 +568,17 @@ void LanguageModel::setCudaPreferHostSgd(bool enabled) {
     if (this->device != nullptr) {
         this->device->trainStateReady = false;
         if (this->deviceTrainEnabled) {
-            this->device->ensureTrainState();
-            this->device->applyVramPackBudget();
-            this->device->trainStateReady = false;
-            this->device->ensureTrainState();
+            if (enabled) {
+                // Do NOT ensureTrainState under ckpt=Off first — that keeps all layer acts
+                // and OOMs ~4B. Tune sets Full + safe pack, then allocates once.
+                this->device->releasePackedTrainWorkspaces();
+                this->device->tuneOffloadCheckpointAndPack(4096);
+            } else {
+                this->device->ensureTrainState();
+                this->device->applyVramPackBudget();
+                this->device->trainStateReady = false;
+                this->device->ensureTrainState();
+            }
         }
     }
     std::cout << "LanguageModel::setCudaPreferHostSgd: " << (enabled ? "on" : "off") << '\n';

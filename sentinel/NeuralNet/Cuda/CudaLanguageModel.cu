@@ -15,6 +15,7 @@
 #include <cuda_runtime.h>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -23,6 +24,18 @@
 #if defined(_OPENMP)
 #include <omp.h>
 #endif
+
+namespace {
+
+/// <summary>wait for compute stream only — avoids stalling unrelated D2H copy streams</summary>
+void syncComputeStreamForTrace(const char* label) {
+    cudaStream_t stream = CudaMatmul::activeStream();
+    const cudaError_t status = stream != nullptr ? cudaStreamSynchronize(stream) : cudaDeviceSynchronize();
+    if (status != cudaSuccess)
+        throw std::runtime_error(std::string(label) + ": " + cudaGetErrorString(status));
+}
+
+} // namespace
 
 CudaLanguageModel::CudaLanguageModel()
     : maximumPositionCount(0),
@@ -48,6 +61,8 @@ CudaLanguageModel::CudaLanguageModel()
       hostGradCopyStream(nullptr),
       hostGradComputeEvent(nullptr),
       hostGradD2hEvent(nullptr),
+      hostWeightH2dEvent(nullptr),
+      hostWeightH2dPending(false),
       trainGraph(nullptr),
       trainGraphExec(nullptr),
       trainGraphSegmentLength(0),
@@ -106,13 +121,15 @@ const char* CudaLanguageModel::activationCheckpointModeName(ActivationCheckpoint
 }
 
 void CudaLanguageModel::setActivationCheckpointMode(ActivationCheckpointMode mode) {
+    if (this->activationCheckpointMode == mode) return;
     this->activationCheckpointMode = mode;
-    if (mode == ActivationCheckpointMode::Off) {
+    if (mode == ActivationCheckpointMode::Off)
         this->releaseActivationCheckpoints();
-        return;
-    }
-    if (!this->tokenEmbeddingWeight.empty())
-        this->ensureTrainWorkspaces();
+    if (this->tokenEmbeddingWeight.empty()) return;
+    if (!this->maxPackedColumnsManual)
+        this->applyVramPackBudget();
+    this->trainStateReady = false;
+    this->ensureTrainWorkspaces();
 }
 
 void CudaLanguageModel::setPreferMuon(bool enabled) {
@@ -157,9 +174,122 @@ void CudaLanguageModel::ensureHostGradCopyPipeline() {
         CudaMatmul::throwIfCudaFailed(
             cudaEventCreateWithFlags(&this->hostGradD2hEvent, cudaEventDisableTiming),
             "cudaEventCreate hostGradD2hEvent");
+    if (this->hostWeightH2dEvent == nullptr)
+        CudaMatmul::throwIfCudaFailed(
+            cudaEventCreateWithFlags(&this->hostWeightH2dEvent, cudaEventDisableTiming),
+            "cudaEventCreate hostWeightH2dEvent");
+}
+
+void CudaLanguageModel::waitPendingHostWeightH2d() {
+    if (!this->hostWeightH2dPending || this->hostWeightH2dEvent == nullptr) return;
+    CudaMatmul::throwIfCudaFailed(
+        cudaEventSynchronize(this->hostWeightH2dEvent),
+        "CudaLanguageModel::waitPendingHostWeightH2d");
+    this->hostWeightH2dPending = false;
+}
+
+void CudaLanguageModel::uploadHostBlockFp16WeightsAsync(size_t blockIndex, cudaStream_t stream) {
+    if (stream == nullptr) throw std::invalid_argument("uploadHostBlockFp16WeightsAsync null stream");
+    if (blockIndex >= this->blocks.size() || blockIndex >= this->hostBlockAdamStates.size())
+        throw std::out_of_range("uploadHostBlockFp16WeightsAsync blockIndex");
+    if (!CudaAdam::preferFp16GpuWeights || !CudaAdam::preferHostSgd) return;
+
+    static thread_local std::vector<float> qkvPack;
+    static thread_local std::vector<float> gateUpPack;
+
+    CudaTransformerBlock& block = this->blocks[blockIndex];
+    CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[blockIndex];
+
+    const size_t slice = hosts.queryWeightMaster.data.size();
+    qkvPack.resize(slice * 3ull);
+    std::memcpy(qkvPack.data(), hosts.queryWeightMaster.data.data(), slice * sizeof(float));
+    std::memcpy(qkvPack.data() + slice, hosts.keyWeightMaster.data.data(), slice * sizeof(float));
+    std::memcpy(qkvPack.data() + 2ull * slice, hosts.valueWeightMaster.data.data(), slice * sizeof(float));
+    CudaAmp::uploadHostMasterToFp16Working(block.attention.qkvWeight, qkvPack.data(), stream);
+    CudaAmp::uploadHostMasterToFp16Working(
+        block.attention.outputWeight,
+        hosts.attentionOutputWeightMaster.data.data(),
+        stream);
+
+    const size_t gateSlice = hosts.feedForwardGateWeightMaster.data.size();
+    const size_t upSlice = hosts.feedForwardUpWeightMaster.data.size();
+    gateUpPack.resize(gateSlice + upSlice);
+    std::memcpy(gateUpPack.data(), hosts.feedForwardGateWeightMaster.data.data(), gateSlice * sizeof(float));
+    std::memcpy(gateUpPack.data() + gateSlice, hosts.feedForwardUpWeightMaster.data.data(), upSlice * sizeof(float));
+    CudaAmp::uploadHostMasterToFp16Working(block.feedForward.gateUpWeight, gateUpPack.data(), stream);
+    CudaAmp::uploadHostMasterToFp16Working(
+        block.feedForward.downWeight,
+        hosts.feedForwardDownWeightMaster.data.data(),
+        stream);
+    block.feedForward.syncFusedGateUpWeight();
+
+    CudaMatmul::throwIfCudaFailed(
+        cudaEventRecord(this->hostWeightH2dEvent, stream),
+        "uploadHostBlockFp16WeightsAsync record hostWeightH2dEvent");
+    this->hostWeightH2dPending = true;
+}
+
+bool CudaLanguageModel::probePackedTrainMicrostep(int segmentLength, int exampleCount) {
+    if (segmentLength <= 0 || exampleCount <= 0) return false;
+    const size_t tokenCount = static_cast<size_t>(segmentLength) * static_cast<size_t>(exampleCount);
+    if (tokenCount > static_cast<size_t>(this->maxPackedColumns)) return false;
+
+    const bool previousProgress = this->preferTrainProgress;
+    this->preferTrainProgress = false;
+    bool ok = false;
+    try {
+        this->trainGradients.zeroInPlace();
+        this->zeroHostWeightGradients();
+        this->epochLossSum.ensureSize(1, 1);
+        CudaOps::zeroInPlace(this->epochLossSum);
+
+        std::vector<LanguageModelExample> examples(static_cast<size_t>(exampleCount));
+        std::vector<const LanguageModelExample*> packPtrs(static_cast<size_t>(exampleCount));
+        const int vocab = static_cast<int>(this->tokenEmbeddingWeight.rows);
+        unsigned rng = 0xC0FFEE01u;
+        for (int exampleIndex = 0; exampleIndex < exampleCount; ++exampleIndex) {
+            LanguageModelExample& example = examples[static_cast<size_t>(exampleIndex)];
+            example.inputTokenIds.resize(static_cast<size_t>(segmentLength));
+            example.targetTokenIds.resize(static_cast<size_t>(segmentLength));
+            for (int tokenIndex = 0; tokenIndex < segmentLength; ++tokenIndex) {
+                rng = rng * 1664525u + 1013904223u;
+                example.inputTokenIds[static_cast<size_t>(tokenIndex)] = static_cast<int>(rng % static_cast<unsigned>(vocab));
+                rng = rng * 1664525u + 1013904223u;
+                example.targetTokenIds[static_cast<size_t>(tokenIndex)] = static_cast<int>(rng % static_cast<unsigned>(vocab));
+            }
+            packPtrs[static_cast<size_t>(exampleIndex)] = &example;
+        }
+
+        this->accumulatePackedExamples(packPtrs.data(), exampleCount, this->trainGradients);
+        this->applyGradients(this->trainGradients, 1.0f / static_cast<float>(exampleCount));
+        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "probePackedTrainMicrostep sync");
+
+        size_t freeBytes = 0;
+        size_t totalBytes = 0;
+        CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeBytes, &totalBytes), "probePackedTrainMicrostep memGetInfo");
+        constexpr size_t minFreeAfterBytes = 512ull * 1024ull * 1024ull;
+        ok = freeBytes >= minFreeAfterBytes;
+    } catch (const std::exception&) {
+        this->releasePackedTrainWorkspaces();
+        this->trainStateReady = false;
+        this->hostWeightH2dPending = false;
+        cudaGetLastError();
+        try {
+            this->ensureTrainState();
+        } catch (...) {
+            cudaGetLastError();
+        }
+        ok = false;
+    }
+    this->preferTrainProgress = previousProgress;
+    return ok;
 }
 
 void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLength, int exampleCount, CudaLanguageModelGradients& gradients) {
+    const bool pipelineHostSgdEarly = CudaAdam::preferHostGradients && CudaAdam::preferHostSgd;
+    if (pipelineHostSgdEarly)
+        this->waitPendingHostWeightH2d();
+
     auto memTrace = [this](const char* label) {
         if (!this->preferTrainMemTrace) return;
         size_t freeBytes = 0;
@@ -186,7 +316,7 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
         const auto t0 = std::chrono::steady_clock::now();
         this->forwardTrunkFromDevice(tokenCount, segmentLength);
         if (phaseTrace || this->preferTrainMemTrace)
-            CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "runPackedTrainDevice after forwardTrunk");
+            syncComputeStreamForTrace("runPackedTrainDevice after forwardTrunk");
         if (phaseTrace)
             this->trainPhaseTimers.forwardSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     }
@@ -202,7 +332,7 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
         CudaOps::addInPlace(gradients.finalNormGamma, this->finalNormGammaGradient);
         std::swap(this->hiddenGradient, this->normInputGradientScratch);
         if (phaseTrace) {
-            CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "runPackedTrainDevice after headCe");
+            syncComputeStreamForTrace("runPackedTrainDevice after headCe");
             this->trainPhaseTimers.headCeSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         }
     }
@@ -239,6 +369,11 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
 
         this->blocks[static_cast<size_t>(pendingHostSgdBlock)].releaseDeferredHostWeightGradDevice();
         this->applyHostSgdForBlockAndFree(static_cast<size_t>(pendingHostSgdBlock), 1.0f);
+        if (pipelineHostSgd && CudaAdam::preferFp16GpuWeights) {
+            this->uploadHostBlockFp16WeightsAsync(
+                static_cast<size_t>(pendingHostSgdBlock),
+                this->hostGradCopyStream);
+        }
         pendingHostSgdBlock = -1;
     };
 
@@ -337,7 +472,7 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
         std::swap(this->hiddenGradient, this->blockInputGradientScratch);
 
         if (blockIndex == midBlock && this->preferTrainMemTrace) {
-            CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "runPackedTrainDevice mid backward");
+            syncComputeStreamForTrace("runPackedTrainDevice mid backward");
             memTrace("mid backward");
         }
     }
@@ -347,7 +482,7 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
     {
         CudaOps::embeddingScatterAddInto(gradients.tokenEmbedding, this->tokenIdsBuffer, tokenCount, this->hiddenGradient);
         if (phaseTrace) {
-            CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "runPackedTrainDevice after block bwd loop");
+            syncComputeStreamForTrace("runPackedTrainDevice after block bwd loop");
             const double loopWall = std::chrono::duration<double>(std::chrono::steady_clock::now() - bwdLoopStart).count();
             const double d2hLoop = this->trainPhaseTimers.d2hSec - d2hBeforeLoop;
             const double sgdLoop = this->trainPhaseTimers.sgdSec - sgdBeforeLoop;
@@ -1005,7 +1140,7 @@ void CudaLanguageModel::applyVramPackBudget(float freeFraction, size_t safetyRes
     size_t totalBytes = 0;
     CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeBytes, &totalBytes), "CudaLanguageModel::applyVramPackBudget memGetInfo");
 
-    // WDDM shares VRAM with the desktop ? keep a hard floor so DWM/apps don't thrash the train working set.
+    // WDDM shares VRAM with the desktop — keep a hard floor so DWM/apps don't thrash the train working set.
     const size_t displayFloor = (std::max)(safetyReserveBytes, totalBytes / size_t{5}); // >=20% of card or explicit safety
     const size_t pendingStatic = this->estimatePendingTrainStaticBytes();
     const size_t reserved = pendingStatic + displayFloor;
@@ -1015,15 +1150,21 @@ void CudaLanguageModel::applyVramPackBudget(float freeFraction, size_t safetyRes
     if (perColumn == 0) throw std::logic_error("CudaLanguageModel::applyVramPackBudget zero bytesPerPackedColumn");
 
     // bytesPerPackedColumn undercounts lazy Attn/FFN scratch + cuBLAS workspaces; pad so packs stay safe.
-    // 1.20 is enough once ckpt=off retains scratch (no free/realloc thrash) and selective keeps FFN acts.
-    constexpr double footprintSlack = 1.20;
-    const size_t budgetBytes = static_cast<size_t>(static_cast<double>(usableBytes) * static_cast<double>(freeFraction));
+    double footprintSlack = 1.20;
+    if (this->activationCheckpointMode == ActivationCheckpointMode::Selective)
+        footprintSlack = 1.55;
+    if (CudaAdam::preferHostGradients && this->blocks.size() >= 24)
+        footprintSlack += 0.15;
+    float budgetFraction = freeFraction;
+    if (CudaAdam::preferHostSgd)
+        budgetFraction = (std::min)(budgetFraction, 0.55f);
+
+    const size_t budgetBytes = static_cast<size_t>(static_cast<double>(usableBytes) * static_cast<double>(budgetFraction));
     const size_t bytesPerColBudget = static_cast<size_t>(static_cast<double>(perColumn) * footprintSlack);
     size_t cols = bytesPerColBudget > 0 ? budgetBytes / bytesPerColBudget : 0;
 
-    int minCols = CudaLanguageModel::lengthBucketStep;
-    if (this->maximumPositionCount > minCols) minCols = this->maximumPositionCount;
-    // Beyond ~4k cols throughput saturates on 16GB cards while VRAM pressure kills tok/s (WDDM thrash).
+    // Minimum pack is one length bucket (32 cols), NOT maximumPositionCount.
+    constexpr int minCols = CudaLanguageModel::lengthBucketStep;
     constexpr int maxCols = 4096;
     if (cols < static_cast<size_t>(minCols)) cols = static_cast<size_t>(minCols);
     if (cols > static_cast<size_t>(maxCols)) cols = static_cast<size_t>(maxCols);
@@ -1031,10 +1172,12 @@ void CudaLanguageModel::applyVramPackBudget(float freeFraction, size_t safetyRes
     cols = (cols / 64u) * 64u;
     if (cols < static_cast<size_t>(minCols)) cols = static_cast<size_t>(minCols);
 
-    // Final clamp: planned workspace must leave displayFloor free after pending static.
-    while (cols > static_cast<size_t>(minCols)) {
+    // Final clamp: planned workspace must leave displayFloor + post-alloc headroom free.
+    constexpr size_t postAllocHeadroomBytes = 768ull * 1024ull * 1024ull;
+    while (cols >= static_cast<size_t>(minCols)) {
         const size_t plannedWorkspace = cols * bytesPerColBudget;
-        if (pendingStatic + plannedWorkspace + displayFloor <= freeBytes) break;
+        if (pendingStatic + plannedWorkspace + displayFloor + postAllocHeadroomBytes <= freeBytes) break;
+        if (cols <= static_cast<size_t>(minCols)) break;
         cols -= 64u;
     }
     if (cols < static_cast<size_t>(minCols)) cols = static_cast<size_t>(minCols);
@@ -1050,7 +1193,82 @@ void CudaLanguageModel::applyVramPackBudget(float freeFraction, size_t safetyRes
     std::printf(
         "CudaLanguageModel::applyVramPackBudget: ckpt=%s  free=%.0f/%.0f MiB  pendingStatic=%.0f safety=%.0f fraction=%.2f  maxPackCols=%d  ~workspace=%.0f MiB (~%.0f w/slack)\n",
         CudaLanguageModel::activationCheckpointModeName(this->activationCheckpointMode),
-        freeMiB, totalMiB, pendingMiB, safetyMiB, freeFraction, this->maxPackedColumns, workspaceMiB, plannedMiB);
+        freeMiB, totalMiB, pendingMiB, safetyMiB, budgetFraction, this->maxPackedColumns, workspaceMiB, plannedMiB);
+}
+
+void CudaLanguageModel::tuneOffloadCheckpointAndPack(int targetMaxCols) {
+    if (!CudaAdam::preferHostSgd || !CudaAdam::preferHostGradients)
+        throw std::logic_error("CudaLanguageModel::tuneOffloadCheckpointAndPack requires host-SGD offload");
+    if (this->tokenEmbeddingWeight.empty())
+        throw std::logic_error("CudaLanguageModel::tuneOffloadCheckpointAndPack weights not uploaded");
+    if (targetMaxCols <= 0)
+        throw std::invalid_argument("CudaLanguageModel::tuneOffloadCheckpointAndPack targetMaxCols must be > 0");
+
+    // ~4B on 16GB: Full ckpt + fixed pack. Never sweep Selective / never run train
+    // microsteps during tune — that OOM'd / crashed WDDM. Known-good is pack=8 @ seq=512.
+    const bool largeModel = this->blocks.size() >= 24
+        && this->tokenEmbeddingWeight.cols >= 2048;
+    const int startCols = largeModel
+        ? (std::min)(targetMaxCols, 4096)
+        : (std::min)(targetMaxCols, 4096);
+    constexpr int minCols = 512;
+
+    auto logLayout = [this](const char* note, int cols) {
+        size_t freeBytes = 0;
+        size_t totalBytes = 0;
+        if (cudaMemGetInfo(&freeBytes, &totalBytes) != cudaSuccess) return;
+        std::printf(
+            "CudaLanguageModel::tuneOffloadCheckpointAndPack: %s  ckpt=%s  maxPackCols=%d  free=%.0f/%.0f MiB\n",
+            note,
+            CudaLanguageModel::activationCheckpointModeName(this->activationCheckpointMode),
+            cols,
+            static_cast<double>(freeBytes) / (1024.0 * 1024.0),
+            static_cast<double>(totalBytes) / (1024.0 * 1024.0));
+    };
+
+    auto tryAllocOnly = [this](ActivationCheckpointMode mode, int cols) -> bool {
+        this->activationCheckpointMode = mode;
+        this->releasePackedTrainWorkspaces();
+        this->maxPackedColumns = cols;
+        this->maxPackedColumnsManual = true;
+        this->trainStateReady = false;
+        try {
+            this->ensureTrainState();
+            CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "tuneOffloadCheckpointAndPack alloc sync");
+            size_t freeBytes = 0;
+            size_t totalBytes = 0;
+            CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeBytes, &totalBytes), "tuneOffloadCheckpointAndPack memGetInfo");
+            // Keep ≥1.5 GiB free after workspace alloc (WDDM / display headroom).
+            constexpr size_t minFree = 1536ull * 1024ull * 1024ull;
+            if (freeBytes < minFree) {
+                this->releasePackedTrainWorkspaces();
+                this->trainStateReady = false;
+                return false;
+            }
+            return true;
+        } catch (const std::exception&) {
+            this->releasePackedTrainWorkspaces();
+            this->trainStateReady = false;
+            cudaGetLastError();
+            return false;
+        }
+    };
+
+    // Prefer Full (peak ~1 layer acts). Halve cols on alloc failure — no train probes.
+    for (int cols = startCols; cols >= minCols; cols /= 2) {
+        if (tryAllocOnly(ActivationCheckpointMode::Full, cols)) {
+            logLayout("full alloc OK (no microstep sweep)", cols);
+            return;
+        }
+    }
+    // Last resort: Selective only at tiny pack (VRAM-hungry FFN retention).
+    for (int cols = (std::min)(startCols / 4, 1024); cols >= minCols; cols /= 2) {
+        if (tryAllocOnly(ActivationCheckpointMode::Selective, cols)) {
+            logLayout("selective alloc OK (fallback)", cols);
+            return;
+        }
+    }
+    throw std::runtime_error("CudaLanguageModel::tuneOffloadCheckpointAndPack: no safe layout found (OOM)");
 }
 
 void CudaLanguageModel::releaseActivationCheckpoints() {
@@ -2126,6 +2344,10 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
     this->muon.learningRate = this->adam.learningRate;
 
     auto syncFusedMirrors = [this]() {
+        if (CudaAdam::preferFp16GpuWeights && CudaAdam::preferHostSgd) {
+            // Large block weights were pipelined H2D during bwd; only sync small FP32-resident params here.
+            return;
+        }
         if (CudaAdam::preferFp16GpuWeights) {
             // Reuse host pack buffers across steps to avoid multi-GB alloc churn.
             static thread_local std::vector<float> qkvPack;
@@ -2267,8 +2489,9 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
         {
             const auto t0 = std::chrono::steady_clock::now();
             syncFusedMirrors();
+            this->waitPendingHostWeightH2d();
             if (this->preferTrainPhaseTrace) {
-                CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "applyGradients syncFusedMirrors");
+                syncComputeStreamForTrace("applyGradients syncFusedMirrors");
                 const double h2dApply = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
                 this->trainPhaseTimers.h2dSec += h2dApply;
                 SmokeLog::result(
@@ -4168,16 +4391,14 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
     const int heads = 48;
     const int pos = 2048;
     const int seq = 512;
-    // Speed path: pack=8 amortizes fixed PCIe; pipeline D2H keeps wait ~0.5s.
-    const int packExamples = 8;
-    const int packCols = seq * packExamples;
-    const int tokenCount = packCols;
+    // Auto pack budget after selective ckpt; target ~4096 cols (= pack 8 @ seq 512) when VRAM allows.
+    const int targetPackCols = seq * 8;
 
     SmokeLog::section("scale-4B train-step");
     SmokeLog::result(
         "shape",
-        "vocab=%d embed=%d blocks=%d heads=%d pos=%d seq=%d pack=%d cols=%d  mode=fp16w+hostGrads+ckpt=full flash=on opt=SGD target>=600tok/s",
-        vocab, embed, blocks, heads, pos, seq, packExamples, packCols);
+        "vocab=%d embed=%d blocks=%d heads=%d pos=%d seq=%d targetPackCols=%d  mode=fp16w+hostGrads+ckpt=selective flash=on opt=SGD",
+        vocab, embed, blocks, heads, pos, seq, targetPackCols);
 
     auto memSnapshot = [](const char* label) -> size_t {
         size_t freeBytes = 0;
@@ -4208,12 +4429,11 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
         CudaLanguageModel device;
         device.preferTrainGraph = false;
         device.preferMuon = false;
-        device.preferTrainMemTrace = false;
-        device.preferTrainPhaseTrace = true;
+        device.preferTrainMemTrace = true;
+        device.preferTrainPhaseTrace = false;
         device.adam = CudaAdam(0.001f);
-        device.setActivationCheckpointMode(ActivationCheckpointMode::Full);
-        device.maxPackedColumns = packCols;
-        device.maxPackedColumnsManual = true;
+        device.maxPackedColumns = targetPackCols;
+        device.maxPackedColumnsManual = false;
         device.logitChunkRows = 2048;
 
         {
@@ -4246,7 +4466,18 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
         }
 
         device.ensureTrainState();
-        const size_t freeBeforeStep = memSnapshot("after ensureTrainState");
+        device.tuneOffloadCheckpointAndPack(targetPackCols);
+        const int packExamples = device.maxPackExamplesForSegment(seq);
+        const int tokenCount = seq * packExamples;
+        const size_t freeBeforeStep = memSnapshot("after tuneOffloadCheckpointAndPack");
+        SmokeLog::result(
+            "pack budget",
+            "ckpt=%s maxPackCols=%d packExamples=%d tokens/step=%d freeBeforeStep=%.0f MiB",
+            CudaLanguageModel::activationCheckpointModeName(device.activationCheckpointMode),
+            device.maxPackedColumns,
+            packExamples,
+            tokenCount,
+            static_cast<double>(freeBeforeStep) / (1024.0 * 1024.0));
 
         std::vector<LanguageModelExample> examples(static_cast<size_t>(packExamples));
         std::vector<const LanguageModelExample*> packPtrs(static_cast<size_t>(packExamples));
@@ -4278,9 +4509,10 @@ void CudaLanguageModel::runScale4BTrainStepProbeDemo() {
             throw std::runtime_error("4B train-step expected flash attention");
         SmokeLog::result(
             "accumulate",
-            "sec=%.2f  tokens/s=%.0f  flash=on ckpt=full pack=%d",
+            "sec=%.2f  tokens/s=%.0f  flash=on ckpt=%s pack=%d",
             accumSec,
             accumSec > 0.0 ? static_cast<double>(tokenCount) / accumSec : 0.0,
+            CudaLanguageModel::activationCheckpointModeName(device.activationCheckpointMode),
             packExamples);
 
         const auto applyStart = std::chrono::steady_clock::now();

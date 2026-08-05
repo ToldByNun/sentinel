@@ -80,14 +80,14 @@ def run(model_id: str, profile: ProfileName = "fair") -> int:
         model.enable_cuda()
         model.set_prefer_flash_attention(train.flash_attention)
         model.set_prefer_muon(False)
-        model.set_max_packed_columns(SEQ * PACK_EXAMPLES)
+        if not train.memory_efficient:
+            model.set_max_packed_columns(SEQ * PACK_EXAMPLES)
 
         if train.memory_efficient:
             progress("feat: enable FP16 GPU weights + host grads + host SGD")
             model.set_prefer_cpu_adam_offload(True)
             model.enable_cuda_train()
             model.set_prefer_host_sgd(True)
-            model.set_activation_checkpoint_mode(S.ActivationCheckpointMode.Full)
         else:
             progress("fair: enable resident Adam (no int8 / no host offload)")
             model.set_prefer_cpu_adam_offload(False)
@@ -96,7 +96,7 @@ def run(model_id: str, profile: ProfileName = "fair") -> int:
             model.set_activation_checkpoint_mode(ckpt)
 
         model.set_prefer_train_graph(False)
-        progress(f"max_packed_columns={model.max_packed_columns}")
+        progress(f"max_packed_columns={model.max_packed_columns} (auto-tuned)")
 
         peak_vram = gpu_used_mib() or 0.0
         host_ram = host_rss_mib() or 0.0
@@ -109,12 +109,13 @@ def run(model_id: str, profile: ProfileName = "fair") -> int:
         )
         wall = time.perf_counter() - t0
         # Prefer probe tok/s; if it returns 0, derive from wall + known token budget.
-        tokens = float(SEQ * PACK_EXAMPLES * TIMED_STEPS)
+        pack_examples = max(1, model.max_packed_columns // SEQ)
+        tokens = float(SEQ * pack_examples * TIMED_STEPS)
         if tok_s <= 0.0 and wall > 0.0:
             tok_s = tokens / wall
             progress(f"probe returned 0; using wall tok/s={tok_s:.0f}")
         if tok_s > 0.0:
-            step_ms = (SEQ * PACK_EXAMPLES / tok_s) * 1000.0
+            step_ms = (SEQ * pack_examples / tok_s) * 1000.0
 
         peak_vram = max(peak_vram, gpu_used_mib() or 0.0)
         host_ram = max(host_ram, host_rss_mib() or 0.0)
