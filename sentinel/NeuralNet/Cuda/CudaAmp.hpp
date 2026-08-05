@@ -130,6 +130,20 @@ public:
     /// <summary>FP16 GEMM using CudaMatrix operands (resolves FP16 working weights)</summary>
     static bool launchCublasLtMatmulFp16Matrices(const CudaMatrix& left, const CudaMatrix& right, CudaMatrix& out, bool transposeLeft, bool transposeRight, double* kernelMilliseconds, const float* deviceBiasOrNull = nullptr);
 
+    /// <summary>
+    /// FP16 GEMM with an already-half left weight pointer (e.g. up-slice of fused gateUp) and FP32 right.
+    /// </summary>
+    static bool launchCublasLtMatmulFp16HalfLeft(
+        const void* leftHalf,
+        const float* deviceRight,
+        float* deviceOut,
+        int rowCount,
+        int columnCount,
+        int sharedCount,
+        bool transposeLeft,
+        bool transposeRight,
+        const float* deviceBiasOrNull = nullptr);
+
     /// <summary>mark all registered master-weight FP16 mirrors stale (call after Adam)</summary>
     static void invalidateMasterWeightHalves();
 

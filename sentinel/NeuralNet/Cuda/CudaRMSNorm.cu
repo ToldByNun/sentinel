@@ -133,6 +133,50 @@ void CudaRMSNorm::releaseActivationScratch() const {
     this->backwardScratch.free();
 }
 
+void CudaRMSNorm::ensureSelectiveCacheCapacity(size_t embeddingDim, size_t columns) const {
+    if (embeddingDim == 0 || columns == 0) return;
+    this->inverseRms.ensureSize(1, columns);
+    this->lastNormalized.ensureSize(embeddingDim, columns);
+    this->lastInput.ensureShape(embeddingDim, columns);
+}
+
+__global__ void CudaRMSNormReconstructNormalizedEntry(
+    const float* normalized,
+    const float* gamma,
+    float* out,
+    int embeddingDim,
+    int sequenceLength
+) {
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    const int elementCount = embeddingDim * sequenceLength;
+    if (index >= elementCount) return;
+    const int row = index / sequenceLength;
+    out[index] = gamma[row] * normalized[index];
+}
+
+void CudaRMSNorm::reconstructNormalizedOutput(CudaMatrix& out) const {
+    if (this->lastNormalized.empty())
+        throw std::logic_error("CudaRMSNorm::reconstructNormalizedOutput missing lastNormalized");
+    if (this->gamma.empty())
+        throw std::logic_error("CudaRMSNorm::reconstructNormalizedOutput weights not uploaded");
+    if (!CudaMatmul::isAvailable())
+        throw std::runtime_error("CudaRMSNorm::reconstructNormalizedOutput no CUDA device");
+
+    out.ensureSize(this->lastNormalized.rows, this->lastNormalized.cols);
+    const int embeddingDim = static_cast<int>(this->lastNormalized.rows);
+    const int sequenceLength = static_cast<int>(this->lastNormalized.cols);
+    const int elementCount = embeddingDim * sequenceLength;
+    constexpr int threadCount = 256;
+    const int blockCount = (elementCount + threadCount - 1) / threadCount;
+    CudaRMSNormReconstructNormalizedEntry<<<blockCount, threadCount, 0, CudaMatmul::activeStream()>>>(
+        this->lastNormalized.buffer.deviceData,
+        this->gamma.buffer.deviceData,
+        out.buffer.deviceData,
+        embeddingDim,
+        sequenceLength);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaRMSNormReconstructNormalizedEntry launch");
+}
+
 void CudaRMSNorm::forward(const CudaMatrix& input, CudaMatrix& out) const {
     if (input.empty()) throw std::invalid_argument("CudaRMSNorm::forward empty input");
     if (this->gamma.empty()) throw std::logic_error("CudaRMSNorm::forward weights not uploaded");
@@ -174,7 +218,8 @@ void CudaRMSNorm::forwardFromResidual(const CudaMatrix& left, const CudaMatrix& 
     const int sequenceLength = static_cast<int>(residualOut.cols);
     normOut.ensureSize(residualOut.rows, residualOut.cols);
     this->inverseRms.ensureSize(1, residualOut.cols);
-    this->lastInput.ensureSize(residualOut.rows, residualOut.cols); // shape only; residualOut holds values
+    // Shape sentinel only — residual values live in residualOut; bwd uses lastNormalized.
+    this->lastInput.ensureShape(residualOut.rows, residualOut.cols);
     this->lastNormalized.ensureSize(residualOut.rows, residualOut.cols);
 
     constexpr int threadCount = 256;

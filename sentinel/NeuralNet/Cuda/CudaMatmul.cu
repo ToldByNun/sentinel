@@ -19,7 +19,7 @@ struct CublasLtGemmState {
     bool initAttempted;
     bool initSucceeded;
     CudaDeviceBuffer workspace;
-    static constexpr size_t workspaceBytes = 16 * 1024 * 1024;
+    static constexpr size_t workspaceBytes = 128 * 1024 * 1024;
     static constexpr int descCacheSize = 16;
 
     struct DescCacheEntry {

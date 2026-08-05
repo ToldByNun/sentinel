@@ -529,200 +529,251 @@ static bool launchCublasLtMatmulFp16Halves(
     if (leftHalf == nullptr || rightHalf == nullptr || deviceOut == nullptr) return false;
     if (rowCount <= 0 || columnCount <= 0 || sharedCount <= 0) return false;
 
+    struct Fp16DescCacheEntry {
+        cublasLtMatmulDesc_t matmulDesc = nullptr;
+        cublasLtMatrixLayout_t layoutLeft = nullptr;
+        cublasLtMatrixLayout_t layoutRight = nullptr;
+        cublasLtMatrixLayout_t layoutOut = nullptr;
+        cublasLtMatmulAlgo_t algo{};
+        bool hasAlgo = false;
+        int rowCount = 0;
+        int columnCount = 0;
+        int sharedCount = 0;
+        bool transposeLeft = false;
+        bool transposeRight = false;
+        bool hasBias = false;
+        bool valid = false;
+        unsigned long long lastUsed = 0;
+    };
+
+    constexpr int fp16DescCacheSize = 32;
     struct LocalLt {
-        cublasLtHandle_t handle;
-        bool ok;
+        cublasLtHandle_t handle = nullptr;
+        bool ok = false;
         CudaDeviceBuffer workspace;
-        LocalLt() : handle(nullptr), ok(false) {
+        Fp16DescCacheEntry descCache[32]{};
+        unsigned long long useCounter = 1;
+
+        LocalLt() {
             if (cublasLtCreate(&handle) == CUBLAS_STATUS_SUCCESS) ok = true;
         }
         ~LocalLt() {
+            for (int index = 0; index < 32; ++index)
+                destroyDescEntry(descCache[index]);
             if (handle != nullptr) cublasLtDestroy(handle);
+        }
+        void destroyDescEntry(Fp16DescCacheEntry& entry) {
+            if (entry.layoutOut != nullptr) cublasLtMatrixLayoutDestroy(entry.layoutOut);
+            if (entry.layoutRight != nullptr) cublasLtMatrixLayoutDestroy(entry.layoutRight);
+            if (entry.layoutLeft != nullptr) cublasLtMatrixLayoutDestroy(entry.layoutLeft);
+            if (entry.matmulDesc != nullptr) cublasLtMatmulDescDestroy(entry.matmulDesc);
+            entry = Fp16DescCacheEntry{};
         }
     };
     static LocalLt localLt;
     if (!localLt.ok) return false;
 
-    const size_t workspaceBytes = 16ull * 1024ull * 1024ull;
+    constexpr size_t workspaceBytes = 64ull * 1024ull * 1024ull;
     try {
         localLt.workspace.ensureCapacity(workspaceBytes);
     } catch (...) {
         return false;
     }
 
+    const bool wantBias = deviceBiasOrNull != nullptr;
+    // Hot path: cache descriptors + heuristic algo by shape (matches FP32 GEMM cache).
+    if (kernelMilliseconds == nullptr) {
+        Fp16DescCacheEntry* cacheEntry = nullptr;
+        for (int index = 0; index < fp16DescCacheSize; ++index) {
+            Fp16DescCacheEntry& entry = localLt.descCache[index];
+            if (!entry.valid) continue;
+            if (entry.rowCount != rowCount || entry.columnCount != columnCount || entry.sharedCount != sharedCount)
+                continue;
+            if (entry.transposeLeft != transposeLeft || entry.transposeRight != transposeRight)
+                continue;
+            if (entry.hasBias != wantBias) continue;
+            cacheEntry = &entry;
+            break;
+        }
+
+        if (cacheEntry == nullptr) {
+            int victim = 0;
+            for (int index = 1; index < fp16DescCacheSize; ++index) {
+                if (!localLt.descCache[index].valid) {
+                    victim = index;
+                    break;
+                }
+                if (localLt.descCache[index].lastUsed < localLt.descCache[victim].lastUsed)
+                    victim = index;
+            }
+            cacheEntry = &localLt.descCache[victim];
+            localLt.destroyDescEntry(*cacheEntry);
+
+            if (cublasLtMatmulDescCreate(&cacheEntry->matmulDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F) != CUBLAS_STATUS_SUCCESS)
+                return false;
+            const cublasOperation_t transLeft = transposeLeft ? CUBLAS_OP_T : CUBLAS_OP_N;
+            const cublasOperation_t transRight = transposeRight ? CUBLAS_OP_T : CUBLAS_OP_N;
+            if (cublasLtMatmulDescSetAttribute(cacheEntry->matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transLeft, sizeof(transLeft)) != CUBLAS_STATUS_SUCCESS
+                || cublasLtMatmulDescSetAttribute(cacheEntry->matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transRight, sizeof(transRight)) != CUBLAS_STATUS_SUCCESS) {
+                localLt.destroyDescEntry(*cacheEntry);
+                return false;
+            }
+            if (wantBias) {
+                const cublasLtEpilogue_t epilogue = CUBLASLT_EPILOGUE_BIAS;
+                const cudaDataType_t biasType = CUDA_R_32F;
+                if (cublasLtMatmulDescSetAttribute(cacheEntry->matmulDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &epilogue, sizeof(epilogue)) != CUBLAS_STATUS_SUCCESS
+                    || cublasLtMatmulDescSetAttribute(cacheEntry->matmulDesc, CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &biasType, sizeof(biasType)) != CUBLAS_STATUS_SUCCESS) {
+                    localLt.destroyDescEntry(*cacheEntry);
+                    return false;
+                }
+            }
+
+            const int leftRows = transposeLeft ? sharedCount : rowCount;
+            const int leftCols = transposeLeft ? rowCount : sharedCount;
+            const int rightRows = transposeRight ? columnCount : sharedCount;
+            const int rightCols = transposeRight ? sharedCount : columnCount;
+            const cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;
+            if (cublasLtMatrixLayoutCreate(&cacheEntry->layoutLeft, CUDA_R_16F, leftRows, leftCols, leftCols) != CUBLAS_STATUS_SUCCESS
+                || cublasLtMatrixLayoutCreate(&cacheEntry->layoutRight, CUDA_R_16F, rightRows, rightCols, rightCols) != CUBLAS_STATUS_SUCCESS
+                || cublasLtMatrixLayoutCreate(&cacheEntry->layoutOut, CUDA_R_32F, rowCount, columnCount, columnCount) != CUBLAS_STATUS_SUCCESS
+                || cublasLtMatrixLayoutSetAttribute(cacheEntry->layoutLeft, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)) != CUBLAS_STATUS_SUCCESS
+                || cublasLtMatrixLayoutSetAttribute(cacheEntry->layoutRight, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)) != CUBLAS_STATUS_SUCCESS
+                || cublasLtMatrixLayoutSetAttribute(cacheEntry->layoutOut, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)) != CUBLAS_STATUS_SUCCESS) {
+                localLt.destroyDescEntry(*cacheEntry);
+                return false;
+            }
+
+            cublasLtMatmulPreference_t preference = nullptr;
+            if (cublasLtMatmulPreferenceCreate(&preference) == CUBLAS_STATUS_SUCCESS) {
+                const size_t workspaceBytesAttr = localLt.workspace.capacityBytes;
+                if (cublasLtMatmulPreferenceSetAttribute(
+                        preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceBytesAttr, sizeof(workspaceBytesAttr)) == CUBLAS_STATUS_SUCCESS) {
+                    cublasLtMatmulHeuristicResult_t heuristicResults[8]{};
+                    int returnedResults = 0;
+                    if (cublasLtMatmulAlgoGetHeuristic(
+                            localLt.handle, cacheEntry->matmulDesc, cacheEntry->layoutLeft, cacheEntry->layoutRight,
+                            cacheEntry->layoutOut, cacheEntry->layoutOut, preference, 8, heuristicResults, &returnedResults) == CUBLAS_STATUS_SUCCESS) {
+                        for (int hi = 0; hi < returnedResults; ++hi) {
+                            if (heuristicResults[hi].state == CUBLAS_STATUS_SUCCESS
+                                && heuristicResults[hi].workspaceSize <= workspaceBytesAttr) {
+                                cacheEntry->algo = heuristicResults[hi].algo;
+                                cacheEntry->hasAlgo = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                cublasLtMatmulPreferenceDestroy(preference);
+            }
+
+            cacheEntry->rowCount = rowCount;
+            cacheEntry->columnCount = columnCount;
+            cacheEntry->sharedCount = sharedCount;
+            cacheEntry->transposeLeft = transposeLeft;
+            cacheEntry->transposeRight = transposeRight;
+            cacheEntry->hasBias = wantBias;
+            cacheEntry->valid = true;
+        }
+
+        cacheEntry->lastUsed = localLt.useCounter++;
+        if (wantBias) {
+            if (cublasLtMatmulDescSetAttribute(
+                    cacheEntry->matmulDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &deviceBiasOrNull, sizeof(deviceBiasOrNull)) != CUBLAS_STATUS_SUCCESS)
+                return false;
+        }
+
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
+        const cublasLtMatmulAlgo_t* algoPointer = cacheEntry->hasAlgo ? &cacheEntry->algo : nullptr;
+        return cublasLtMatmul(
+            localLt.handle,
+            cacheEntry->matmulDesc,
+            &alpha,
+            leftHalf,
+            cacheEntry->layoutLeft,
+            rightHalf,
+            cacheEntry->layoutRight,
+            &beta,
+            deviceOut,
+            cacheEntry->layoutOut,
+            deviceOut,
+            cacheEntry->layoutOut,
+            algoPointer,
+            localLt.workspace.deviceData,
+            localLt.workspace.capacityBytes,
+            CudaMatmul::activeStream()) == CUBLAS_STATUS_SUCCESS;
+    }
+
+    // Timed path: keep per-call descriptors (rare).
     const int leftRows = transposeLeft ? sharedCount : rowCount;
     const int leftCols = transposeLeft ? rowCount : sharedCount;
     const int rightRows = transposeRight ? columnCount : sharedCount;
     const int rightCols = transposeRight ? sharedCount : columnCount;
-
     cublasLtMatmulDesc_t matmulDesc = nullptr;
     cublasLtMatrixLayout_t layoutLeft = nullptr;
     cublasLtMatrixLayout_t layoutRight = nullptr;
     cublasLtMatrixLayout_t layoutOut = nullptr;
-
     auto destroyDescriptors = [&]() {
         if (layoutOut != nullptr) cublasLtMatrixLayoutDestroy(layoutOut);
         if (layoutRight != nullptr) cublasLtMatrixLayoutDestroy(layoutRight);
         if (layoutLeft != nullptr) cublasLtMatrixLayoutDestroy(layoutLeft);
         if (matmulDesc != nullptr) cublasLtMatmulDescDestroy(matmulDesc);
     };
-
     if (cublasLtMatmulDescCreate(&matmulDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F) != CUBLAS_STATUS_SUCCESS) return false;
-
     const cublasOperation_t transLeft = transposeLeft ? CUBLAS_OP_T : CUBLAS_OP_N;
     const cublasOperation_t transRight = transposeRight ? CUBLAS_OP_T : CUBLAS_OP_N;
-    if (cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transLeft, sizeof(transLeft)) != CUBLAS_STATUS_SUCCESS) {
+    if (cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transLeft, sizeof(transLeft)) != CUBLAS_STATUS_SUCCESS
+        || cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transRight, sizeof(transRight)) != CUBLAS_STATUS_SUCCESS) {
         destroyDescriptors();
         return false;
     }
-    if (cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transRight, sizeof(transRight)) != CUBLAS_STATUS_SUCCESS) {
-        destroyDescriptors();
-        return false;
-    }
-
-    if (deviceBiasOrNull != nullptr) {
+    if (wantBias) {
         const cublasLtEpilogue_t epilogue = CUBLASLT_EPILOGUE_BIAS;
-        if (cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &epilogue, sizeof(epilogue)) != CUBLAS_STATUS_SUCCESS) {
-            destroyDescriptors();
-            return false;
-        }
-        if (cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &deviceBiasOrNull, sizeof(deviceBiasOrNull)) != CUBLAS_STATUS_SUCCESS) {
-            destroyDescriptors();
-            return false;
-        }
         const cudaDataType_t biasType = CUDA_R_32F;
-        if (cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &biasType, sizeof(biasType)) != CUBLAS_STATUS_SUCCESS) {
+        if (cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &epilogue, sizeof(epilogue)) != CUBLAS_STATUS_SUCCESS
+            || cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &deviceBiasOrNull, sizeof(deviceBiasOrNull)) != CUBLAS_STATUS_SUCCESS
+            || cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &biasType, sizeof(biasType)) != CUBLAS_STATUS_SUCCESS) {
             destroyDescriptors();
             return false;
         }
     }
-
     const cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;
-    if (cublasLtMatrixLayoutCreate(&layoutLeft, CUDA_R_16F, leftRows, leftCols, leftCols) != CUBLAS_STATUS_SUCCESS) {
-        destroyDescriptors();
-        return false;
-    }
-    if (cublasLtMatrixLayoutCreate(&layoutRight, CUDA_R_16F, rightRows, rightCols, rightCols) != CUBLAS_STATUS_SUCCESS) {
-        destroyDescriptors();
-        return false;
-    }
-    if (cublasLtMatrixLayoutCreate(&layoutOut, CUDA_R_32F, rowCount, columnCount, columnCount) != CUBLAS_STATUS_SUCCESS) {
-        destroyDescriptors();
-        return false;
-    }
-
-    if (cublasLtMatrixLayoutSetAttribute(layoutLeft, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)) != CUBLAS_STATUS_SUCCESS
+    if (cublasLtMatrixLayoutCreate(&layoutLeft, CUDA_R_16F, leftRows, leftCols, leftCols) != CUBLAS_STATUS_SUCCESS
+        || cublasLtMatrixLayoutCreate(&layoutRight, CUDA_R_16F, rightRows, rightCols, rightCols) != CUBLAS_STATUS_SUCCESS
+        || cublasLtMatrixLayoutCreate(&layoutOut, CUDA_R_32F, rowCount, columnCount, columnCount) != CUBLAS_STATUS_SUCCESS
+        || cublasLtMatrixLayoutSetAttribute(layoutLeft, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)) != CUBLAS_STATUS_SUCCESS
         || cublasLtMatrixLayoutSetAttribute(layoutRight, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)) != CUBLAS_STATUS_SUCCESS
         || cublasLtMatrixLayoutSetAttribute(layoutOut, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)) != CUBLAS_STATUS_SUCCESS) {
         destroyDescriptors();
         return false;
     }
-
     const float alpha = 1.0f;
     const float beta = 0.0f;
-
-    const cublasLtMatmulAlgo_t* algoPointer = nullptr;
-    cublasLtMatmulHeuristicResult_t heuristicResults[8]{};
-    cublasLtMatmulPreference_t preference = nullptr;
-    if (deviceBiasOrNull != nullptr) {
-        if (cublasLtMatmulPreferenceCreate(&preference) != CUBLAS_STATUS_SUCCESS) {
-            destroyDescriptors();
-            return false;
-        }
-        const size_t workspaceBytesAttr = localLt.workspace.capacityBytes;
-        if (cublasLtMatmulPreferenceSetAttribute(
-                preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceBytesAttr, sizeof(workspaceBytesAttr)) != CUBLAS_STATUS_SUCCESS) {
-            cublasLtMatmulPreferenceDestroy(preference);
-            destroyDescriptors();
-            return false;
-        }
-        int returnedResults = 0;
-        if (cublasLtMatmulAlgoGetHeuristic(
-                localLt.handle, matmulDesc, layoutLeft, layoutRight, layoutOut, layoutOut,
-                preference, 8, heuristicResults, &returnedResults) != CUBLAS_STATUS_SUCCESS
-            || returnedResults <= 0) {
-            cublasLtMatmulPreferenceDestroy(preference);
-            destroyDescriptors();
-            return false;
-        }
-        int chosen = -1;
-        for (int index = 0; index < returnedResults; ++index) {
-            if (heuristicResults[index].state == CUBLAS_STATUS_SUCCESS
-                && heuristicResults[index].workspaceSize <= workspaceBytesAttr) {
-                chosen = index;
-                break;
-            }
-        }
-        cublasLtMatmulPreferenceDestroy(preference);
-        preference = nullptr;
-        if (chosen < 0) {
-            destroyDescriptors();
-            return false;
-        }
-        algoPointer = &heuristicResults[chosen].algo;
-    }
-
     cudaEvent_t kernelStartEvent = nullptr;
     cudaEvent_t kernelStopEvent = nullptr;
-    if (kernelMilliseconds != nullptr) {
-        if (cudaEventCreate(&kernelStartEvent) != cudaSuccess || cudaEventCreate(&kernelStopEvent) != cudaSuccess) {
-            if (kernelStartEvent != nullptr) cudaEventDestroy(kernelStartEvent);
-            if (kernelStopEvent != nullptr) cudaEventDestroy(kernelStopEvent);
-            destroyDescriptors();
-            return false;
-        }
-        if (cudaEventRecord(kernelStartEvent) != cudaSuccess) {
-            cudaEventDestroy(kernelStopEvent);
-            cudaEventDestroy(kernelStartEvent);
-            destroyDescriptors();
-            return false;
-        }
-    }
-
-    const cublasStatus_t matmulStatus = cublasLtMatmul(
-        localLt.handle,
-        matmulDesc,
-        &alpha,
-        leftHalf,
-        layoutLeft,
-        rightHalf,
-        layoutRight,
-        &beta,
-        deviceOut,
-        layoutOut,
-        deviceOut,
-        layoutOut,
-        algoPointer,
-        localLt.workspace.deviceData,
-        localLt.workspace.capacityBytes,
-        CudaMatmul::activeStream());
-
-    if (matmulStatus != CUBLAS_STATUS_SUCCESS) {
+    if (cudaEventCreate(&kernelStartEvent) != cudaSuccess || cudaEventCreate(&kernelStopEvent) != cudaSuccess) {
         if (kernelStartEvent != nullptr) cudaEventDestroy(kernelStartEvent);
         if (kernelStopEvent != nullptr) cudaEventDestroy(kernelStopEvent);
         destroyDescriptors();
         return false;
     }
-
-    if (kernelMilliseconds != nullptr) {
-        if (cudaEventRecord(kernelStopEvent) != cudaSuccess || cudaEventSynchronize(kernelStopEvent) != cudaSuccess) {
-            cudaEventDestroy(kernelStopEvent);
-            cudaEventDestroy(kernelStartEvent);
-            destroyDescriptors();
-            return false;
-        }
-        float elapsedMilliseconds = 0.0f;
-        if (cudaEventElapsedTime(&elapsedMilliseconds, kernelStartEvent, kernelStopEvent) != cudaSuccess) {
-            cudaEventDestroy(kernelStopEvent);
-            cudaEventDestroy(kernelStartEvent);
-            destroyDescriptors();
-            return false;
-        }
-        *kernelMilliseconds = static_cast<double>(elapsedMilliseconds);
+    cudaEventRecord(kernelStartEvent);
+    if (cublasLtMatmul(
+            localLt.handle, matmulDesc, &alpha, leftHalf, layoutLeft, rightHalf, layoutRight, &beta,
+            deviceOut, layoutOut, deviceOut, layoutOut, nullptr,
+            localLt.workspace.deviceData, localLt.workspace.capacityBytes, CudaMatmul::activeStream()) != CUBLAS_STATUS_SUCCESS) {
         cudaEventDestroy(kernelStopEvent);
         cudaEventDestroy(kernelStartEvent);
+        destroyDescriptors();
+        return false;
     }
-
+    cudaEventRecord(kernelStopEvent);
+    cudaEventSynchronize(kernelStopEvent);
+    float elapsedMilliseconds = 0.0f;
+    cudaEventElapsedTime(&elapsedMilliseconds, kernelStartEvent, kernelStopEvent);
+    *kernelMilliseconds = static_cast<double>(elapsedMilliseconds);
+    cudaEventDestroy(kernelStopEvent);
+    cudaEventDestroy(kernelStartEvent);
     destroyDescriptors();
     return true;
 }
@@ -828,6 +879,50 @@ bool CudaAmp::launchCublasLtMatmulFp16Matrices(const CudaMatrix& left, const Cud
         return launchCublasLtMatmulFp16Halves(
             leftHalf, rightHalf, out.buffer.deviceData,
             rowCount, columnCount, sharedCount, transposeLeft, transposeRight, kernelMilliseconds, deviceBiasOrNull);
+    } catch (...) {
+        return false;
+    }
+}
+
+bool CudaAmp::launchCublasLtMatmulFp16HalfLeft(
+    const void* leftHalf,
+    const float* deviceRight,
+    float* deviceOut,
+    int rowCount,
+    int columnCount,
+    int sharedCount,
+    bool transposeLeft,
+    bool transposeRight,
+    const float* deviceBiasOrNull
+) {
+    if (!CudaAmp::preferMixedPrecision) return false;
+    if (leftHalf == nullptr || deviceRight == nullptr || deviceOut == nullptr) return false;
+    if (rowCount <= 0 || columnCount <= 0 || sharedCount <= 0) return false;
+    if (sharedCount < 256 || rowCount < 32 || columnCount < 32) return false;
+
+    const int leftRows = transposeLeft ? sharedCount : rowCount;
+    const int leftCols = transposeLeft ? rowCount : sharedCount;
+    const size_t leftElements = static_cast<size_t>(leftRows) * static_cast<size_t>(leftCols);
+    const int rightRows = transposeRight ? columnCount : sharedCount;
+    const int rightCols = transposeRight ? sharedCount : columnCount;
+    const size_t rightElements = static_cast<size_t>(rightRows) * static_cast<size_t>(rightCols);
+
+    try {
+        // Copy left into scratch so the pointer is a base allocation (cuBLASLt can reject mid-buffer slices).
+        CudaAmp::halfScratchLeft.ensureCapacity(leftElements * 2u);
+        CudaMatmul::memcpyDevice(CudaAmp::halfScratchLeft.deviceData, leftHalf, leftElements * 2u);
+        CudaAmp::castFloatBufferToHalf(deviceRight, rightElements, CudaAmp::halfScratchRight);
+        return launchCublasLtMatmulFp16Halves(
+            CudaAmp::halfScratchLeft.deviceData,
+            CudaAmp::halfScratchRight.deviceData,
+            deviceOut,
+            rowCount,
+            columnCount,
+            sharedCount,
+            transposeLeft,
+            transposeRight,
+            nullptr,
+            deviceBiasOrNull);
     } catch (...) {
         return false;
     }

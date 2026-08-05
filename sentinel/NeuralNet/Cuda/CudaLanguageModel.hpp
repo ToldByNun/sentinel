@@ -230,6 +230,12 @@ public:
     /// <summary>Off / Full (recompute whole block) / Selective (attn recompute, FFN keep)</summary>
     ActivationCheckpointMode activationCheckpointMode;
 
+    /// <summary>
+    /// Under Full ckpt: layers [selectiveLayerStart, L) keep compact FP16 FFN stashes
+    /// (skip SwiGLU recompute). Equal to blockCount when unused.
+    /// </summary>
+    int selectiveLayerStart;
+
     /// <summary>capture fixed-shape packed microsteps into a CUDA Graph after warmup</summary>
     bool preferTrainGraph;
 
@@ -522,6 +528,12 @@ public:
     /// fall back to Full only when Selective cannot allocate train workspaces.
     /// </summary>
     void tuneOffloadCheckpointAndPack(int targetMaxCols = 4096);
+
+    /// <summary>
+    /// After Full@pack fits: keep compact FP16 FFN on trailing layers while free VRAM allows
+    /// (skips SwiGLU recompute on those layers without shrinking pack).
+    /// </summary>
+    void enablePartialSelectiveLayers();
 
     /// <summary>largest pack example count for a fixed segment length under current maxPackedColumns</summary>
     int maxPackExamplesForSegment(int segmentLength) const;

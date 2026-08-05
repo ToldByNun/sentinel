@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cuda_runtime.h>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -45,6 +46,7 @@ CudaLanguageModel::CudaLanguageModel()
       logitChunkRows(2048),
       gradientAccumulationSteps(4),
       activationCheckpointMode(ActivationCheckpointMode::Off),
+      selectiveLayerStart((std::numeric_limits<int>::max)()),
       preferTrainGraph(true),
       preferMuon(false),
       preferTrainMemTrace(false),
@@ -363,9 +365,7 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
         if (phaseTrace)
             this->trainPhaseTimers.d2hSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - d2hWaitStart).count();
 
-        CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[static_cast<size_t>(pendingHostSgdBlock)];
         // Keep host grads pinned through SGD (CPU can touch pinned pages). Unregister only on free.
-
         this->blocks[static_cast<size_t>(pendingHostSgdBlock)].releaseDeferredHostWeightGradDevice();
         this->applyHostSgdForBlockAndFree(static_cast<size_t>(pendingHostSgdBlock), 1.0f);
         if (pipelineHostSgd && CudaAdam::preferFp16GpuWeights) {
@@ -398,7 +398,10 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
         }
 
         const bool deferDownload = pipelineHostSgd && hostGradsPtr != nullptr;
-        if (this->activationCheckpointMode == ActivationCheckpointMode::Selective) {
+        if (this->activationCheckpointMode == ActivationCheckpointMode::Selective
+            || (this->activationCheckpointMode == ActivationCheckpointMode::Full
+                && blockIndex >= this->selectiveLayerStart
+                && this->blocks[static_cast<size_t>(blockIndex)].feedForward.selectiveHalfStashed())) {
             const CudaMatrix* blockInput = nullptr;
             if (this->useHalfActivationCheckpoints()) {
                 CudaAmp::castToFloat(
@@ -893,7 +896,16 @@ void CudaLanguageModel::ensureTrainWorkspaces() {
             checkpoint.ensureSize(embeddingDim, maxColumns);
     }
     // Attn/FFN column scratch is allocated lazily in block forward; Selective releases
-    // Attn QKV/Flash after each block fwd while keeping FFN acts until bwd.
+    // Attn QKV/Flash after each block fwd while keeping compact FP16 FFN stashes.
+    if (this->activationCheckpointMode == ActivationCheckpointMode::Selective) {
+        const size_t ffnHidden = this->blocks.empty() || this->blocks[0].feedForward.gateWeight.empty()
+            ? (2ull * embeddingDim * 4ull) / 3ull
+            : this->blocks[0].feedForward.gateWeight.rows;
+        for (CudaTransformerBlock& block : this->blocks) {
+            block.feedForward.ensureSelectiveHalfCapacity(ffnHidden, maxColumns);
+            block.feedForwardNorm.ensureSelectiveCacheCapacity(embeddingDim, maxColumns);
+        }
+    }
 }
 
 size_t CudaLanguageModel::bytesPerPackedColumn() const {
@@ -942,7 +954,11 @@ size_t CudaLanguageModel::bytesPerPackedColumn() const {
     // Selective: FFN kept for all blocks; Attn QKV/Flash released after each block
     //   (peak ~1 Attn workspace during fwd/recompute).
     if (this->activationCheckpointMode == ActivationCheckpointMode::Selective) {
-        bytes += blockCount * ffnScratchPerBlock;
+        // Ultralight Selective: FP16 gatePre per layer + FP32 lastNormalized/invRms
+        // + peak ~1 Attn workspace during fwd/recompute. up recomputed via GEMM on restore.
+        const size_t selectiveFfnHalf = ffnHidden * 2ull; // gatePre in FP16
+        const size_t selectiveNorm = embeddingDim * floatBytes + floatBytes; // lastNormalized + invRms unit
+        bytes += blockCount * (selectiveFfnHalf + selectiveNorm);
         bytes += attnScratchPerBlock;
     } else if (this->activationCheckpointMode == ActivationCheckpointMode::Full) {
         bytes += attnScratchPerBlock + ffnScratchPerBlock;
@@ -1164,7 +1180,7 @@ void CudaLanguageModel::applyVramPackBudget(float freeFraction, size_t safetyRes
 
     // Minimum pack is one length bucket (32 cols), NOT maximumPositionCount.
     constexpr int minCols = CudaLanguageModel::lengthBucketStep;
-    constexpr int maxCols = 4096;
+    constexpr int maxCols = 8192;
     if (cols < static_cast<size_t>(minCols)) cols = static_cast<size_t>(minCols);
     if (cols > static_cast<size_t>(maxCols)) cols = static_cast<size_t>(maxCols);
 
@@ -1203,8 +1219,8 @@ void CudaLanguageModel::tuneOffloadCheckpointAndPack(int targetMaxCols) {
     if (targetMaxCols <= 0)
         throw std::invalid_argument("CudaLanguageModel::tuneOffloadCheckpointAndPack targetMaxCols must be > 0");
 
-    // ~4B on 16GB: Full ckpt + densest pack that alloc-fits. Never sweep Selective /
-    // never run train microsteps during tune — that OOM'd / crashed WDDM.
+    // Prefer Full@4096 (best measured ~470 tok/s on 16GB ~4B). Denser packs
+    // and Partial-Selective both regress throughput on this GPU.
     const int startCols = (std::min)(targetMaxCols, 4096);
 
     auto logLayout = [this](const char* note, int cols) {
@@ -1222,6 +1238,9 @@ void CudaLanguageModel::tuneOffloadCheckpointAndPack(int targetMaxCols) {
 
     auto tryAllocOnly = [this](ActivationCheckpointMode mode, int cols) -> bool {
         this->activationCheckpointMode = mode;
+        this->selectiveLayerStart = (mode == ActivationCheckpointMode::Selective)
+            ? 0
+            : (std::numeric_limits<int>::max)();
         this->releasePackedTrainWorkspaces();
         this->maxPackedColumns = cols;
         this->maxPackedColumnsManual = true;
@@ -1232,8 +1251,11 @@ void CudaLanguageModel::tuneOffloadCheckpointAndPack(int targetMaxCols) {
             size_t freeBytes = 0;
             size_t totalBytes = 0;
             CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeBytes, &totalBytes), "tuneOffloadCheckpointAndPack memGetInfo");
-            // Keep ≥1.0 GiB free after workspace alloc (WDDM / display headroom).
-            constexpr size_t minFree = 1024ull * 1024ull * 1024ull;
+            // Selective needs ≥2.5 GiB free to avoid WDDM thrash at restore peak.
+            // Full is fine with ≥1.0 GiB.
+            const size_t minFree = (mode == ActivationCheckpointMode::Selective)
+                ? 2560ull * 1024ull * 1024ull
+                : 1024ull * 1024ull * 1024ull;
             if (freeBytes < minFree) {
                 this->releasePackedTrainWorkspaces();
                 this->trainStateReady = false;
@@ -1248,8 +1270,6 @@ void CudaLanguageModel::tuneOffloadCheckpointAndPack(int targetMaxCols) {
         }
     };
 
-    // Prefer Full (peak ~1 layer acts). Known-good on 16GB ~4B is 4096 cols;
-    // denser packs often lower tok/s (working-set thrash) despite higher occupancy.
     static constexpr int kPackCandidates[] = {
         4096, 3072, 2048, 1536, 1024, 768, 512
     };
@@ -1260,16 +1280,66 @@ void CudaLanguageModel::tuneOffloadCheckpointAndPack(int targetMaxCols) {
             return;
         }
     }
-    // Last resort: Selective only at tiny pack (VRAM-hungry FFN retention).
     for (int cols : kPackCandidates) {
-        if (cols > startCols / 4) continue;
-        if (cols > 1024) continue;
+        if (cols > startCols) continue;
         if (tryAllocOnly(ActivationCheckpointMode::Selective, cols)) {
-            logLayout("selective alloc OK (fallback)", cols);
+            logLayout("selective alloc OK (ultralight FP16 gatePre)", cols);
             return;
         }
     }
     throw std::runtime_error("CudaLanguageModel::tuneOffloadCheckpointAndPack: no safe layout found (OOM)");
+}
+
+void CudaLanguageModel::enablePartialSelectiveLayers() {
+    this->selectiveLayerStart = (std::numeric_limits<int>::max)();
+    if (this->activationCheckpointMode != ActivationCheckpointMode::Full) return;
+    if (this->blocks.empty() || this->maxPackedColumns <= 0) return;
+    if (!CudaMatmul::isAvailable()) return;
+
+    size_t freeBytes = 0;
+    size_t totalBytes = 0;
+    if (cudaMemGetInfo(&freeBytes, &totalBytes) != cudaSuccess) return;
+
+    // Leave ≥2.0 GiB free — avoid WDDM thrash while fitting compact FP16 Selective layers.
+    constexpr size_t keepFree = 2048ull * 1024ull * 1024ull;
+    if (freeBytes <= keepFree) return;
+    const size_t budget = freeBytes - keepFree;
+
+    const size_t embeddingDim = this->tokenEmbeddingWeight.cols;
+    const size_t ffnHidden = this->blocks[0].feedForward.gateWeight.empty()
+        ? (2ull * embeddingDim * 4ull) / 3ull
+        : this->blocks[0].feedForward.gateWeight.rows;
+    const size_t cols = static_cast<size_t>(this->maxPackedColumns);
+    // Ultralight: FP16 gatePre + FP32 lastNormalized + invRms
+    const size_t perLayer =
+        ffnHidden * cols * 2ull
+        + embeddingDim * cols * sizeof(float)
+        + cols * sizeof(float);
+    if (perLayer == 0) return;
+
+    const int maxLayers = static_cast<int>(budget / perLayer);
+    if (maxLayers <= 0) return;
+    const int layerCount = static_cast<int>(this->blocks.size());
+    const int useLayers = (std::min)(maxLayers, layerCount);
+    this->selectiveLayerStart = layerCount - useLayers;
+
+    for (int blockIndex = this->selectiveLayerStart; blockIndex < layerCount; ++blockIndex) {
+        CudaTransformerBlock& block = this->blocks[static_cast<size_t>(blockIndex)];
+        block.feedForward.ensureSelectiveHalfCapacity(ffnHidden, cols);
+        block.feedForwardNorm.ensureSelectiveCacheCapacity(embeddingDim, cols);
+    }
+
+    size_t freeAfter = 0;
+    size_t totalAfter = 0;
+    cudaMemGetInfo(&freeAfter, &totalAfter);
+    std::printf(
+        "CudaLanguageModel::enablePartialSelectiveLayers: layers [%d,%d) of %d  perLayer=%.0f MiB  free=%.0f/%.0f MiB\n",
+        this->selectiveLayerStart,
+        layerCount,
+        layerCount,
+        static_cast<double>(perLayer) / (1024.0 * 1024.0),
+        static_cast<double>(freeAfter) / (1024.0 * 1024.0),
+        static_cast<double>(totalAfter) / (1024.0 * 1024.0));
 }
 
 void CudaLanguageModel::releaseActivationCheckpoints() {
@@ -1897,7 +1967,9 @@ void CudaLanguageModel::forwardTrunkFromDevice(size_t tokenCount, int segmentLen
             else
                 CudaOps::copyInto(this->hidden, this->blockInputCheckpoints[blockIndex]);
         }
-        if (this->activationCheckpointMode == ActivationCheckpointMode::Selective)
+        if (this->activationCheckpointMode == ActivationCheckpointMode::Selective
+            || (this->activationCheckpointMode == ActivationCheckpointMode::Full
+                && static_cast<int>(blockIndex) >= this->selectiveLayerStart))
             this->blocks[blockIndex].forwardSelectiveTrain(this->hidden, this->normalized, segmentLength);
         else {
             this->blocks[blockIndex].forward(this->hidden, this->normalized, segmentLength);

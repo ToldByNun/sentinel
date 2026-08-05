@@ -111,10 +111,16 @@ void CudaTransformerBlock::forward(const CudaMatrix& input, CudaMatrix& out, int
 
 void CudaTransformerBlock::forwardSelectiveTrain(const CudaMatrix& input, CudaMatrix& out, int segmentLength) {
     this->forward(input, out, segmentLength);
-    // Drop Attn activations; FFN + afterAttention + feedForwardNorm caches stay for bwd.
+    // Drop Attn activations; keep compact FP16 FFN stash + FFN-RMSNorm caches.
     this->attention.releaseActivationScratch();
     this->attended.free();
     this->attentionInput.free();
+    this->attentionNorm.releaseActivationScratch();
+    // afterAttention values are unused by FFN-norm bwd (lastNormalized + invRms suffice).
+    this->afterAttention.free();
+    this->feedForwardInput.free();
+    this->feedForwardOutput.free();
+    this->feedForward.stashSelectiveHalfActivations();
 }
 
 void CudaTransformerBlock::releaseTrainActivationScratch() {
@@ -324,13 +330,17 @@ void CudaTransformerBlock::backwardSelective(
     if (deferHostWeightDownload && hostWeightGrads == nullptr)
         throw std::invalid_argument("CudaTransformerBlock::backwardSelective deferHostWeightDownload requires hostWeightGrads");
 
-    // FFN path from kept activations (no SwiGLU recompute).
+    // FFN path from kept half activations — silu/hidden/inputCache restored, no SwiGLU GEMM recompute.
+    if (this->feedForward.selectiveHalfStashed())
+        this->feedForward.restoreSelectiveHalfActivations(this->feedForwardNorm);
     this->feedForward.backward(outputGradient, this->feedForwardInputGradient, this->feedForwardGateWeightGradient, this->feedForwardGateBiasGradient, this->feedForwardUpWeightGradient, this->feedForwardUpBiasGradient, this->feedForwardDownWeightGradient, this->feedForwardDownBiasGradient);
     this->feedForwardNorm.backwardThroughResidual(
         this->feedForwardInputGradient,
         outputGradient,
         this->afterAttentionGradient,
         this->feedForwardNormGammaGradient);
+    // Drop restored FP32 FFN acts before Attn recompute to cut peak VRAM.
+    this->feedForward.releaseRestoredSelectiveFp32Activations();
 
     // Refresh Attn activations from saved block input, then Attn bwd.
     this->recomputeAttention(blockInput, segmentLength);

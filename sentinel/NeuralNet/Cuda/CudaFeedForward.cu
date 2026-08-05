@@ -2,6 +2,7 @@
 
 #include "CudaAmp.hpp"
 #include "CudaOps.hpp"
+#include "CudaRMSNorm.hpp"
 #include "../Utils/SmokeLog.hpp"
 
 #include <algorithm>
@@ -78,6 +79,96 @@ void CudaFeedForward::releaseActivationScratch() {
     this->gateGradient.free();
     this->siluDerivative.free();
     this->temp.free();
+    this->selectiveGatePreHalf.free();
+    this->selectiveStashed = false;
+}
+
+void CudaFeedForward::ensureSelectiveHalfCapacity(size_t hiddenRows, size_t columns) {
+    if (hiddenRows == 0 || columns == 0) return;
+    this->selectiveGatePreHalf.ensureSize(hiddenRows, columns);
+    this->selectiveStashed = false;
+}
+
+void CudaFeedForward::stashSelectiveHalfActivations() {
+    if (this->gatePreActivation.empty())
+        throw std::logic_error("CudaFeedForward::stashSelectiveHalfActivations missing gatePre");
+    if (!CudaMatmul::isAvailable())
+        throw std::runtime_error("CudaFeedForward::stashSelectiveHalfActivations no CUDA device");
+
+    // Ultralight Selective: resident FP16 gatePre only. up recomputed via GEMM on restore.
+    this->selectiveGatePreHalf.ensureSize(this->gatePreActivation.rows, this->gatePreActivation.cols);
+    CudaAmp::castToHalfSaturated(this->gatePreActivation, this->selectiveGatePreHalf);
+
+    this->gateUpPreActivation.free();
+    this->gatePreActivation.free();
+    this->gateActivated.free();
+    this->up.free();
+    this->hidden.free();
+    this->output.free();
+    this->inputCache.free();
+    this->hiddenGradient.free();
+    this->upGradient.free();
+    this->gateGradient.free();
+    this->siluDerivative.free();
+    this->temp.free();
+    this->gateUpHiddenGradient.free();
+    this->selectiveStashed = true;
+}
+
+void CudaFeedForward::restoreSelectiveHalfActivations(const CudaRMSNorm& feedForwardNorm) {
+    if (!this->selectiveStashed)
+        throw std::logic_error("CudaFeedForward::restoreSelectiveHalfActivations not stashed");
+    if (this->selectiveGatePreHalf.empty())
+        throw std::logic_error("CudaFeedForward::restoreSelectiveHalfActivations missing half stash");
+    if (this->gateUpWeight.empty())
+        this->syncFusedGateUpWeight();
+    if (!CudaMatmul::isAvailable())
+        throw std::runtime_error("CudaFeedForward::restoreSelectiveHalfActivations no CUDA device");
+
+    feedForwardNorm.reconstructNormalizedOutput(this->inputCache);
+    CudaAmp::castToFloat(this->selectiveGatePreHalf, this->gatePreActivation);
+
+    // up = upWeight @ input — use up-slice of fused FP16 gateUp working weight.
+    const void* fusedHalf = CudaAmp::fp16WorkingWeightOrNull(this->gateUpWeight);
+    if (fusedHalf == nullptr)
+        throw std::logic_error("CudaFeedForward::restoreSelectiveHalfActivations missing fused FP16 gateUp");
+    const size_t gateElements = this->gateWeight.elementCount();
+    const void* upHalf = static_cast<const char*>(fusedHalf) + gateElements * 2u;
+    this->up.ensureSize(this->upWeight.rows, this->inputCache.cols);
+    if (!CudaAmp::launchCublasLtMatmulFp16HalfLeft(
+            upHalf,
+            this->inputCache.buffer.deviceData,
+            this->up.buffer.deviceData,
+            static_cast<int>(this->upWeight.rows),
+            static_cast<int>(this->inputCache.cols),
+            static_cast<int>(this->upWeight.cols),
+            false,
+            false,
+            nullptr)) {
+        throw std::runtime_error("CudaFeedForward::restoreSelectiveHalfActivations up GEMM failed");
+    }
+    if (!this->upBias.empty() && this->upBias.hasDeviceStorage())
+        CudaOps::broadcastBiasAddInPlace(this->up, this->upBias);
+
+    CudaOps::siluInto(this->gatePreActivation, this->gateActivated);
+    CudaOps::multiplyElementwiseInto(this->gateActivated, this->up, this->hidden);
+    this->selectiveStashed = false;
+}
+
+void CudaFeedForward::releaseRestoredSelectiveFp32Activations() {
+    this->gateUpPreActivation.free();
+    this->gatePreActivation.free();
+    this->gateActivated.free();
+    this->up.free();
+    this->hidden.free();
+    this->output.free();
+    this->inputCache.free();
+    this->hiddenGradient.free();
+    this->upGradient.free();
+    this->gateGradient.free();
+    this->siluDerivative.free();
+    this->temp.free();
+    this->gateUpHiddenGradient.free();
 }
 
 void CudaFeedForward::forward(const CudaMatrix& input, CudaMatrix& out) {

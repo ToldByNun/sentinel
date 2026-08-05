@@ -24,6 +24,12 @@ public:
     /// <summary>free lastInput / lastNormalized / rms scratch (gamma untouched)</summary>
     void releaseActivationScratch() const;
 
+    /// <summary>pre-size Selective-kept norm caches (lastNormalized + invRms + shape sentinel)</summary>
+    void ensureSelectiveCacheCapacity(size_t embeddingDim, size_t columns) const;
+
+    /// <summary>out = lastNormalized * gamma (reconstructs FFN input after Selective stash)</summary>
+    void reconstructNormalizedOutput(CudaMatrix& out) const;
+
     /// <summary>
     /// block epilogue: residualOut = left + right, then normOut = RMSNorm(residualOut)
     /// one launch; caches lastNormalized/inverseRms for backward (lastInput shape only)
