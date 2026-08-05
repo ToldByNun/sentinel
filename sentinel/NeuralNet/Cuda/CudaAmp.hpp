@@ -147,6 +147,12 @@ public:
     /// <summary>mark all registered master-weight FP16 mirrors stale (call after Adam)</summary>
     static void invalidateMasterWeightHalves();
 
+    /// <summary>
+    /// drop sticky activation FP16 scratch identity (call when any device buffer is freed/pooled;
+    /// pointers may be recycled with new contents)
+    /// </summary>
+    static void invalidateActivationHalfCaches();
+
     /// <summary>drop all master-weight registrations</summary>
     static void clearMasterWeights();
 

@@ -24,6 +24,9 @@ public:
     /// <summary>free lastInput / lastNormalized / rms scratch (gamma untouched)</summary>
     void releaseActivationScratch() const;
 
+    /// <summary>move act scratch device buffers from donor (Full-ckpt layer handoff)</summary>
+    void stealActivationScratchFrom(const CudaRMSNorm& donor) const;
+
     /// <summary>pre-size Selective-kept norm caches (lastNormalized + invRms + shape sentinel)</summary>
     void ensureSelectiveCacheCapacity(size_t embeddingDim, size_t columns) const;
 

@@ -138,6 +138,12 @@ public:
     /// <summary>pool device buffer and clear shape (Full-ckpt activation scratch recycle)</summary>
     void releaseDeviceToPool();
 
+    /// <summary>
+    /// move donor's device buffer into this (no cudaMalloc); clears both shapes.
+    /// Used to hand Full-ckpt layer scratch to the next/prev layer without pooling VRAM.
+    /// </summary>
+    void takeDeviceStorageFrom(CudaMatrix& donor);
+
     /// <summary>copy host matrix to device growing capacity if needed</summary>
     void upload(const Matrix& host);
 

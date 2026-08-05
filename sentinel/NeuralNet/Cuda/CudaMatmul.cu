@@ -131,15 +131,15 @@ void CudaDeviceBuffer::copyToHost(float* hostData, size_t byteCount) const {
 }
 
 void CudaDeviceBuffer::releaseToPool() {
-    // nsys: ~6k cudaMalloc/Free per step from Full-ckpt scratch churn. A recycle pool
-    // fixed API time but on 16GB stacked with live weights and WDDM-thrashed. Keep the
-    // hook; hard-free until a VRAM-safe single-layer arena exists.
+    // nsys: Full-ckpt scratch churn is real, but holding a ~1-layer pool on 16GB
+    // stacks with live weights and WDDM-thrashes (~236 tok/s). Keep the hook; hard-free.
     this->free();
 }
 
 void CudaDeviceBuffer::free() {
     if (this->deviceData == nullptr) return;
 
+    CudaAmp::invalidateActivationHalfCaches();
     cudaFree(this->deviceData);
     this->deviceData = nullptr;
     this->capacityBytes = 0;
@@ -325,6 +325,18 @@ void CudaMatrix::releaseDeviceKeepShape() {
 
 void CudaMatrix::releaseDeviceToPool() {
     this->free();
+}
+
+void CudaMatrix::takeDeviceStorageFrom(CudaMatrix& donor) {
+    if (this == &donor) return;
+    this->buffer.free();
+    this->buffer = std::move(donor.buffer);
+    this->rows = 0;
+    this->cols = 0;
+    this->ampWeightSlot = -1;
+    donor.rows = 0;
+    donor.cols = 0;
+    donor.ampWeightSlot = -1;
 }
 
 void CudaMatrix::upload(const Matrix& host) {

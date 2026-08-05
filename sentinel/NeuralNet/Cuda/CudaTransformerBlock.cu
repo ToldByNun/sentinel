@@ -162,6 +162,81 @@ void CudaTransformerBlock::releaseTrainActivationScratch(bool keepDeferredHostWe
     this->attentionNormGammaGradient.free();
 }
 
+void CudaTransformerBlock::stealTrainActivationScratchFrom(CudaTransformerBlock& donor) {
+    if (this == &donor) return;
+
+    auto take = [](CudaMatrix& dst, CudaMatrix& src) {
+        dst.takeDeviceStorageFrom(src);
+    };
+
+    // Attention activations (not weights / weight grads)
+    take(this->attention.qkvProjected, donor.attention.qkvProjected);
+    take(this->attention.query, donor.attention.query);
+    take(this->attention.key, donor.attention.key);
+    take(this->attention.value, donor.attention.value);
+    take(this->attention.queryHead, donor.attention.queryHead);
+    take(this->attention.keyHead, donor.attention.keyHead);
+    take(this->attention.valueHead, donor.attention.valueHead);
+    take(this->attention.scores, donor.attention.scores);
+    take(this->attention.probabilities, donor.attention.probabilities);
+    take(this->attention.attendedHead, donor.attention.attendedHead);
+    take(this->attention.attended, donor.attention.attended);
+    take(this->attention.output, donor.attention.output);
+    take(this->attention.querySegment, donor.attention.querySegment);
+    take(this->attention.keySegment, donor.attention.keySegment);
+    take(this->attention.valueSegment, donor.attention.valueSegment);
+    take(this->attention.attendedSegment, donor.attention.attendedSegment);
+    take(this->attention.attendedGradientSegment, donor.attention.attendedGradientSegment);
+    take(this->attention.queryGradientSegment, donor.attention.queryGradientSegment);
+    take(this->attention.keyGradientSegment, donor.attention.keyGradientSegment);
+    take(this->attention.valueGradientSegment, donor.attention.valueGradientSegment);
+    take(this->attention.inputCache, donor.attention.inputCache);
+    take(this->attention.attendedGradient, donor.attention.attendedGradient);
+    take(this->attention.queryGradient, donor.attention.queryGradient);
+    take(this->attention.keyGradient, donor.attention.keyGradient);
+    take(this->attention.valueGradient, donor.attention.valueGradient);
+    take(this->attention.probabilityGradient, donor.attention.probabilityGradient);
+    take(this->attention.scoreGradient, donor.attention.scoreGradient);
+    take(this->attention.valueHeadGradient, donor.attention.valueHeadGradient);
+    take(this->attention.queryHeadGradient, donor.attention.queryHeadGradient);
+    take(this->attention.keyHeadGradient, donor.attention.keyHeadGradient);
+    take(this->attention.temp, donor.attention.temp);
+    take(this->attention.flashLogSumExp, donor.attention.flashLogSumExp);
+    take(this->attention.flashDelta, donor.attention.flashDelta);
+    this->attention.cachedHeadProbabilities = std::move(donor.attention.cachedHeadProbabilities);
+
+    // FFN activations
+    take(this->feedForward.gateUpPreActivation, donor.feedForward.gateUpPreActivation);
+    take(this->feedForward.gateUpHiddenGradient, donor.feedForward.gateUpHiddenGradient);
+    take(this->feedForward.gatePreActivation, donor.feedForward.gatePreActivation);
+    take(this->feedForward.gateActivated, donor.feedForward.gateActivated);
+    take(this->feedForward.up, donor.feedForward.up);
+    take(this->feedForward.hidden, donor.feedForward.hidden);
+    take(this->feedForward.output, donor.feedForward.output);
+    take(this->feedForward.inputCache, donor.feedForward.inputCache);
+    take(this->feedForward.hiddenGradient, donor.feedForward.hiddenGradient);
+    take(this->feedForward.upGradient, donor.feedForward.upGradient);
+    take(this->feedForward.gateGradient, donor.feedForward.gateGradient);
+    take(this->feedForward.siluDerivative, donor.feedForward.siluDerivative);
+    take(this->feedForward.temp, donor.feedForward.temp);
+
+    // Norm caches
+    this->attentionNorm.stealActivationScratchFrom(donor.attentionNorm);
+    this->feedForwardNorm.stealActivationScratchFrom(donor.feedForwardNorm);
+
+    // Block-level residuals / grads
+    take(this->attentionInput, donor.attentionInput);
+    take(this->attended, donor.attended);
+    take(this->afterAttention, donor.afterAttention);
+    take(this->feedForwardInput, donor.feedForwardInput);
+    take(this->feedForwardOutput, donor.feedForwardOutput);
+    take(this->feedForwardInputGradient, donor.feedForwardInputGradient);
+    take(this->afterAttentionFromFeedForward, donor.afterAttentionFromFeedForward);
+    take(this->afterAttentionGradient, donor.afterAttentionGradient);
+    take(this->attentionInputGradient, donor.attentionInputGradient);
+    take(this->inputFromAttention, donor.inputFromAttention);
+}
+
 void CudaTransformerBlock::recomputeAttention(const CudaMatrix& blockInput, int segmentLength) {
     if (blockInput.empty()) throw std::invalid_argument("CudaTransformerBlock::recomputeAttention empty blockInput");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaTransformerBlock::recomputeAttention no CUDA device");

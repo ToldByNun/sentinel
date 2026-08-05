@@ -182,6 +182,12 @@ public:
     /// <summary>like releaseTrainActivationScratch; keepDeferredHostWeightGrads leaves large 2D weight grads for async D2H</summary>
     void releaseTrainActivationScratch(bool keepDeferredHostWeightGrads);
 
+    /// <summary>
+    /// move Full-ckpt act scratch device buffers from donor into this (same shapes across layers).
+    /// Peak VRAM stays ~1 layer; avoids cudaMalloc/Free churn without a recycle pool.
+    /// </summary>
+    void stealTrainActivationScratchFrom(CudaTransformerBlock& donor);
+
     /// <summary>recompute AttnNorm+Attn+residual from saved block input (FFN untouched)</summary>
     void recomputeAttention(const CudaMatrix& blockInput, int segmentLength = 0);
 

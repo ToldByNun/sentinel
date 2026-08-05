@@ -441,7 +441,11 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
                 this->blockInputGradientScratch,
                 gradients.blocks[static_cast<size_t>(blockIndex)],
                 hostGradsPtr,
-                deferDownload);
+                deferDownload,
+                true); // retain acts → steal to previous layer or release below
+            if (blockIndex > 0)
+                this->blocks[static_cast<size_t>(blockIndex - 1)].stealTrainActivationScratchFrom(block);
+            block.releaseTrainActivationScratch(deferDownload);
         } else {
             // Off: keep per-block act scratch alive across steps (already budgeted). Avoids
             // cudaFree/cudaMalloc churn and makes CUDA graph capture possible.
@@ -1976,9 +1980,14 @@ void CudaLanguageModel::forwardTrunkFromDevice(size_t tokenCount, int segmentLen
             this->blocks[blockIndex].forwardSelectiveTrain(this->hidden, this->normalized, segmentLength);
         else {
             this->blocks[blockIndex].forward(this->hidden, this->normalized, segmentLength);
-            // Full ckpt: block input is saved; drop layer scratch (recomputed on bwd).
-            if (this->activationCheckpointMode == ActivationCheckpointMode::Full)
-                this->blocks[blockIndex].releaseTrainActivationScratch();
+            // Full ckpt: hand act scratch to the next layer (same shapes) instead of
+            // cudaFree+cudaMalloc each layer. Last layer still releases.
+            if (this->activationCheckpointMode == ActivationCheckpointMode::Full) {
+                if (blockIndex + 1 < this->blocks.size())
+                    this->blocks[blockIndex + 1].stealTrainActivationScratchFrom(this->blocks[blockIndex]);
+                else
+                    this->blocks[blockIndex].releaseTrainActivationScratch();
+            }
         }
         CudaMatrix swapBuffer = std::move(this->hidden);
         this->hidden = std::move(this->normalized);

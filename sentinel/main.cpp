@@ -42,7 +42,7 @@ int main() {
     const bool runSpeedBench = false;
     const bool runGate40k = false;
     const bool runFlashParity256 = false;
-    const bool runScale100M = false;
+    const bool runScale100M = true;
     const bool runMuonThroughputProbe = false;
     const bool runGraphCheck = false;
     const bool runEpilogueCheck = false;
@@ -60,7 +60,7 @@ int main() {
     // One-shot: smokes + parities + small speed + cpuAdam (no 4B / no full SERA train).
     const bool runSmallSuite = false;
     // Temporary WMMA FA verify (flash parity + synthetic ~100M tok/s). Flip false after check.
-    const bool runWmmaFaVerify = true;
+    const bool runWmmaFaVerify = false;
 
     if (runWmmaFaVerify) {
         SmokeLog::section("wmma FA verify");

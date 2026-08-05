@@ -133,6 +133,14 @@ void CudaRMSNorm::releaseActivationScratch() const {
     this->backwardScratch.releaseDeviceToPool();
 }
 
+void CudaRMSNorm::stealActivationScratchFrom(const CudaRMSNorm& donor) const {
+    if (this == &donor) return;
+    this->inverseRms.takeDeviceStorageFrom(donor.inverseRms);
+    this->lastInput.takeDeviceStorageFrom(donor.lastInput);
+    this->lastNormalized.takeDeviceStorageFrom(donor.lastNormalized);
+    this->backwardScratch.takeDeviceStorageFrom(donor.backwardScratch);
+}
+
 void CudaRMSNorm::ensureSelectiveCacheCapacity(size_t embeddingDim, size_t columns) const {
     if (embeddingDim == 0 || columns == 0) return;
     this->inverseRms.ensureSize(1, columns);
