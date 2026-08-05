@@ -19,6 +19,11 @@ constexpr size_t kDefaultSharedBytes = 48ull * 1024ull;
 constexpr int kWmmaM = 16;
 constexpr int kWmmaN = 16;
 constexpr int kWmmaK = 16;
+/// <summary>WMMA tile head dim (must match hot-path HeadDim=64)</summary>
+constexpr int kWmmaHead = 64;
+/// <summary>Shared-memory row padding (halfs) to break 32-bank conflicts on stride-64</summary>
+constexpr int kWmmaPad = 8;
+constexpr int kWmmaLd = kWmmaHead + kWmmaPad; // 72
 
 size_t deviceMaxDynamicSharedBytes() {
     static size_t cached = 0;
@@ -68,14 +73,36 @@ __device__ __forceinline__ float flashDot(const float* left, const float* right,
     return sum;
 }
 
+/// <summary>16-byte-aligned float4 load (shared tiles require HeadDim%4==0 and 16B base)</summary>
+__device__ __forceinline__ float4 loadFloat4(const float* ptr) {
+    return *reinterpret_cast<const float4*>(
+#if defined(__clang__) || defined(__GNUC__)
+        __builtin_assume_aligned(ptr, 16)
+#else
+        ptr
+#endif
+    );
+}
+
+/// <summary>8-byte-aligned half2 load (shared / global; do not use __ldg — may be smem)</summary>
+__device__ __forceinline__ __half2 loadHalf2(const __half* ptr) {
+    return *reinterpret_cast<const __half2*>(
+#if defined(__clang__) || defined(__GNUC__)
+        __builtin_assume_aligned(ptr, 8)
+#else
+        ptr
+#endif
+    );
+}
+
 template <int HeadDim>
 __device__ __forceinline__ float flashDotFixed(const float* left, const float* right) {
     float sum = 0.0f;
     if constexpr ((HeadDim % 4) == 0) {
 #pragma unroll
         for (int dim = 0; dim < HeadDim; dim += 4) {
-            const float4 a = *reinterpret_cast<const float4*>(left + dim);
-            const float4 b = *reinterpret_cast<const float4*>(right + dim);
+            const float4 a = loadFloat4(left + dim);
+            const float4 b = loadFloat4(right + dim);
             sum += a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
         }
     } else {
@@ -88,11 +115,12 @@ __device__ __forceinline__ float flashDotFixed(const float* left, const float* r
 
 template <int HeadDim>
 __device__ __forceinline__ float flashDotHalfFixed(const __half* left, const __half* right) {
+    static_assert((HeadDim % 2) == 0, "flashDotHalfFixed requires even HeadDim");
     float sum = 0.0f;
 #pragma unroll
     for (int dim = 0; dim < HeadDim; dim += 2) {
-        const float2 a = __half22float2(*reinterpret_cast<const __half2*>(left + dim));
-        const float2 b = __half22float2(*reinterpret_cast<const __half2*>(right + dim));
+        const float2 a = __half22float2(loadHalf2(left + dim));
+        const float2 b = __half22float2(loadHalf2(right + dim));
         sum += a.x * b.x + a.y * b.y;
     }
     return sum;
@@ -104,6 +132,92 @@ __device__ __forceinline__ const float* headRow(const float* tensor, int headInd
 
 __device__ __forceinline__ float* headRowMutable(float* tensor, int headIndex, int headDim, int dim, int strideColumns, int absoluteColumn) {
     return tensor + (headIndex * headDim + dim) * strideColumns + absoluteColumn;
+}
+
+#if __CUDA_ARCH__ >= 800
+__device__ __forceinline__ void cpAsyncCa16(unsigned smemAddr, const void* gmem) {
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 16;\n" :: "r"(smemAddr), "l"(gmem));
+}
+__device__ __forceinline__ void cpAsyncCommitGroup() {
+    asm volatile("cp.async.commit_group;\n" ::);
+}
+__device__ __forceinline__ void cpAsyncWaitGroup0() {
+    asm volatile("cp.async.wait_group 0;\n" ::);
+}
+
+/// <summary>
+/// Async-stage contiguous float bytes into shared (size must be multiple of 16), then convert
+/// [dim][token] float stage → [token][ld] half tile. Call with all threads in the block.
+/// </summary>
+__device__ __forceinline__ void cpAsyncFloatRowsToHalfTile(
+    __half* sharedTile,
+    int ld,
+    int tokenCount,
+    int headDim,
+    float* floatStageDimMajor,
+    const float* tensor,
+    int headIndex,
+    int strideColumns,
+    int columnBase,
+    int threadIndex,
+    int threadCount) {
+    // Stage layout: floatStage[dim * tokenCount + token] — each dim's tokens are contiguous in gmem.
+    for (int dim = 0; dim < headDim; ++dim) {
+        const float* globalRow = headRow(tensor, headIndex, headDim, dim, strideColumns, columnBase);
+        float* stageRow = floatStageDimMajor + dim * tokenCount;
+        const int bytes = tokenCount * static_cast<int>(sizeof(float));
+        const int vecCount = bytes / 16;
+        for (int v = threadIndex; v < vecCount; v += threadCount) {
+            const unsigned smemAddr = __cvta_generic_to_shared(reinterpret_cast<char*>(stageRow) + v * 16);
+            cpAsyncCa16(smemAddr, reinterpret_cast<const char*>(globalRow) + v * 16);
+        }
+        for (int t = vecCount * 4 + threadIndex; t < tokenCount; t += threadCount)
+            stageRow[t] = globalRow[t];
+    }
+    cpAsyncCommitGroup();
+    cpAsyncWaitGroup0();
+    __syncthreads();
+    for (int index = threadIndex; index < tokenCount * headDim; index += threadCount) {
+        const int localToken = index / headDim;
+        const int dim = index - localToken * headDim;
+        sharedTile[localToken * ld + dim] = __float2half_rn(floatStageDimMajor[dim * tokenCount + localToken]);
+    }
+    // Zero WMMA pad columns so padded ld never leaks garbage into MMA.
+    for (int index = threadIndex; index < tokenCount * (ld - headDim); index += threadCount) {
+        const int localToken = index / (ld - headDim);
+        const int pad = index - localToken * (ld - headDim);
+        sharedTile[localToken * ld + headDim + pad] = __float2half_rn(0.0f);
+    }
+}
+#endif
+
+__device__ __forceinline__ void loadPaddedHalfTileFromFloat(
+    __half* sharedTile,
+    int ld,
+    int tokenCapacity,
+    int tokenCount,
+    int headDim,
+    const float* tensor,
+    int headIndex,
+    int strideColumns,
+    int columnBase,
+    int threadIndex,
+    int threadCount) {
+    for (int index = threadIndex; index < tokenCapacity * headDim; index += threadCount) {
+        const int localToken = index / headDim;
+        const int dim = index - localToken * headDim;
+        __half valueHalf = __float2half_rn(0.0f);
+        if (localToken < tokenCount) {
+            const int absoluteColumn = columnBase + localToken;
+            valueHalf = __float2half_rn(*headRow(tensor, headIndex, headDim, dim, strideColumns, absoluteColumn));
+        }
+        sharedTile[localToken * ld + dim] = valueHalf;
+    }
+    for (int index = threadIndex; index < tokenCapacity * (ld - headDim); index += threadCount) {
+        const int localToken = index / (ld - headDim);
+        const int pad = index - localToken * (ld - headDim);
+        sharedTile[localToken * ld + headDim + pad] = __float2half_rn(0.0f);
+    }
 }
 
 __device__ __forceinline__ void fillScores(
@@ -435,7 +549,7 @@ __global__ void CudaFlashAttentionForwardFixedEntry(
                 float weighted1 = 0.0f;
                 for (int localKey = 0; localKey < keyCount; ++localKey) {
                     const float probability = sharedScores[threadIndex * TileBc + localKey];
-                    const float2 val = __half22float2(*reinterpret_cast<const __half2*>(sharedValue + localKey * HeadDim + dim));
+                    const float2 val = __half22float2(loadHalf2(sharedValue + localKey * HeadDim + dim));
                     weighted0 += probability * val.x;
                     weighted1 += probability * val.y;
                 }
@@ -764,6 +878,8 @@ __global__ void CudaFlashAttentionBackwardQueryFixedEntry(
     float* sharedProb = reinterpret_cast<float*>(sharedOutGrad + TileBr * HeadDim);
     float* sharedLse = sharedProb + TileBr * TileBc;
     float* sharedDelta = sharedLse + TileBr;
+    float* sharedKeyGrad = sharedDelta + TileBr;
+    float* sharedValueGrad = sharedKeyGrad + TileBc * HeadDim;
 
     const int headIndex = static_cast<int>(blockIdx.y);
     const int packIndex = static_cast<int>(blockIdx.z);
@@ -830,15 +946,15 @@ __global__ void CudaFlashAttentionBackwardQueryFixedEntry(
                     float dP = 0.0f;
 #pragma unroll
                     for (int dim = 0; dim < HeadDim; dim += 2) {
-                        const float2 outG = __half22float2(*reinterpret_cast<const __half2*>(sharedOutGrad + localQuery * HeadDim + dim));
-                        const float2 val = __half22float2(*reinterpret_cast<const __half2*>(sharedValue + localKey * HeadDim + dim));
+                        const float2 outG = __half22float2(loadHalf2(sharedOutGrad + localQuery * HeadDim + dim));
+                        const float2 val = __half22float2(loadHalf2(sharedValue + localKey * HeadDim + dim));
                         dP += outG.x * val.x + outG.y * val.y;
                     }
                     scaledDs = probability * (dP - sharedDelta[localQuery]) * scale;
 #pragma unroll
                     for (int dim = 0; dim < HeadDim; dim += 2) {
-                        const float2 q = __half22float2(*reinterpret_cast<const __half2*>(sharedQuery + localQuery * HeadDim + dim));
-                        const float2 outG = __half22float2(*reinterpret_cast<const __half2*>(sharedOutGrad + localQuery * HeadDim + dim));
+                        const float2 q = __half22float2(loadHalf2(sharedQuery + localQuery * HeadDim + dim));
+                        const float2 outG = __half22float2(loadHalf2(sharedOutGrad + localQuery * HeadDim + dim));
                         keyGradLocal[dim] += scaledDs * q.x;
                         keyGradLocal[dim + 1] += scaledDs * q.y;
                         valueGradLocal[dim] += probability * outG.x;
@@ -847,12 +963,20 @@ __global__ void CudaFlashAttentionBackwardQueryFixedEntry(
                 }
                 sharedProb[localQuery * TileBc + localKey] = scaledDs;
             }
-            const int absoluteColumn = packColumnStart + keyStart + localKey;
+            // Stage into smem then coalesced atomics (one flush per key-tile).
 #pragma unroll
             for (int dim = 0; dim < HeadDim; ++dim) {
-                atomicAdd(headRowMutable(keyGradient, headIndex, HeadDim, dim, strideColumns, absoluteColumn), keyGradLocal[dim]);
-                atomicAdd(headRowMutable(valueGradient, headIndex, HeadDim, dim, strideColumns, absoluteColumn), valueGradLocal[dim]);
+                sharedKeyGrad[localKey * HeadDim + dim] = keyGradLocal[dim];
+                sharedValueGrad[localKey * HeadDim + dim] = valueGradLocal[dim];
             }
+        }
+        __syncthreads();
+        for (int index = threadIndex; index < keyCount * HeadDim; index += threadCount) {
+            const int localKey = index / HeadDim;
+            const int dim = index - localKey * HeadDim;
+            const int absoluteColumn = packColumnStart + keyStart + localKey;
+            atomicAdd(headRowMutable(keyGradient, headIndex, HeadDim, dim, strideColumns, absoluteColumn), sharedKeyGrad[localKey * HeadDim + dim]);
+            atomicAdd(headRowMutable(valueGradient, headIndex, HeadDim, dim, strideColumns, absoluteColumn), sharedValueGrad[localKey * HeadDim + dim]);
         }
         __syncthreads();
 
@@ -863,7 +987,7 @@ __global__ void CudaFlashAttentionBackwardQueryFixedEntry(
                 if (scaledDs == 0.0f) continue;
 #pragma unroll
                 for (int dim = 0; dim < HeadDim; dim += 2) {
-                    const float2 k = __half22float2(*reinterpret_cast<const __half2*>(sharedKey + localKey * HeadDim + dim));
+                    const float2 k = __half22float2(loadHalf2(sharedKey + localKey * HeadDim + dim));
                     queryGradLocal[dim] += scaledDs * k.x;
                     queryGradLocal[dim + 1] += scaledDs * k.y;
                 }
@@ -882,7 +1006,8 @@ __global__ void CudaFlashAttentionBackwardQueryFixedEntry(
 
 /// <summary>
 /// Tensor-core (WMMA) GEMM helpers for the 64×64×64 flash hot path.
-/// Q/K/V tiles are FP16 row-major [token][dim]; scores/probs stay FP32 until packed back to FP16 for PV / bwd GEMMs.
+/// Q/K/V tiles use padded leading dim kWmmaLd (=72) to avoid shared-memory bank conflicts.
+/// Scores/probs stay dense 64×64 (ld=64) until packed for PV.
 /// </summary>
 __device__ __forceinline__ void wmmaGemmQKt64(float* scores, const __half* query, const __half* key, float scale) {
     // S = scale * Q * K^T. 8 warps cover 16 of the 16×16 output tiles (2 each).
@@ -898,11 +1023,11 @@ __device__ __forceinline__ void wmmaGemmQKt64(float* scores, const __half* query
         wmma::fill_fragment(cFrag, 0.0f);
 
         #pragma unroll
-        for (int kk = 0; kk < 64; kk += kWmmaK) {
-            const __half* aPtr = query + (tileM * kWmmaM) * 64 + kk;
-            const __half* bPtr = key + (tileN * kWmmaN) * 64 + kk;
-            wmma::load_matrix_sync(aFrag, aPtr, 64);
-            wmma::load_matrix_sync(bFrag, bPtr, 64);
+        for (int kk = 0; kk < kWmmaHead; kk += kWmmaK) {
+            const __half* aPtr = query + (tileM * kWmmaM) * kWmmaLd + kk;
+            const __half* bPtr = key + (tileN * kWmmaN) * kWmmaLd + kk;
+            wmma::load_matrix_sync(aFrag, aPtr, kWmmaLd);
+            wmma::load_matrix_sync(bFrag, bPtr, kWmmaLd);
             wmma::mma_sync(cFrag, aFrag, bFrag, cFrag);
         }
 
@@ -910,12 +1035,12 @@ __device__ __forceinline__ void wmmaGemmQKt64(float* scores, const __half* query
         for (int i = 0; i < static_cast<int>(cFrag.num_elements); ++i)
             cFrag.x[i] *= scale;
 
-        wmma::store_matrix_sync(scores + (tileM * kWmmaM) * 64 + tileN * kWmmaN, cFrag, 64, wmma::mem_row_major);
+        wmma::store_matrix_sync(scores + (tileM * kWmmaM) * kWmmaHead + tileN * kWmmaN, cFrag, kWmmaHead, wmma::mem_row_major);
     }
 }
 
 __device__ __forceinline__ void wmmaGemmPV64(float* outAccum, const __half* prob, const __half* value) {
-    // outAccum is FP32 row-major 64×64 workspace; each warp writes its tiles then threads fold into registers.
+    // prob is dense 64×64 (ld=64); value is padded (ld=kWmmaLd).
     const int warpId = static_cast<int>(threadIdx.x) >> 5;
     if (warpId >= 8) return;
 
@@ -928,20 +1053,20 @@ __device__ __forceinline__ void wmmaGemmPV64(float* outAccum, const __half* prob
         wmma::fill_fragment(cFrag, 0.0f);
 
         #pragma unroll
-        for (int kk = 0; kk < 64; kk += kWmmaK) {
-            const __half* aPtr = prob + (tileM * kWmmaM) * 64 + kk;
-            const __half* bPtr = value + kk * 64 + tileN * kWmmaN;
-            wmma::load_matrix_sync(aFrag, aPtr, 64);
-            wmma::load_matrix_sync(bFrag, bPtr, 64);
+        for (int kk = 0; kk < kWmmaHead; kk += kWmmaK) {
+            const __half* aPtr = prob + (tileM * kWmmaM) * kWmmaHead + kk;
+            const __half* bPtr = value + kk * kWmmaLd + tileN * kWmmaN;
+            wmma::load_matrix_sync(aFrag, aPtr, kWmmaHead);
+            wmma::load_matrix_sync(bFrag, bPtr, kWmmaLd);
             wmma::mma_sync(cFrag, aFrag, bFrag, cFrag);
         }
 
-        wmma::store_matrix_sync(outAccum + (tileM * kWmmaM) * 64 + tileN * kWmmaN, cFrag, 64, wmma::mem_row_major);
+        wmma::store_matrix_sync(outAccum + (tileM * kWmmaM) * kWmmaHead + tileN * kWmmaN, cFrag, kWmmaHead, wmma::mem_row_major);
     }
 }
 
 __device__ __forceinline__ void wmmaGemmDovt64(float* dP, const __half* outGrad, const __half* value) {
-    // dP = dO * V^T  (64×64)
+    // dP = dO * V^T  (64×64); outGrad and value use padded ld.
     const int warpId = static_cast<int>(threadIdx.x) >> 5;
     if (warpId >= 8) return;
 
@@ -954,15 +1079,15 @@ __device__ __forceinline__ void wmmaGemmDovt64(float* dP, const __half* outGrad,
         wmma::fill_fragment(cFrag, 0.0f);
 
         #pragma unroll
-        for (int kk = 0; kk < 64; kk += kWmmaK) {
-            const __half* aPtr = outGrad + (tileM * kWmmaM) * 64 + kk;
-            const __half* bPtr = value + (tileN * kWmmaN) * 64 + kk;
-            wmma::load_matrix_sync(aFrag, aPtr, 64);
-            wmma::load_matrix_sync(bFrag, bPtr, 64);
+        for (int kk = 0; kk < kWmmaHead; kk += kWmmaK) {
+            const __half* aPtr = outGrad + (tileM * kWmmaM) * kWmmaLd + kk;
+            const __half* bPtr = value + (tileN * kWmmaN) * kWmmaLd + kk;
+            wmma::load_matrix_sync(aFrag, aPtr, kWmmaLd);
+            wmma::load_matrix_sync(bFrag, bPtr, kWmmaLd);
             wmma::mma_sync(cFrag, aFrag, bFrag, cFrag);
         }
 
-        wmma::store_matrix_sync(dP + (tileM * kWmmaM) * 64 + tileN * kWmmaN, cFrag, 64, wmma::mem_row_major);
+        wmma::store_matrix_sync(dP + (tileM * kWmmaM) * kWmmaHead + tileN * kWmmaN, cFrag, kWmmaHead, wmma::mem_row_major);
     }
 }
 
@@ -976,7 +1101,7 @@ __device__ __forceinline__ void applyCausalAndBounds64(float* scores, int queryS
     }
 }
 
-/// <summary>Flash forward hot path: headDim=64, Br=Bc=64 with WMMA QK^T + PV.</summary>
+/// <summary>Flash forward hot path: headDim=64, Br=Bc=64 with WMMA QK^T + PV (padded smem ld).</summary>
 __global__ void CudaFlashAttentionForwardWmma64Entry(
     const float* query,
     const float* key,
@@ -991,14 +1116,17 @@ __global__ void CudaFlashAttentionForwardWmma64Entry(
     constexpr int HeadDim = 64;
     constexpr int TileBr = 64;
     constexpr int TileBc = 64;
+    constexpr int Ld = kWmmaLd;
 
     extern __shared__ char sharedBytes[];
     __half* sharedQuery = reinterpret_cast<__half*>(sharedBytes);
-    __half* sharedKey = sharedQuery + TileBr * HeadDim;
-    __half* sharedValue = sharedKey + TileBc * HeadDim;
-    float* sharedScores = reinterpret_cast<float*>(sharedValue + TileBc * HeadDim);
-    // Reuse score buffer as FP32 PV workspace after probs are packed into sharedQuery.
+    __half* sharedKey = sharedQuery + TileBr * Ld;
+    __half* sharedValue = sharedKey + TileBc * Ld;
+    float* sharedScores = reinterpret_cast<float*>(sharedValue + TileBc * Ld);
+    // Reuse score buffer as FP32 PV workspace after probs are packed into a dense half buffer
+    // overlaid on the first TileBr*TileBc halves of sharedQuery (prob pack is dense ld=64).
     float* sharedPv = sharedScores;
+    __half* sharedProbHalf = sharedQuery; // dense 64×64 overlay after softmax
 
     const int headIndex = static_cast<int>(blockIdx.y);
     const int packIndex = static_cast<int>(blockIdx.z);
@@ -1011,16 +1139,10 @@ __global__ void CudaFlashAttentionForwardWmma64Entry(
     const int threadIndex = static_cast<int>(threadIdx.x);
     const int threadCount = static_cast<int>(blockDim.x);
 
-    for (int index = threadIndex; index < TileBr * HeadDim; index += threadCount) {
-        const int localQuery = index / HeadDim;
-        const int dim = index - localQuery * HeadDim;
-        __half valueHalf = __float2half_rn(0.0f);
-        if (localQuery < queryCount) {
-            const int absoluteColumn = packColumnStart + queryStart + localQuery;
-            valueHalf = __float2half_rn(*headRow(query, headIndex, HeadDim, dim, strideColumns, absoluteColumn));
-        }
-        sharedQuery[localQuery * HeadDim + dim] = valueHalf;
-    }
+    loadPaddedHalfTileFromFloat(
+        sharedQuery, Ld, TileBr, queryCount, HeadDim,
+        query, headIndex, strideColumns, packColumnStart + queryStart,
+        threadIndex, threadCount);
     __syncthreads();
 
     float rowMax = -INFINITY;
@@ -1036,18 +1158,30 @@ __global__ void CudaFlashAttentionForwardWmma64Entry(
         const int keyCount = sequenceLength - keyStart < TileBc ? sequenceLength - keyStart : TileBc;
         if (causal && keyStart > (queryStart + queryCount - 1)) break;
 
-        for (int index = threadIndex; index < TileBc * HeadDim; index += threadCount) {
-            const int localKey = index / HeadDim;
-            const int dim = index - localKey * HeadDim;
-            __half keyHalf = __float2half_rn(0.0f);
-            __half valueHalf = __float2half_rn(0.0f);
-            if (localKey < keyCount) {
-                const int absoluteColumn = packColumnStart + keyStart + localKey;
-                keyHalf = __float2half_rn(*headRow(key, headIndex, HeadDim, dim, strideColumns, absoluteColumn));
-                valueHalf = __float2half_rn(*headRow(value, headIndex, HeadDim, dim, strideColumns, absoluteColumn));
-            }
-            sharedKey[localKey * HeadDim + dim] = keyHalf;
-            sharedValue[localKey * HeadDim + dim] = valueHalf;
+#if __CUDA_ARCH__ >= 800
+        // Ampere+: cp.async contiguous per-dim token rows into float stage (reuse score buffer), then half tile.
+        if (keyCount == TileBc && (keyCount % 4) == 0) {
+            float* floatStage = sharedScores; // 64*64 floats == HeadDim*TileBc
+            cpAsyncFloatRowsToHalfTile(
+                sharedKey, Ld, keyCount, HeadDim, floatStage,
+                key, headIndex, strideColumns, packColumnStart + keyStart,
+                threadIndex, threadCount);
+            __syncthreads();
+            cpAsyncFloatRowsToHalfTile(
+                sharedValue, Ld, keyCount, HeadDim, floatStage,
+                value, headIndex, strideColumns, packColumnStart + keyStart,
+                threadIndex, threadCount);
+        } else
+#endif
+        {
+            loadPaddedHalfTileFromFloat(
+                sharedKey, Ld, TileBc, keyCount, HeadDim,
+                key, headIndex, strideColumns, packColumnStart + keyStart,
+                threadIndex, threadCount);
+            loadPaddedHalfTileFromFloat(
+                sharedValue, Ld, TileBc, keyCount, HeadDim,
+                value, headIndex, strideColumns, packColumnStart + keyStart,
+                threadIndex, threadCount);
         }
         __syncthreads();
 
@@ -1082,7 +1216,6 @@ __global__ void CudaFlashAttentionForwardWmma64Entry(
                 tileSum += probability;
             }
 
-            // Stash rescale into outputAccum temporarily via a side channel: apply after PV.
             rowSum = rowSum * rescale + tileSum;
 #pragma unroll
             for (int dim = 0; dim < HeadDim; ++dim)
@@ -1091,7 +1224,6 @@ __global__ void CudaFlashAttentionForwardWmma64Entry(
         }
         __syncthreads();
 
-        // Clear invalid probability rows/cols before packing to FP16 for WMMA PV.
         for (int index = threadIndex; index < TileBr * TileBc; index += threadCount) {
             const int localQuery = index >> 6;
             const int localKey = index & 63;
@@ -1100,12 +1232,12 @@ __global__ void CudaFlashAttentionForwardWmma64Entry(
         }
         __syncthreads();
 
-        // Pack float probs → half into sharedQuery (Q reloaded after PV).
+        // Pack float probs → dense half (ld=64) into sharedProbHalf overlay.
         for (int index = threadIndex; index < TileBr * TileBc; index += threadCount)
-            reinterpret_cast<__half*>(sharedQuery)[index] = __float2half_rn(sharedScores[index]);
+            sharedProbHalf[index] = __float2half_rn(sharedScores[index]);
         __syncthreads();
 
-        wmmaGemmPV64(sharedPv, reinterpret_cast<const __half*>(sharedQuery), sharedValue);
+        wmmaGemmPV64(sharedPv, sharedProbHalf, sharedValue);
         __syncthreads();
 
         if (threadIndex < queryCount) {
@@ -1115,15 +1247,11 @@ __global__ void CudaFlashAttentionForwardWmma64Entry(
         }
         __syncthreads();
 
-        // Reload Q tile for the next key iteration.
-        for (int index = threadIndex; index < queryCount * HeadDim; index += threadCount) {
-            const int localQuery = index / HeadDim;
-            const int dim = index - localQuery * HeadDim;
-            const int absoluteColumn = packColumnStart + queryStart + localQuery;
-            sharedQuery[localQuery * HeadDim + dim] = __float2half_rn(*headRow(query, headIndex, HeadDim, dim, strideColumns, absoluteColumn));
-        }
-        for (int index = queryCount * HeadDim + threadIndex; index < TileBr * HeadDim; index += threadCount)
-            sharedQuery[index] = __float2half_rn(0.0f);
+        // Reload Q tile for the next key iteration (PV overwrote sharedProbHalf / start of Q).
+        loadPaddedHalfTileFromFloat(
+            sharedQuery, Ld, TileBr, queryCount, HeadDim,
+            query, headIndex, strideColumns, packColumnStart + queryStart,
+            threadIndex, threadCount);
         __syncthreads();
     }
 
@@ -1137,7 +1265,7 @@ __global__ void CudaFlashAttentionForwardWmma64Entry(
     }
 }
 
-/// <summary>Flash bwd hot path: WMMA for QK^T (P) and dO V^T; rest stays specialized half loops.</summary>
+/// <summary>Flash bwd hot path: WMMA for QK^T (P) and dO V^T; padded smem + coalesced dK/dV atomics.</summary>
 __global__ void CudaFlashAttentionBackwardQueryWmma64Entry(
     const float* query,
     const float* key,
@@ -1156,16 +1284,20 @@ __global__ void CudaFlashAttentionBackwardQueryWmma64Entry(
     constexpr int HeadDim = 64;
     constexpr int TileBr = 64;
     constexpr int TileBc = 64;
+    constexpr int Ld = kWmmaLd;
 
     extern __shared__ char sharedBytes[];
     __half* sharedKey = reinterpret_cast<__half*>(sharedBytes);
-    __half* sharedValue = sharedKey + TileBc * HeadDim;
-    __half* sharedQuery = sharedValue + TileBc * HeadDim;
-    __half* sharedOutGrad = sharedQuery + TileBr * HeadDim;
-    float* sharedProb = reinterpret_cast<float*>(sharedOutGrad + TileBr * HeadDim);
+    __half* sharedValue = sharedKey + TileBc * Ld;
+    __half* sharedQuery = sharedValue + TileBc * Ld;
+    __half* sharedOutGrad = sharedQuery + TileBr * Ld;
+    float* sharedProb = reinterpret_cast<float*>(sharedOutGrad + TileBr * Ld);
     float* sharedLse = sharedProb + TileBr * TileBc;
     float* sharedDelta = sharedLse + TileBr;
-    float* sharedDp = sharedProb; // reuse after P→scaledDs transformation starts from dP
+    float* sharedKeyGrad = sharedDelta + TileBr;
+    float* sharedValueGrad = sharedKeyGrad + TileBc * HeadDim;
+    float* sharedDp = sharedProb; // reuse after P→scaledDs
+    __half* sharedProbHalf = sharedKey; // dense P pack overlay on K (reloaded later)
 
     const int headIndex = static_cast<int>(blockIdx.y);
     const int packIndex = static_cast<int>(blockIdx.z);
@@ -1184,19 +1316,14 @@ __global__ void CudaFlashAttentionBackwardQueryWmma64Entry(
     for (int dim = 0; dim < HeadDim; ++dim)
         queryGradLocal[dim] = 0.0f;
 
-    for (int index = threadIndex; index < TileBr * HeadDim; index += threadCount) {
-        const int localQuery = index / HeadDim;
-        const int dim = index - localQuery * HeadDim;
-        __half qHalf = __float2half_rn(0.0f);
-        __half dOHalf = __float2half_rn(0.0f);
-        if (localQuery < queryCount) {
-            const int absoluteColumn = packColumnStart + queryStart + localQuery;
-            qHalf = __float2half_rn(*headRow(query, headIndex, HeadDim, dim, strideColumns, absoluteColumn));
-            dOHalf = __float2half_rn(*headRow(outGradient, headIndex, HeadDim, dim, strideColumns, absoluteColumn));
-        }
-        sharedQuery[localQuery * HeadDim + dim] = qHalf;
-        sharedOutGrad[localQuery * HeadDim + dim] = dOHalf;
-    }
+    loadPaddedHalfTileFromFloat(
+        sharedQuery, Ld, TileBr, queryCount, HeadDim,
+        query, headIndex, strideColumns, packColumnStart + queryStart,
+        threadIndex, threadCount);
+    loadPaddedHalfTileFromFloat(
+        sharedOutGrad, Ld, TileBr, queryCount, HeadDim,
+        outGradient, headIndex, strideColumns, packColumnStart + queryStart,
+        threadIndex, threadCount);
     if (threadIndex < queryCount) {
         const int absoluteColumn = packColumnStart + queryStart + threadIndex;
         sharedLse[threadIndex] = logSumExp[headIndex * strideColumns + absoluteColumn];
@@ -1213,22 +1340,16 @@ __global__ void CudaFlashAttentionBackwardQueryWmma64Entry(
         const int keyCount = sequenceLength - keyStart < TileBc ? sequenceLength - keyStart : TileBc;
         if (causal && keyStart > (queryStart + queryCount - 1)) continue;
 
-        for (int index = threadIndex; index < TileBc * HeadDim; index += threadCount) {
-            const int localKey = index / HeadDim;
-            const int dim = index - localKey * HeadDim;
-            __half keyHalf = __float2half_rn(0.0f);
-            __half valueHalf = __float2half_rn(0.0f);
-            if (localKey < keyCount) {
-                const int absoluteColumn = packColumnStart + keyStart + localKey;
-                keyHalf = __float2half_rn(*headRow(key, headIndex, HeadDim, dim, strideColumns, absoluteColumn));
-                valueHalf = __float2half_rn(*headRow(value, headIndex, HeadDim, dim, strideColumns, absoluteColumn));
-            }
-            sharedKey[localKey * HeadDim + dim] = keyHalf;
-            sharedValue[localKey * HeadDim + dim] = valueHalf;
-        }
+        loadPaddedHalfTileFromFloat(
+            sharedKey, Ld, TileBc, keyCount, HeadDim,
+            key, headIndex, strideColumns, packColumnStart + keyStart,
+            threadIndex, threadCount);
+        loadPaddedHalfTileFromFloat(
+            sharedValue, Ld, TileBc, keyCount, HeadDim,
+            value, headIndex, strideColumns, packColumnStart + keyStart,
+            threadIndex, threadCount);
         __syncthreads();
 
-        // Scores via WMMA, then P = exp(S - LSE) with causal/bounds.
         wmmaGemmQKt64(sharedProb, sharedQuery, sharedKey, scale);
         __syncthreads();
         applyCausalAndBounds64(sharedProb, queryStart, queryCount, keyStart, keyCount, causal, threadIndex, threadCount);
@@ -1253,15 +1374,14 @@ __global__ void CudaFlashAttentionBackwardQueryWmma64Entry(
         }
         __syncthreads();
 
-        // Pack P → half into sharedKey (K reloaded below for dQ); dP via WMMA overwrites sharedProb.
+        // Pack P → dense half into sharedProbHalf (overlays K); dP via WMMA overwrites sharedProb.
         for (int index = threadIndex; index < TileBr * TileBc; index += threadCount)
-            sharedKey[index] = __float2half_rn(sharedProb[index]);
+            sharedProbHalf[index] = __float2half_rn(sharedProb[index]);
         __syncthreads();
 
         wmmaGemmDovt64(sharedDp, sharedOutGrad, sharedValue);
         __syncthreads();
 
-        // scaledDs = P * (dP - Delta) * scale; keep in sharedProb; accumulate dK/dV.
         if (threadIndex < keyCount) {
             const int localKey = threadIndex;
             float keyGradLocal[HeadDim];
@@ -1272,15 +1392,15 @@ __global__ void CudaFlashAttentionBackwardQueryWmma64Entry(
                 valueGradLocal[dim] = 0.0f;
             }
             for (int localQuery = 0; localQuery < queryCount; ++localQuery) {
-                const float probability = __half2float(sharedKey[localQuery * TileBc + localKey]);
+                const float probability = __half2float(sharedProbHalf[localQuery * TileBc + localKey]);
                 float scaledDs = 0.0f;
                 if (probability != 0.0f) {
                     const float dP = sharedDp[localQuery * TileBc + localKey];
                     scaledDs = probability * (dP - sharedDelta[localQuery]) * scale;
 #pragma unroll
                     for (int dim = 0; dim < HeadDim; dim += 2) {
-                        const float2 q = __half22float2(*reinterpret_cast<const __half2*>(sharedQuery + localQuery * HeadDim + dim));
-                        const float2 outG = __half22float2(*reinterpret_cast<const __half2*>(sharedOutGrad + localQuery * HeadDim + dim));
+                        const float2 q = __half22float2(loadHalf2(sharedQuery + localQuery * Ld + dim));
+                        const float2 outG = __half22float2(loadHalf2(sharedOutGrad + localQuery * Ld + dim));
                         keyGradLocal[dim] += scaledDs * q.x;
                         keyGradLocal[dim + 1] += scaledDs * q.y;
                         valueGradLocal[dim] += probability * outG.x;
@@ -1289,22 +1409,26 @@ __global__ void CudaFlashAttentionBackwardQueryWmma64Entry(
                 }
                 sharedProb[localQuery * TileBc + localKey] = scaledDs;
             }
-            const int absoluteColumn = packColumnStart + keyStart + localKey;
 #pragma unroll
             for (int dim = 0; dim < HeadDim; ++dim) {
-                atomicAdd(headRowMutable(keyGradient, headIndex, HeadDim, dim, strideColumns, absoluteColumn), keyGradLocal[dim]);
-                atomicAdd(headRowMutable(valueGradient, headIndex, HeadDim, dim, strideColumns, absoluteColumn), valueGradLocal[dim]);
+                sharedKeyGrad[localKey * HeadDim + dim] = keyGradLocal[dim];
+                sharedValueGrad[localKey * HeadDim + dim] = valueGradLocal[dim];
             }
         }
         __syncthreads();
-
-        // Reload K for dQ = scaledDs @ K
         for (int index = threadIndex; index < keyCount * HeadDim; index += threadCount) {
             const int localKey = index / HeadDim;
             const int dim = index - localKey * HeadDim;
             const int absoluteColumn = packColumnStart + keyStart + localKey;
-            sharedKey[localKey * HeadDim + dim] = __float2half_rn(*headRow(key, headIndex, HeadDim, dim, strideColumns, absoluteColumn));
+            atomicAdd(headRowMutable(keyGradient, headIndex, HeadDim, dim, strideColumns, absoluteColumn), sharedKeyGrad[localKey * HeadDim + dim]);
+            atomicAdd(headRowMutable(valueGradient, headIndex, HeadDim, dim, strideColumns, absoluteColumn), sharedValueGrad[localKey * HeadDim + dim]);
         }
+        __syncthreads();
+
+        loadPaddedHalfTileFromFloat(
+            sharedKey, Ld, TileBc, keyCount, HeadDim,
+            key, headIndex, strideColumns, packColumnStart + keyStart,
+            threadIndex, threadCount);
         __syncthreads();
 
         if (threadIndex < queryCount) {
@@ -1314,7 +1438,7 @@ __global__ void CudaFlashAttentionBackwardQueryWmma64Entry(
                 if (scaledDs == 0.0f) continue;
 #pragma unroll
                 for (int dim = 0; dim < HeadDim; dim += 2) {
-                    const float2 k = __half22float2(*reinterpret_cast<const __half2*>(sharedKey + localKey * HeadDim + dim));
+                    const float2 k = __half22float2(loadHalf2(sharedKey + localKey * Ld + dim));
                     queryGradLocal[dim] += scaledDs * k.x;
                     queryGradLocal[dim + 1] += scaledDs * k.y;
                 }
@@ -1352,6 +1476,20 @@ size_t forwardSharedBytesHalf(int headDim, int tileBr, int tileBc) {
     return halfElements * sizeof(__half) + floatElements * sizeof(float);
 }
 
+size_t forwardSharedBytesWmma64() {
+    // Q/K/V with padded ld=kWmmaLd + dense FP32 scores 64×64
+    const size_t halfElements = static_cast<size_t>((64 + 2 * 64) * kWmmaLd);
+    const size_t floatElements = 64ull * 64ull;
+    return halfElements * sizeof(__half) + floatElements * sizeof(float);
+}
+
+size_t backwardQuerySharedBytesWmma64() {
+    // Padded Q/K/V/dO + P/LSE/Delta + dK/dV staging
+    const size_t halfElements = static_cast<size_t>((2 * 64 + 2 * 64) * kWmmaLd);
+    const size_t floatElements = static_cast<size_t>(64 * 64 + 2 * 64 + 2 * 64 * 64);
+    return halfElements * sizeof(__half) + floatElements * sizeof(float);
+}
+
 size_t forwardSharedBytesFloat(int headDim, int tileBr, int tileBc) {
     // CudaFlashAttentionForwardEntry keeps Q/K/V tiles in float shared memory.
     return static_cast<size_t>((tileBr + 2 * tileBc) * headDim + tileBr * tileBc) * sizeof(float);
@@ -1362,19 +1500,22 @@ size_t backwardKeySharedBytes(int headDim, int tileBr, int tileBc) {
 }
 
 size_t backwardQuerySharedBytes(int headDim, int tileBr, int tileBc) {
-    // FP16 Q/K/V/dO tiles + FP32 P/LSE/Delta (dQ lives in registers)
+    // FP16 Q/K/V/dO tiles + FP32 P/LSE/Delta + FP32 dK/dV staging for coalesced atomics
     const size_t halfElements = static_cast<size_t>((2 * tileBr + 2 * tileBc) * headDim);
-    const size_t floatElements = static_cast<size_t>(tileBr * tileBc + 2 * tileBr);
+    const size_t floatElements = static_cast<size_t>(tileBr * tileBc + 2 * tileBr + 2 * tileBc * headDim);
     return halfElements * sizeof(__half) + floatElements * sizeof(float);
 }
 
 void chooseTileSizes(int headDim, int& tileBr, int& tileBc) {
-    // Hot path is query-outer fixed; size tiles to that kernel's shared footprint.
+    // Hot path is query-outer fixed / WMMA; size tiles to that kernel's shared footprint.
     const size_t sharedLimit = deviceMaxDynamicSharedBytes();
     tileBr = 8;
     tileBc = 8;
     for (int candidate = kBrMax; candidate >= 8; candidate /= 2) {
-        if (backwardQuerySharedBytes(headDim, candidate, candidate) <= sharedLimit) {
+        size_t needed = backwardQuerySharedBytes(headDim, candidate, candidate);
+        if (headDim == 64 && candidate == 64)
+            needed = backwardQuerySharedBytesWmma64();
+        if (needed <= sharedLimit) {
             tileBr = candidate;
             tileBc = candidate;
             return;
@@ -1435,7 +1576,7 @@ void CudaFlashAttention::forwardMultiHead(const CudaMatrix& query, const CudaMat
             query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, out.buffer.deviceData, logSumExp.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
     } else if (headDimension == 64 && tileBr == 64 && tileBc == 64) {
         // Tensor-core WMMA path (QK^T + PV); 8 warps × 16×16 tiles cover the 64×64 GEMMs.
-        const size_t sharedBytes = forwardSharedBytesHalf(headDimension, tileBr, tileBc);
+        const size_t sharedBytes = forwardSharedBytesWmma64();
         constexpr int wmmaThreads = 256;
         ensureDynamicShared(CudaFlashAttentionForwardWmma64Entry, sharedBytes);
         CudaFlashAttentionForwardWmma64Entry<<<grid, wmmaThreads, sharedBytes, CudaMatmul::activeStream()>>>(
@@ -1532,8 +1673,9 @@ void CudaFlashAttention::backwardMultiHead(const CudaMatrix& query, const CudaMa
         launchQueryFixed(CudaFlashAttentionBackwardQueryFixedEntry<16, 32, 32>);
     } else if (headDimension == 64 && tileBr == 64 && tileBc == 64) {
         constexpr int wmmaThreads = 256;
-        ensureDynamicShared(CudaFlashAttentionBackwardQueryWmma64Entry, querySharedBytes);
-        CudaFlashAttentionBackwardQueryWmma64Entry<<<queryGrid, wmmaThreads, querySharedBytes, CudaMatmul::activeStream()>>>(
+        const size_t wmmaShared = backwardQuerySharedBytesWmma64();
+        ensureDynamicShared(CudaFlashAttentionBackwardQueryWmma64Entry, wmmaShared);
+        CudaFlashAttentionBackwardQueryWmma64Entry<<<queryGrid, wmmaThreads, wmmaShared, CudaMatmul::activeStream()>>>(
             query.buffer.deviceData, key.buffer.deviceData, value.buffer.deviceData, outGradient.buffer.deviceData, logSumExp.buffer.deviceData, deltaWorkspace.buffer.deviceData, queryGradient.buffer.deviceData, keyGradient.buffer.deviceData, valueGradient.buffer.deviceData, strideColumns, columnStart, columnCount, scale, causalFlag);
         CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaFlashAttentionBackwardQueryWmma64Entry launch");
     } else if (headDimension == 64 && tileBr == 32 && tileBc == 32) {
