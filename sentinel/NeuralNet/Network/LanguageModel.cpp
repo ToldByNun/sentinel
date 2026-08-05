@@ -202,6 +202,7 @@ double LanguageModel::probeCudaPackedTrainTokensPerSecond(int sequenceLength, in
         packPointers[static_cast<size_t>(exampleIndex)] = &examples[static_cast<size_t>(exampleIndex)];
 
     device.preferTrainProgress = false;
+    device.preferTrainPhaseTrace = false;
     device.trainProgressIntervalSec = 5.0;
     device.trainProgressEpochStart = {};
     device.trainProgressLastPrint = {};

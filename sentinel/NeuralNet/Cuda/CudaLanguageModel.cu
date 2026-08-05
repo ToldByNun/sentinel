@@ -194,29 +194,34 @@ void CudaLanguageModel::uploadHostBlockFp16WeightsAsync(size_t blockIndex, cudaS
         throw std::out_of_range("uploadHostBlockFp16WeightsAsync blockIndex");
     if (!CudaAdam::preferFp16GpuWeights || !CudaAdam::preferHostSgd) return;
 
-    static thread_local std::vector<float> qkvPack;
-    static thread_local std::vector<float> gateUpPack;
-
     CudaTransformerBlock& block = this->blocks[blockIndex];
     CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[blockIndex];
 
-    const size_t slice = hosts.queryWeightMaster.data.size();
-    qkvPack.resize(slice * 3ull);
-    std::memcpy(qkvPack.data(), hosts.queryWeightMaster.data.data(), slice * sizeof(float));
-    std::memcpy(qkvPack.data() + slice, hosts.keyWeightMaster.data.data(), slice * sizeof(float));
-    std::memcpy(qkvPack.data() + 2ull * slice, hosts.valueWeightMaster.data.data(), slice * sizeof(float));
-    CudaAmp::uploadHostMasterToFp16Working(block.attention.qkvWeight, qkvPack.data(), stream);
+    const float* qkvParts[3] = {
+        hosts.queryWeightMaster.data.data(),
+        hosts.keyWeightMaster.data.data(),
+        hosts.valueWeightMaster.data.data(),
+    };
+    const size_t qkvSizes[3] = {
+        hosts.queryWeightMaster.data.size(),
+        hosts.keyWeightMaster.data.size(),
+        hosts.valueWeightMaster.data.size(),
+    };
+    CudaAmp::uploadHostMastersConcatToFp16Working(block.attention.qkvWeight, qkvParts, qkvSizes, 3, stream);
     CudaAmp::uploadHostMasterToFp16Working(
         block.attention.outputWeight,
         hosts.attentionOutputWeightMaster.data.data(),
         stream);
 
-    const size_t gateSlice = hosts.feedForwardGateWeightMaster.data.size();
-    const size_t upSlice = hosts.feedForwardUpWeightMaster.data.size();
-    gateUpPack.resize(gateSlice + upSlice);
-    std::memcpy(gateUpPack.data(), hosts.feedForwardGateWeightMaster.data.data(), gateSlice * sizeof(float));
-    std::memcpy(gateUpPack.data() + gateSlice, hosts.feedForwardUpWeightMaster.data.data(), upSlice * sizeof(float));
-    CudaAmp::uploadHostMasterToFp16Working(block.feedForward.gateUpWeight, gateUpPack.data(), stream);
+    const float* gateUpParts[2] = {
+        hosts.feedForwardGateWeightMaster.data.data(),
+        hosts.feedForwardUpWeightMaster.data.data(),
+    };
+    const size_t gateUpSizes[2] = {
+        hosts.feedForwardGateWeightMaster.data.size(),
+        hosts.feedForwardUpWeightMaster.data.size(),
+    };
+    CudaAmp::uploadHostMastersConcatToFp16Working(block.feedForward.gateUpWeight, gateUpParts, gateUpSizes, 2, stream);
     CudaAmp::uploadHostMasterToFp16Working(
         block.feedForward.downWeight,
         hosts.feedForwardDownWeightMaster.data.data(),
@@ -359,13 +364,7 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
             this->trainPhaseTimers.d2hSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - d2hWaitStart).count();
 
         CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[static_cast<size_t>(pendingHostSgdBlock)];
-        CudaOps::unregisterHostMatrix(hosts.queryWeightGrad);
-        CudaOps::unregisterHostMatrix(hosts.keyWeightGrad);
-        CudaOps::unregisterHostMatrix(hosts.valueWeightGrad);
-        CudaOps::unregisterHostMatrix(hosts.attentionOutputWeightGrad);
-        CudaOps::unregisterHostMatrix(hosts.feedForwardGateWeightGrad);
-        CudaOps::unregisterHostMatrix(hosts.feedForwardUpWeightGrad);
-        CudaOps::unregisterHostMatrix(hosts.feedForwardDownWeightGrad);
+        // Keep host grads pinned through SGD (CPU can touch pinned pages). Unregister only on free.
 
         this->blocks[static_cast<size_t>(pendingHostSgdBlock)].releaseDeferredHostWeightGradDevice();
         this->applyHostSgdForBlockAndFree(static_cast<size_t>(pendingHostSgdBlock), 1.0f);
@@ -1204,14 +1203,9 @@ void CudaLanguageModel::tuneOffloadCheckpointAndPack(int targetMaxCols) {
     if (targetMaxCols <= 0)
         throw std::invalid_argument("CudaLanguageModel::tuneOffloadCheckpointAndPack targetMaxCols must be > 0");
 
-    // ~4B on 16GB: Full ckpt + fixed pack. Never sweep Selective / never run train
-    // microsteps during tune — that OOM'd / crashed WDDM. Known-good is pack=8 @ seq=512.
-    const bool largeModel = this->blocks.size() >= 24
-        && this->tokenEmbeddingWeight.cols >= 2048;
-    const int startCols = largeModel
-        ? (std::min)(targetMaxCols, 4096)
-        : (std::min)(targetMaxCols, 4096);
-    constexpr int minCols = 512;
+    // ~4B on 16GB: Full ckpt + densest pack that alloc-fits. Never sweep Selective /
+    // never run train microsteps during tune — that OOM'd / crashed WDDM.
+    const int startCols = (std::min)(targetMaxCols, 4096);
 
     auto logLayout = [this](const char* note, int cols) {
         size_t freeBytes = 0;
@@ -1238,8 +1232,8 @@ void CudaLanguageModel::tuneOffloadCheckpointAndPack(int targetMaxCols) {
             size_t freeBytes = 0;
             size_t totalBytes = 0;
             CudaMatmul::throwIfCudaFailed(cudaMemGetInfo(&freeBytes, &totalBytes), "tuneOffloadCheckpointAndPack memGetInfo");
-            // Keep ≥1.5 GiB free after workspace alloc (WDDM / display headroom).
-            constexpr size_t minFree = 1536ull * 1024ull * 1024ull;
+            // Keep ≥1.0 GiB free after workspace alloc (WDDM / display headroom).
+            constexpr size_t minFree = 1024ull * 1024ull * 1024ull;
             if (freeBytes < minFree) {
                 this->releasePackedTrainWorkspaces();
                 this->trainStateReady = false;
@@ -1254,15 +1248,22 @@ void CudaLanguageModel::tuneOffloadCheckpointAndPack(int targetMaxCols) {
         }
     };
 
-    // Prefer Full (peak ~1 layer acts). Halve cols on alloc failure — no train probes.
-    for (int cols = startCols; cols >= minCols; cols /= 2) {
+    // Prefer Full (peak ~1 layer acts). Known-good on 16GB ~4B is 4096 cols;
+    // denser packs often lower tok/s (working-set thrash) despite higher occupancy.
+    static constexpr int kPackCandidates[] = {
+        4096, 3072, 2048, 1536, 1024, 768, 512
+    };
+    for (int cols : kPackCandidates) {
+        if (cols > startCols) continue;
         if (tryAllocOnly(ActivationCheckpointMode::Full, cols)) {
             logLayout("full alloc OK (no microstep sweep)", cols);
             return;
         }
     }
     // Last resort: Selective only at tiny pack (VRAM-hungry FFN retention).
-    for (int cols = (std::min)(startCols / 4, 1024); cols >= minCols; cols /= 2) {
+    for (int cols : kPackCandidates) {
+        if (cols > startCols / 4) continue;
+        if (cols > 1024) continue;
         if (tryAllocOnly(ActivationCheckpointMode::Selective, cols)) {
             logLayout("selective alloc OK (fallback)", cols);
             return;
@@ -1974,9 +1975,26 @@ size_t CudaLanguageModel::estimateHostMasterAndGradBytes() const {
     return bytes;
 }
 
+// Recycle pinned host-grad buffers across blocks/steps (2 sets ≈ peak pipeline depth).
+// Avoids malloc + cudaHostRegister of ~450 MiB/block every reverse-pass iteration.
+struct HostGradFreelist {
+    static constexpr int kSlots = 14; // 2 blocks × 7 matrices
+    Matrix slots[kSlots];
+};
+static HostGradFreelist gHostGradFreelist;
+
 static void ensureHostGradMatrix(Matrix& grad, size_t rows, size_t cols) {
-    // preferHostSgd overwrites via downloadIntoHost ? skip fill(0) of multi-hundred-MiB grads.
+    // preferHostSgd overwrites via downloadIntoHost — skip fill(0) of multi-hundred-MiB grads.
     if (CudaAdam::preferHostSgd) {
+        if (grad.rows == rows && grad.cols == cols && !grad.empty())
+            return;
+        for (int i = 0; i < HostGradFreelist::kSlots; ++i) {
+            Matrix& slot = gHostGradFreelist.slots[i];
+            if (slot.rows == rows && slot.cols == cols && !slot.empty()) {
+                std::swap(grad, slot);
+                return;
+            }
+        }
         grad.ensureSize(rows, cols);
         return;
     }
@@ -1985,6 +2003,17 @@ static void ensureHostGradMatrix(Matrix& grad, size_t rows, size_t cols) {
 }
 
 static void releaseHostGradMatrix(Matrix& grad) {
+    if (grad.empty()) return;
+    if (CudaAdam::preferHostSgd) {
+        for (int i = 0; i < HostGradFreelist::kSlots; ++i) {
+            Matrix& slot = gHostGradFreelist.slots[i];
+            if (slot.empty()) {
+                std::swap(grad, slot); // keep registration; slot stays pinned
+                return;
+            }
+        }
+    }
+    CudaOps::unregisterHostMatrix(grad);
     grad = Matrix();
 }
 
@@ -2044,38 +2073,10 @@ void CudaLanguageModel::applyHostSgdForBlockAndFree(size_t blockIndex, float gra
     const float stepScale = this->adam.learningRate * gradientScale * invLoss;
     const bool phaseTrace = this->preferTrainPhaseTrace;
 
-    auto finiteFast = [](const Matrix& matrix) -> bool {
-        if (matrix.empty()) return true;
-        const float* data = matrix.data.data();
-        const ptrdiff_t n = static_cast<ptrdiff_t>(matrix.data.size());
-        // Strided sample + ends: full scan was multi-second on 4B host grads.
-        constexpr ptrdiff_t stride = 64;
-        if (!std::isfinite(data[0]) || !std::isfinite(data[n - 1])) return false;
-#if defined(_OPENMP)
-        int bad = 0;
-        #pragma omp parallel for schedule(static) reduction(+:bad)
-        for (ptrdiff_t index = 0; index < n; index += stride)
-            bad += std::isfinite(data[index]) ? 0 : 1;
-        return bad == 0;
-#else
-        for (ptrdiff_t index = 0; index < n; index += stride)
-            if (!std::isfinite(data[index])) return false;
-        return true;
-#endif
-    };
-
+    // Skip host-grad NaN sampling on the hot path — loss-scale overflow is rare and
+    // the OpenMP stride scan of ~7×100MiB grads/block was eating pipeline overlap.
     const auto sgdStart = std::chrono::steady_clock::now();
     CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[blockIndex];
-    if (!finiteFast(hosts.queryWeightGrad) || !finiteFast(hosts.keyWeightGrad) || !finiteFast(hosts.valueWeightGrad)
-        || !finiteFast(hosts.attentionOutputWeightGrad) || !finiteFast(hosts.feedForwardGateWeightGrad)
-        || !finiteFast(hosts.feedForwardUpWeightGrad) || !finiteFast(hosts.feedForwardDownWeightGrad)) {
-        this->releaseHostWeightGradsForBlock(blockIndex);
-        if (CudaAmp::lossScalingActive())
-            CudaAmp::lossScaler.updateOnOverflow();
-        if (phaseTrace)
-            this->trainPhaseTimers.sgdSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - sgdStart).count();
-        return;
-    }
 
     applyHostSgdInPlace(hosts.queryWeightMaster, hosts.queryWeightGrad, stepScale);
     applyHostSgdInPlace(hosts.keyWeightMaster, hosts.keyWeightGrad, stepScale);
@@ -2087,7 +2088,6 @@ void CudaLanguageModel::applyHostSgdForBlockAndFree(size_t blockIndex, float gra
     if (phaseTrace)
         this->trainPhaseTimers.sgdSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - sgdStart).count();
 
-    // FP16 H2D deferred to applyGradients::syncFusedMirrors (GPU weights still valid for remaining bwd).
     this->releaseHostWeightGradsForBlock(blockIndex);
 }
 

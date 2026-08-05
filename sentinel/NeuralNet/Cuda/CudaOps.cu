@@ -1095,17 +1095,18 @@ void CudaOps::downloadIntoHostAsync(Matrix& hostOut, const CudaMatrix& deviceSou
     hostOut.ensureSize(deviceSource.rows, deviceSource.cols);
     const size_t bytes = deviceSource.byteCount();
     float* hostData = hostOut.data.data();
-    // Pin pageable host so memcpyAsync on the copy stream can overlap with compute.
+    // Pin once; reuse across steps while the allocation lives (AlreadyRegistered is OK).
     const cudaError_t reg = cudaHostRegister(hostData, bytes, cudaHostRegisterDefault);
-    if (reg != cudaSuccess) {
+    if (reg != cudaSuccess && reg != cudaErrorHostMemoryAlreadyRegistered) {
         cudaGetLastError();
-        // Fallback: blocking download on the copy stream (still ordered vs compute via wait-event).
         CudaMatmul::throwIfCudaFailed(
             cudaMemcpyAsync(hostData, deviceSource.buffer.deviceData, bytes, cudaMemcpyDeviceToHost, stream),
             "CudaOps::downloadIntoHostAsync D2H fallback");
         CudaMatmul::throwIfCudaFailed(cudaStreamSynchronize(stream), "CudaOps::downloadIntoHostAsync fallback sync");
         return;
     }
+    if (reg == cudaErrorHostMemoryAlreadyRegistered)
+        cudaGetLastError();
     CudaMatmul::throwIfCudaFailed(
         cudaMemcpyAsync(hostData, deviceSource.buffer.deviceData, bytes, cudaMemcpyDeviceToHost, stream),
         "CudaOps::downloadIntoHostAsync D2H");

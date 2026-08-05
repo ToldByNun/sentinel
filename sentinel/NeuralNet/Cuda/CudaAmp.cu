@@ -184,6 +184,67 @@ void CudaAmp::uploadHostMasterToFp16Working(CudaMatrix& matrix, const float* hos
     entry.valid = true;
 }
 
+void CudaAmp::uploadHostMastersConcatToFp16Working(
+    CudaMatrix& matrix,
+    const float* const* parts,
+    const size_t* partElements,
+    int partCount,
+    cudaStream_t stream) {
+    if (matrix.empty()) throw std::invalid_argument("CudaAmp::uploadHostMastersConcatToFp16Working empty matrix");
+    if (parts == nullptr || partElements == nullptr || partCount <= 0)
+        throw std::invalid_argument("CudaAmp::uploadHostMastersConcatToFp16Working bad parts");
+    if (stream == nullptr) throw std::invalid_argument("CudaAmp::uploadHostMastersConcatToFp16Working null stream");
+    if (matrix.ampWeightSlot < 0 || matrix.ampWeightSlot >= CudaAmp::masterWeightCount)
+        throw std::logic_error("CudaAmp::uploadHostMastersConcatToFp16Working matrix not bound");
+    MasterWeightHalf& entry = CudaAmp::masterWeights[matrix.ampWeightSlot];
+    if (!entry.fp16Working) throw std::logic_error("CudaAmp::uploadHostMastersConcatToFp16Working not fp16 working");
+
+    size_t totalElements = 0;
+    for (int part = 0; part < partCount; ++part) {
+        if (parts[part] == nullptr) throw std::invalid_argument("CudaAmp::uploadHostMastersConcatToFp16Working null part");
+        totalElements += partElements[part];
+    }
+    if (totalElements != entry.elementCount)
+        throw std::invalid_argument("CudaAmp::uploadHostMastersConcatToFp16Working size mismatch");
+
+    entry.half.ensureCapacity(totalElements * sizeof(__half));
+    constexpr size_t kChunkElements = 16ull * 1024ull * 1024ull;
+    __half* deviceHalf = reinterpret_cast<__half*>(entry.half.deviceData);
+
+    size_t globalOffset = 0;
+    int partIndex = 0;
+    size_t partOffset = 0;
+    while (globalOffset < totalElements) {
+        const size_t chunk = (std::min)(kChunkElements, totalElements - globalOffset);
+        __half* pinnedHalf = reinterpret_cast<__half*>(gPinnedHalfUploadStaging.acquire(chunk * sizeof(__half)));
+
+        size_t filled = 0;
+        while (filled < chunk) {
+            const size_t remainInPart = partElements[partIndex] - partOffset;
+            const size_t take = (std::min)(remainInPart, chunk - filled);
+            const float* src = parts[partIndex] + partOffset;
+#if defined(_OPENMP)
+            #pragma omp parallel for schedule(static)
+#endif
+            for (ptrdiff_t index = 0; index < static_cast<ptrdiff_t>(take); ++index)
+                pinnedHalf[filled + static_cast<size_t>(index)] = __float2half_rn(src[index]);
+            filled += take;
+            partOffset += take;
+            if (partOffset >= partElements[partIndex]) {
+                ++partIndex;
+                partOffset = 0;
+            }
+        }
+
+        CudaMatmul::throwIfCudaFailed(
+            cudaMemcpyAsync(deviceHalf + globalOffset, pinnedHalf, chunk * sizeof(__half), cudaMemcpyHostToDevice, stream),
+            "CudaAmp::uploadHostMastersConcatToFp16Working H2D half");
+        gPinnedHalfUploadStaging.record(stream);
+        globalOffset += chunk;
+    }
+    entry.valid = true;
+}
+
 const void* CudaAmp::fp16WorkingWeightOrNull(const CudaMatrix& matrix) {
     if (matrix.ampWeightSlot < 0 || matrix.ampWeightSlot >= CudaAmp::masterWeightCount)
         return nullptr;

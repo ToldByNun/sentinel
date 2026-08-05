@@ -24,7 +24,7 @@ ProfileName = Literal["fair", "feat"]
 
 # Fixed workload for both profiles (tokens/step = SEQ * PACK_EXAMPLES).
 SEQ = 256
-PACK_EXAMPLES = 16  # 4096 tokens / step
+PACK_EXAMPLES = 32 # 8192 tokens / step
 WARMUP_STEPS = 2
 TIMED_STEPS = 4
 LEARNING_RATE = 3e-4
