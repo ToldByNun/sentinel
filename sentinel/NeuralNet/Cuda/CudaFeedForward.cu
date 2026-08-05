@@ -65,20 +65,21 @@ CudaFeedForward CudaFeedForward::createFrom(const FeedForward& host) {
 }
 
 void CudaFeedForward::releaseActivationScratch() {
-    this->gateUpPreActivation.free();
-    this->gateUpHiddenGradient.free();
+    this->gateUpPreActivation.releaseDeviceToPool();
+    this->gateUpHiddenGradient.releaseDeviceToPool();
+    // Weight grads: hard-free — pooling them fills the 1-layer pool and causes WDDM thrash.
     this->gateUpWeightGradient.free();
-    this->gatePreActivation.free();
-    this->gateActivated.free();
-    this->up.free();
-    this->hidden.free();
-    this->output.free();
-    this->inputCache.free();
-    this->hiddenGradient.free();
-    this->upGradient.free();
-    this->gateGradient.free();
-    this->siluDerivative.free();
-    this->temp.free();
+    this->gatePreActivation.releaseDeviceToPool();
+    this->gateActivated.releaseDeviceToPool();
+    this->up.releaseDeviceToPool();
+    this->hidden.releaseDeviceToPool();
+    this->output.releaseDeviceToPool();
+    this->inputCache.releaseDeviceToPool();
+    this->hiddenGradient.releaseDeviceToPool();
+    this->upGradient.releaseDeviceToPool();
+    this->gateGradient.releaseDeviceToPool();
+    this->siluDerivative.releaseDeviceToPool();
+    this->temp.releaseDeviceToPool();
     this->selectiveGatePreHalf.free();
     this->selectiveStashed = false;
 }
@@ -128,27 +129,35 @@ void CudaFeedForward::restoreSelectiveHalfActivations(const CudaRMSNorm& feedFor
     feedForwardNorm.reconstructNormalizedOutput(this->inputCache);
     CudaAmp::castToFloat(this->selectiveGatePreHalf, this->gatePreActivation);
 
-    // up = upWeight @ input — use up-slice of fused FP16 gateUp working weight.
-    const void* fusedHalf = CudaAmp::fp16WorkingWeightOrNull(this->gateUpWeight);
-    if (fusedHalf == nullptr)
-        throw std::logic_error("CudaFeedForward::restoreSelectiveHalfActivations missing fused FP16 gateUp");
-    const size_t gateElements = this->gateWeight.elementCount();
-    const void* upHalf = static_cast<const char*>(fusedHalf) + gateElements * 2u;
+    // up = upWeight @ input (+ bias). Prefer FP16 fused slice when host-SGD offload
+    // bound working weights; otherwise use resident FP32 upWeight (fair/resident path).
     this->up.ensureSize(this->upWeight.rows, this->inputCache.cols);
-    if (!CudaAmp::launchCublasLtMatmulFp16HalfLeft(
-            upHalf,
-            this->inputCache.buffer.deviceData,
-            this->up.buffer.deviceData,
-            static_cast<int>(this->upWeight.rows),
-            static_cast<int>(this->inputCache.cols),
-            static_cast<int>(this->upWeight.cols),
-            false,
-            false,
-            nullptr)) {
-        throw std::runtime_error("CudaFeedForward::restoreSelectiveHalfActivations up GEMM failed");
+    const void* fusedHalf = CudaAmp::fp16WorkingWeightOrNull(this->gateUpWeight);
+    if (fusedHalf != nullptr) {
+        const size_t gateElements = this->gateWeight.elementCount();
+        const void* upHalf = static_cast<const char*>(fusedHalf) + gateElements * 2u;
+        if (!CudaAmp::launchCublasLtMatmulFp16HalfLeft(
+                upHalf,
+                this->inputCache.buffer.deviceData,
+                this->up.buffer.deviceData,
+                static_cast<int>(this->upWeight.rows),
+                static_cast<int>(this->inputCache.cols),
+                static_cast<int>(this->upWeight.cols),
+                false,
+                false,
+                nullptr)) {
+            throw std::runtime_error("CudaFeedForward::restoreSelectiveHalfActivations up FP16 GEMM failed");
+        }
+        if (!this->upBias.empty() && this->upBias.hasDeviceStorage())
+            CudaOps::broadcastBiasAddInPlace(this->up, this->upBias);
+    } else {
+        if (this->upWeight.empty() || !this->upWeight.hasDeviceStorage())
+            throw std::logic_error("CudaFeedForward::restoreSelectiveHalfActivations missing FP32 upWeight");
+        if (this->upBias.empty())
+            CudaMatrix::multiplyInto(this->upWeight, this->inputCache, this->up);
+        else
+            CudaMatrix::multiplyBiasInto(this->upWeight, this->inputCache, this->upBias, this->up);
     }
-    if (!this->upBias.empty() && this->upBias.hasDeviceStorage())
-        CudaOps::broadcastBiasAddInPlace(this->up, this->upBias);
 
     CudaOps::siluInto(this->gatePreActivation, this->gateActivated);
     CudaOps::multiplyElementwiseInto(this->gateActivated, this->up, this->hidden);

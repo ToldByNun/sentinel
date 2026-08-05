@@ -130,12 +130,22 @@ void CudaDeviceBuffer::copyToHost(float* hostData, size_t byteCount) const {
     CudaMatmul::throwIfCudaFailed(cudaMemcpy(hostData, this->deviceData, byteCount, cudaMemcpyDeviceToHost), "cudaMemcpy device to host");
 }
 
+void CudaDeviceBuffer::releaseToPool() {
+    // nsys: ~6k cudaMalloc/Free per step from Full-ckpt scratch churn. A recycle pool
+    // fixed API time but on 16GB stacked with live weights and WDDM-thrashed. Keep the
+    // hook; hard-free until a VRAM-safe single-layer arena exists.
+    this->free();
+}
+
 void CudaDeviceBuffer::free() {
     if (this->deviceData == nullptr) return;
 
     cudaFree(this->deviceData);
     this->deviceData = nullptr;
     this->capacityBytes = 0;
+}
+
+void CudaDeviceBuffer::clearPool() {
 }
 
 CudaIntBuffer::CudaIntBuffer() : deviceData(nullptr), capacityCount(0) {}
@@ -311,6 +321,10 @@ void CudaMatrix::free() {
 
 void CudaMatrix::releaseDeviceKeepShape() {
     this->buffer.free();
+}
+
+void CudaMatrix::releaseDeviceToPool() {
+    this->free();
 }
 
 void CudaMatrix::upload(const Matrix& host) {

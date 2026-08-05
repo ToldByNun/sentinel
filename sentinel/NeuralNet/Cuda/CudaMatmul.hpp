@@ -32,8 +32,14 @@ public:
     /// <summary>device to host copy from already capacious buffer</summary>
     void copyToHost(float* hostData, size_t byteCount) const;
 
-    /// <summary>release device memory</summary>
+    /// <summary>return buffer to the process-wide recycle pool (avoids cudaFree in train hot path)</summary>
+    void releaseToPool();
+
+    /// <summary>cudaFree device memory (no recycle); used by destructor</summary>
     void free();
+
+    /// <summary>cudaFree every buffer held in the recycle pool</summary>
+    static void clearPool();
 };
 
 /// <summary>reusable device int buffer grows only when capacity is too small</summary>
@@ -128,6 +134,9 @@ public:
 
     /// <summary>free FP32 device buffer but keep rows/cols (FP16 working-weight mode)</summary>
     void releaseDeviceKeepShape();
+
+    /// <summary>pool device buffer and clear shape (Full-ckpt activation scratch recycle)</summary>
+    void releaseDeviceToPool();
 
     /// <summary>copy host matrix to device growing capacity if needed</summary>
     void upload(const Matrix& host);

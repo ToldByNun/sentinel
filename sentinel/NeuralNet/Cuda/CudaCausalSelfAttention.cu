@@ -24,50 +24,50 @@ bool CudaCausalSelfAttention::canUseFlashAttention(int segmentLength) const {
 }
 
 void CudaCausalSelfAttention::releaseDenseAttentionScratch() {
-    this->scores.free();
-    this->probabilities.free();
+    this->scores.releaseDeviceToPool();
+    this->probabilities.releaseDeviceToPool();
     for (CudaMatrix& cached : this->cachedHeadProbabilities)
-        cached.free();
+        cached.releaseDeviceToPool();
     this->cachedHeadProbabilities.clear();
-    this->querySegment.free();
-    this->keySegment.free();
-    this->valueSegment.free();
-    this->attendedSegment.free();
-    this->attendedGradientSegment.free();
-    this->queryGradientSegment.free();
-    this->keyGradientSegment.free();
-    this->valueGradientSegment.free();
-    this->probabilityGradient.free();
-    this->scoreGradient.free();
-    this->valueHeadGradient.free();
-    this->queryHeadGradient.free();
-    this->keyHeadGradient.free();
+    this->querySegment.releaseDeviceToPool();
+    this->keySegment.releaseDeviceToPool();
+    this->valueSegment.releaseDeviceToPool();
+    this->attendedSegment.releaseDeviceToPool();
+    this->attendedGradientSegment.releaseDeviceToPool();
+    this->queryGradientSegment.releaseDeviceToPool();
+    this->keyGradientSegment.releaseDeviceToPool();
+    this->valueGradientSegment.releaseDeviceToPool();
+    this->probabilityGradient.releaseDeviceToPool();
+    this->scoreGradient.releaseDeviceToPool();
+    this->valueHeadGradient.releaseDeviceToPool();
+    this->queryHeadGradient.releaseDeviceToPool();
+    this->keyHeadGradient.releaseDeviceToPool();
 }
 
 void CudaCausalSelfAttention::releaseFlashAttentionScratch() {
-    this->flashLogSumExp.free();
-    this->flashDelta.free();
+    this->flashLogSumExp.releaseDeviceToPool();
+    this->flashDelta.releaseDeviceToPool();
 }
 
 void CudaCausalSelfAttention::releaseActivationScratch() {
     this->releaseFlashAttentionScratch();
     this->releaseDenseAttentionScratch();
-    this->qkvProjected.free();
-    this->query.free();
-    this->key.free();
-    this->value.free();
-    this->queryHead.free();
-    this->keyHead.free();
-    this->valueHead.free();
-    this->attendedHead.free();
-    this->attended.free();
-    this->output.free();
-    this->inputCache.free();
-    this->attendedGradient.free();
-    this->queryGradient.free();
-    this->keyGradient.free();
-    this->valueGradient.free();
-    this->temp.free();
+    this->qkvProjected.releaseDeviceToPool();
+    this->query.releaseDeviceToPool();
+    this->key.releaseDeviceToPool();
+    this->value.releaseDeviceToPool();
+    this->queryHead.releaseDeviceToPool();
+    this->keyHead.releaseDeviceToPool();
+    this->valueHead.releaseDeviceToPool();
+    this->attendedHead.releaseDeviceToPool();
+    this->attended.releaseDeviceToPool();
+    this->output.releaseDeviceToPool();
+    this->inputCache.releaseDeviceToPool();
+    this->attendedGradient.releaseDeviceToPool();
+    this->queryGradient.releaseDeviceToPool();
+    this->keyGradient.releaseDeviceToPool();
+    this->valueGradient.releaseDeviceToPool();
+    this->temp.releaseDeviceToPool();
 }
 
 void CudaCausalSelfAttention::uploadFrom(const CausalSelfAttention& host) {

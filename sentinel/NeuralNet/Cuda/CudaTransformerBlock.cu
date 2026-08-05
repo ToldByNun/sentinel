@@ -134,17 +134,17 @@ void CudaTransformerBlock::releaseTrainActivationScratch(bool keepDeferredHostWe
     this->attentionNorm.releaseActivationScratch();
     this->feedForwardNorm.releaseActivationScratch();
 
-    this->attentionInput.free();
-    this->attended.free();
-    this->afterAttention.free();
-    this->feedForwardInput.free();
-    this->feedForwardOutput.free();
+    this->attentionInput.releaseDeviceToPool();
+    this->attended.releaseDeviceToPool();
+    this->afterAttention.releaseDeviceToPool();
+    this->feedForwardInput.releaseDeviceToPool();
+    this->feedForwardOutput.releaseDeviceToPool();
 
-    this->feedForwardInputGradient.free();
-    this->afterAttentionFromFeedForward.free();
-    this->afterAttentionGradient.free();
-    this->attentionInputGradient.free();
-    this->inputFromAttention.free();
+    this->feedForwardInputGradient.releaseDeviceToPool();
+    this->afterAttentionFromFeedForward.releaseDeviceToPool();
+    this->afterAttentionGradient.releaseDeviceToPool();
+    this->attentionInputGradient.releaseDeviceToPool();
+    this->inputFromAttention.releaseDeviceToPool();
 
     if (!keepDeferredHostWeightGrads) {
         this->feedForwardGateWeightGradient.free();

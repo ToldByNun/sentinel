@@ -1130,6 +1130,9 @@ void CudaLanguageModel::releasePackedTrainWorkspaces() {
 
     for (CudaTransformerBlock& block : this->blocks)
         block.releaseTrainActivationScratch();
+
+    // Drop recycled scratch so the next tune/alloc sees true free VRAM.
+    CudaDeviceBuffer::clearPool();
 }
 
 int CudaLanguageModel::maxPackExamplesForSegment(int segmentLength) const {

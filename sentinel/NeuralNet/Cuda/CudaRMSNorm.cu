@@ -127,10 +127,10 @@ __global__ void CudaRMSNormBackwardThroughResidualEntry(
 }
 
 void CudaRMSNorm::releaseActivationScratch() const {
-    this->inverseRms.free();
-    this->lastInput.free();
-    this->lastNormalized.free();
-    this->backwardScratch.free();
+    this->inverseRms.releaseDeviceToPool();
+    this->lastInput.releaseDeviceToPool();
+    this->lastNormalized.releaseDeviceToPool();
+    this->backwardScratch.releaseDeviceToPool();
 }
 
 void CudaRMSNorm::ensureSelectiveCacheCapacity(size_t embeddingDim, size_t columns) const {
