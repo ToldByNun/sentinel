@@ -1,6 +1,6 @@
 # Sentinel
 
-C++/CUDA framework for **full-train** causal LMs (no LoRA): CPU/OpenMP plus a device train path with packed batches, flash attention, FP16 AMP, int8 Adam / Muon, selective activation checkpointing, and a consumer-GPU **~4B offload** path (FP16 GPU weights + host masters/grads + host SGD).
+C++/CUDA framework for **full-train** causal LMs (no LoRA): CPU/OpenMP plus a device train path with packed batches, flash attention, FP16 AMP, int8 Adam / Muon, selective activation checkpointing, and a consumer-GPU **~4B offload** path (FP16 GPU weights + host FP32 masters + fused FP16 weight-grad D2H + host SGD).
 
 **v0.1** ships as an installable C++ library (`Sentinel::sentinel`), a demo harness, examples, and a **pip-installable Python package** (`sentinel-lm`).
 
@@ -200,7 +200,7 @@ model.train(source, epochs, 1, batchSize, gradAccum);
 | AMP                 | FP16 GEMMs + saturated FP16 block-input checkpoints; loss scale when embed≥256                                                                                   |
 | Adam                | Int8 moments on GPU; or `setCudaPreferCpuAdamOffload(true)` (host `m`/`v`)                                                                                       |
 | Muon                | `setCudaPreferMuon(true)` — Newton–Schulz on 2D hidden weights; Adam on embed / norms / biases / head                                                            |
-| Large-model offload | `preferFp16GpuWeights` + `preferHostGradients` + `preferHostSgd` — FP16 weights on GPU, FP32 masters/grads on host, SGD (no Adam `m`/`v`). Used by the 4B probe. |
+| Large-model offload | `preferFp16GpuWeights` + `preferHostGradients` + `preferHostSgd` — FP16 weights on GPU, FP32 masters on host, **fused FP16** weight-grad slab D2H + in-place host SGD from half (no Adam `m`/`v`). Used by the 4B probe. |
 | Weight tying        | On — LM head shares token embedding                                                                                                                              |
 | Activation ckpt     | Default **Off** (retain act scratch across steps). `Selective`/`Full` when VRAM is tight; `enableActivationCheckpointing(bool)` maps true→Selective, false→Off   |
 | CUDA graphs         | Only when checkpointing is **Off** and shapes are stable (`preferTrainGraph`)                                                                                    |
@@ -257,15 +257,16 @@ Full SERA epoch numbers still need `sera_scale.jsonl` + `runScale100M=true`.
 
 ### ~4B — FP16 GPU + host SGD (fits 16 GB)
 
-`runScale4BTrainStep` — one packed train step (not multi-epoch):
+`runScale4BTrainStep` / `benchmarks/_lib/probe_4b_safe.py` — packed train probe (not multi-epoch). Measured on **RTX 5070 Ti 16 GB** (WDDM):
 
 |            |                                                                                               |
 | ---------- | --------------------------------------------------------------------------------------------- |
-| Shape      | vocab 32k, d=3072, L=34, H=48, maxPos=2048, seq=512, auto pack (target 4096 tokens)        |
-| Mode       | FP16 GPU weights, host FP32 masters/grads, **host SGD** (no Adam moments), **Selective** ckpt (falls back to Full if VRAM tight), flash |
-| Host RAM   | ~15 GiB masters+grads (Adam `m`/`v` would roughly double that)                                |
-| Full step  | re-measure after selective+auto-pack (was ~320–330 tok/s with Full ckpt + pack=8)             |
-| Bottleneck | was Full-ckpt bwd recompute; selective + stream-sync (not global cudaDeviceSynchronize) in train hot path |
+| Shape      | vocab 32k, d=3072, L=34, H=48, maxPos=2048, seq=512, **Full** ckpt, pack=8 (4096 tokens/step) |
+| Mode       | FP16 GPU weights, host FP32 masters, **fused FP16** weight-grad D2H + async host SGD from half (no Adam moments), flash |
+| VRAM       | ~12.4–12.5 GiB                                                                                |
+| Host RAM   | ~FP32 masters (~7–8 GiB); Adam `m`/`v` would roughly double that                              |
+| Probe      | **~800–840** tok/s (~4.8–5.1 s/step warm)                                                     |
+| Notes      | Pipeline overlaps fused-half D2H with the next layer’s GPU bwd; host SGD trails 2–3 layers deep. Selective / denser pack regresses on this GPU vs Full@4096. |
 
 Smaller smoke: `CudaLanguageModel::runConsumerVramDemo()` (~8k/256/4L).
 

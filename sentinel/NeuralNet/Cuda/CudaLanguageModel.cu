@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cuda_runtime.h>
+#include <deque>
 #include <future>
 #include <limits>
 #include <memory>
@@ -362,20 +363,39 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
     const auto bwdLoopStart = std::chrono::steady_clock::now();
 
     int pendingHostSgdBlock = -1;
-    int asyncHostSgdBlock = -1;
-    std::future<void> asyncHostSgdFuture;
-    auto finishAsyncHostSgd = [&]() {
-        if (!asyncHostSgdFuture.valid()) return;
+    // Depth ≥3: fused-half SGD (~one layer of host work) must trail several GPU bwds.
+    constexpr int kMaxAsyncHostSgd = 3;
+    struct AsyncHostSgdJob {
+        int blockIndex = -1;
+        std::future<void> future;
+    };
+    std::deque<AsyncHostSgdJob> asyncHostSgdJobs;
+    auto finishOldestAsyncHostSgd = [&]() {
+        if (asyncHostSgdJobs.empty()) return;
+        AsyncHostSgdJob job = std::move(asyncHostSgdJobs.front());
+        asyncHostSgdJobs.pop_front();
         const auto sgdWaitStart = std::chrono::steady_clock::now();
-        asyncHostSgdFuture.get();
+        job.future.get();
         if (phaseTrace)
             this->trainPhaseTimers.sgdSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - sgdWaitStart).count();
-        if (asyncHostSgdBlock >= 0 && pipelineHostSgd && CudaAdam::preferFp16GpuWeights) {
+        if (job.blockIndex >= 0 && pipelineHostSgd && CudaAdam::preferFp16GpuWeights) {
             this->uploadHostBlockFp16WeightsAsync(
-                static_cast<size_t>(asyncHostSgdBlock),
+                static_cast<size_t>(job.blockIndex),
                 this->hostWeightUploadStream != nullptr ? this->hostWeightUploadStream : this->hostGradCopyStream);
         }
-        asyncHostSgdBlock = -1;
+    };
+    auto finishAllAsyncHostSgd = [&]() {
+        while (!asyncHostSgdJobs.empty())
+            finishOldestAsyncHostSgd();
+    };
+    auto hostSgdStepScale = [this]() -> float {
+        float invLoss = 1.0f;
+        if (CudaAmp::lossScalingActive()) {
+            const float scale = CudaAmp::lossScaler.scale;
+            if (!(scale > 0.0f) || !std::isfinite(scale)) return 0.0f;
+            invLoss = 1.0f / scale;
+        }
+        return this->adam.learningRate * invLoss;
     };
     auto flushPendingHostSgd = [&]() {
         if (pendingHostSgdBlock < 0) return;
@@ -385,21 +405,26 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
             "runPackedTrainDevice hostGrad D2H sync");
         if (phaseTrace)
             this->trainPhaseTimers.d2hSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - d2hWaitStart).count();
-        CudaOps::flushPinnedD2hToHost();
+
+        // Copy-stream event covers all queued fused-half D2Hs; free device packs before expand/SGD.
+        CudaOps::releaseCompletedFusedHalfDevices();
 
         // Recycle device weight-grad buffers into the next layer instead of cudaFree.
         this->deferredWeightGradRecycle.stealDeferredWeightGradDeviceFrom(
             this->blocks[static_cast<size_t>(pendingHostSgdBlock)]);
 
-        // Finish prior CPU SGD (+ FP16 upload) then run this block's SGD on a worker
-        // so the next layer's GPU bwd overlaps host SGD.
-        finishAsyncHostSgd();
+        while (static_cast<int>(asyncHostSgdJobs.size()) >= kMaxAsyncHostSgd)
+            finishOldestAsyncHostSgd();
+
         const int blockToSgd = pendingHostSgdBlock;
         pendingHostSgdBlock = -1;
-        asyncHostSgdBlock = blockToSgd;
-        asyncHostSgdFuture = std::async(std::launch::async, [this, blockToSgd]() {
-            this->applyHostSgdForBlockAndFree(static_cast<size_t>(blockToSgd), 1.0f);
-        });
+        const float stepScale = hostSgdStepScale();
+        // Direct FP16→master SGD on a worker; depth lets it trail multiple GPU bwds.
+        asyncHostSgdJobs.push_back(AsyncHostSgdJob{
+            blockToSgd,
+            std::async(std::launch::async, [stepScale]() {
+                CudaOps::applyFusedHalfHostSgd(stepScale);
+            })});
     };
 
     for (int blockIndex = static_cast<int>(this->blocks.size()) - 1; blockIndex >= 0; --blockIndex) {
@@ -416,15 +441,17 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
         CudaTransformerBlockHostWeightGrads hostGrads{};
         CudaTransformerBlockHostWeightGrads* hostGradsPtr = nullptr;
         if (hostLarge) {
-            this->ensureHostWeightGradsForBlock(static_cast<size_t>(blockIndex));
+            // Fused-half Host-SGD applies directly into FP32 masters (no host grad buffers).
+            if (this->hostBlockAdamStates.size() != this->blocks.size())
+                this->hostBlockAdamStates.resize(this->blocks.size());
             CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[static_cast<size_t>(blockIndex)];
-            hostGrads.queryWeight = &hosts.queryWeightGrad;
-            hostGrads.keyWeight = &hosts.keyWeightGrad;
-            hostGrads.valueWeight = &hosts.valueWeightGrad;
-            hostGrads.attentionOutputWeight = &hosts.attentionOutputWeightGrad;
-            hostGrads.feedForwardGateWeight = &hosts.feedForwardGateWeightGrad;
-            hostGrads.feedForwardUpWeight = &hosts.feedForwardUpWeightGrad;
-            hostGrads.feedForwardDownWeight = &hosts.feedForwardDownWeightGrad;
+            hostGrads.queryWeight = &hosts.queryWeightMaster;
+            hostGrads.keyWeight = &hosts.keyWeightMaster;
+            hostGrads.valueWeight = &hosts.valueWeightMaster;
+            hostGrads.attentionOutputWeight = &hosts.attentionOutputWeightMaster;
+            hostGrads.feedForwardGateWeight = &hosts.feedForwardGateWeightMaster;
+            hostGrads.feedForwardUpWeight = &hosts.feedForwardUpWeightMaster;
+            hostGrads.feedForwardDownWeight = &hosts.feedForwardDownWeightMaster;
             hostGradsPtr = &hostGrads;
         }
 
@@ -490,6 +517,11 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
         }
 
         if (deferDownload) {
+            // Finish previous block's D2H+SGD first while this block's grads are still only on device.
+            // (Must run BEFORE recording a new hostGradD2hEvent, or we sync the wrong layer and
+            // serialize cast/D2H against the next GPU bwd.)
+            flushPendingHostSgd();
+
             CudaMatmul::throwIfCudaFailed(
                 cudaEventRecord(this->hostGradComputeEvent, CudaMatmul::activeStream()),
                 "runPackedTrainDevice record hostGradComputeEvent");
@@ -501,7 +533,6 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
             CudaMatmul::throwIfCudaFailed(
                 cudaEventRecord(this->hostGradD2hEvent, this->hostGradCopyStream),
                 "runPackedTrainDevice record hostGradD2hEvent");
-            flushPendingHostSgd(); // previous block: wait D2H + SGD while this D2H (+ next GPU) run
             pendingHostSgdBlock = blockIndex;
         } else if (hostLarge && CudaAdam::preferHostSgd) {
             this->applyHostSgdForBlockAndFree(static_cast<size_t>(blockIndex), 1.0f);
@@ -516,7 +547,7 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
     }
 
     flushPendingHostSgd();
-    finishAsyncHostSgd();
+    finishAllAsyncHostSgd();
     // Keep deferredWeightGradRecycle across steps (first bwd layer reuses it).
 
     {

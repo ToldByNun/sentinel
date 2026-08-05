@@ -111,16 +111,40 @@ public:
         cudaStream_t stream);
 
     /// <summary>
+    /// Fused FP16 gradient slab offload: cast device float grads → one half pack on stream,
+    /// queue a single D2H. After the D2H event, flushPinnedD2hToHost expands half → host float.
+    /// Cuts Host-SGD PCIe volume ~2× vs FP32 D2H (same training math up to FP16 grad noise).
+    /// </summary>
+    static void beginFusedHalfGradOffload();
+    static void appendFusedHalfGradOffload(
+        Matrix& hostOut,
+        const float* deviceFloat,
+        size_t rows,
+        size_t cols);
+    static void commitFusedHalfGradOffload(cudaStream_t stream);
+
+    /// <summary>
     /// seal the open pinned-D2H batch (call after enqueueing one block's downloads,
     /// before recording the D2H-complete event)
     /// </summary>
     static void commitPinnedD2hBatch();
 
     /// <summary>
-    /// after the matching D2H copy-stream event is complete: memcpy oldest pinned
-    /// batch → host matrices and release staging slots
+    /// after the matching D2H copy-stream event is complete: expand fused half slab → host floats
     /// </summary>
     static void flushPinnedD2hToHost();
+
+    /// <summary>
+    /// like flushPinnedD2hToHost, but apply SGD directly into piece host matrices (masters):
+    /// master -= stepScale * half2float(grad). Skips float materialization (half PCIe + half CPU traffic).
+    /// </summary>
+    static void applyFusedHalfHostSgd(float stepScale);
+
+    /// <summary>
+    /// after D2H event sync: free fused-half device packs still held in the ready queue
+    /// (host pins stay until flushPinnedD2hToHost / applyFusedHalfHostSgd)
+    /// </summary>
+    static void releaseCompletedFusedHalfDevices();
 
     /// <summary>cudaHostUnregister for a matrix previously passed to downloadIntoHostAsync (no-op if empty)</summary>
     static void unregisterHostMatrix(Matrix& host);

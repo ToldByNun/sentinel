@@ -9,9 +9,15 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
+
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 
 double* CudaOps::downloadAddIntoHostSecondsSink = nullptr;
 
@@ -1093,12 +1099,236 @@ void CudaOps::downloadIntoHostAsync(Matrix& hostOut, const CudaMatrix& deviceSou
     CudaOps::downloadIntoHostAsyncSlice(hostOut, deviceSource, 0, deviceSource.rows, deviceSource.cols, stream);
 }
 
+namespace {
+__global__ void CudaOpsCastFloatToHalfEntry(const float* source, __half* destination, int elementCount) {
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+    destination[index] = __float2half(source[index]);
+}
+
+struct FusedHalfGradPiece {
+    Matrix* host = nullptr;
+    const float* deviceFloat = nullptr;
+    size_t halfOffset = 0;
+    size_t elementCount = 0;
+    size_t rows = 0;
+    size_t cols = 0;
+};
+
+// Pipeline depth: in-flight D2H + async expand/SGD + next commit. Shared (not TLS) so the
+// SGD worker can pop batches committed on the main thread.
+constexpr int kFusedHalfHostSlots = 8;
+struct FusedHalfHostSlot {
+    uint16_t* data = nullptr;
+    size_t capacityBytes = 0;
+    bool inUse = false;
+};
+struct FusedHalfDeviceSlot {
+    CudaDeviceBuffer pack;
+    bool inUse = false;
+};
+struct FusedHalfGradBatch {
+    std::vector<FusedHalfGradPiece> pieces;
+    uint16_t* hostHalf = nullptr;
+    FusedHalfDeviceSlot* deviceSlot = nullptr;
+    size_t elementCount = 0;
+};
+
+FusedHalfHostSlot g_fusedHalfHostSlots[kFusedHalfHostSlots];
+FusedHalfDeviceSlot g_fusedHalfDeviceSlots[kFusedHalfHostSlots];
+std::mutex g_fusedHalfReadyMutex;
+std::mutex g_fusedHalfFreelistMutex;
+std::vector<FusedHalfGradBatch> g_fusedHalfReadyBatches;
+thread_local std::vector<FusedHalfGradPiece> g_fusedHalfOpenPieces;
+thread_local size_t g_fusedHalfOpenElements = 0;
+
+uint16_t* acquireFusedHalfHost(size_t bytes) {
+    std::lock_guard<std::mutex> lock(g_fusedHalfFreelistMutex);
+    for (int i = 0; i < kFusedHalfHostSlots; ++i) {
+        FusedHalfHostSlot& slot = g_fusedHalfHostSlots[i];
+        if (slot.inUse) continue;
+        if (slot.capacityBytes < bytes) {
+            if (slot.data != nullptr) {
+                cudaFreeHost(slot.data);
+                slot.data = nullptr;
+                slot.capacityBytes = 0;
+            }
+            void* pinned = nullptr;
+            const cudaError_t status = cudaMallocHost(&pinned, bytes);
+            if (status != cudaSuccess)
+                throw std::runtime_error(std::string("cudaMallocHost fused half grads: ") + cudaGetErrorString(status));
+            slot.data = static_cast<uint16_t*>(pinned);
+            slot.capacityBytes = bytes;
+        }
+        slot.inUse = true;
+        return slot.data;
+    }
+    throw std::runtime_error("CudaOps fused half host freelist exhausted");
+}
+
+FusedHalfDeviceSlot* acquireFusedHalfDevice(size_t halfBytes) {
+    std::lock_guard<std::mutex> lock(g_fusedHalfFreelistMutex);
+    for (int i = 0; i < kFusedHalfHostSlots; ++i) {
+        FusedHalfDeviceSlot& slot = g_fusedHalfDeviceSlots[i];
+        if (slot.inUse) continue;
+        slot.pack.ensureCapacity(halfBytes);
+        slot.inUse = true;
+        return &slot;
+    }
+    throw std::runtime_error("CudaOps fused half device freelist exhausted");
+}
+
+void releaseFusedHalfHost(uint16_t* data) {
+    if (data == nullptr) return;
+    std::lock_guard<std::mutex> lock(g_fusedHalfFreelistMutex);
+    for (int i = 0; i < kFusedHalfHostSlots; ++i) {
+        if (g_fusedHalfHostSlots[i].data == data) {
+            g_fusedHalfHostSlots[i].inUse = false;
+            return;
+        }
+    }
+}
+
+void releaseFusedHalfDevice(FusedHalfDeviceSlot* slot) {
+    if (slot == nullptr) return;
+    std::lock_guard<std::mutex> lock(g_fusedHalfFreelistMutex);
+    slot->inUse = false;
+}
+} // namespace
+
+void CudaOps::beginFusedHalfGradOffload() {
+    g_fusedHalfOpenPieces.clear();
+    g_fusedHalfOpenElements = 0;
+}
+
+void CudaOps::appendFusedHalfGradOffload(Matrix& hostOut, const float* deviceFloat, size_t rows, size_t cols) {
+    if (deviceFloat == nullptr) throw std::invalid_argument("appendFusedHalfGradOffload null deviceFloat");
+    if (rows == 0 || cols == 0) throw std::invalid_argument("appendFusedHalfGradOffload empty shape");
+    const size_t elementCount = rows * cols;
+    hostOut.ensureSize(rows, cols);
+    FusedHalfGradPiece piece;
+    piece.host = &hostOut;
+    piece.deviceFloat = deviceFloat;
+    piece.halfOffset = g_fusedHalfOpenElements;
+    piece.elementCount = elementCount;
+    piece.rows = rows;
+    piece.cols = cols;
+    g_fusedHalfOpenPieces.push_back(piece);
+    g_fusedHalfOpenElements += elementCount;
+}
+
+void CudaOps::commitFusedHalfGradOffload(cudaStream_t stream) {
+    if (g_fusedHalfOpenPieces.empty() || g_fusedHalfOpenElements == 0) return;
+    if (stream == nullptr) throw std::invalid_argument("commitFusedHalfGradOffload null stream");
+
+    const size_t halfBytes = g_fusedHalfOpenElements * sizeof(__half);
+    FusedHalfDeviceSlot* deviceSlot = acquireFusedHalfDevice(halfBytes);
+    uint16_t* hostHalf = acquireFusedHalfHost(halfBytes);
+    __half* deviceHalf = reinterpret_cast<__half*>(deviceSlot->pack.deviceData);
+
+    for (const FusedHalfGradPiece& piece : g_fusedHalfOpenPieces) {
+        const int n = static_cast<int>(piece.elementCount);
+        const int threads = 256;
+        const int blocks = (n + threads - 1) / threads;
+        CudaOpsCastFloatToHalfEntry<<<blocks, threads, 0, stream>>>(
+            piece.deviceFloat,
+            deviceHalf + piece.halfOffset,
+            n);
+        CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsCastFloatToHalfEntry launch");
+    }
+
+    CudaMatmul::throwIfCudaFailed(
+        cudaMemcpyAsync(hostHalf, deviceHalf, halfBytes, cudaMemcpyDeviceToHost, stream),
+        "commitFusedHalfGradOffload D2H");
+
+    FusedHalfGradBatch batch;
+    batch.pieces = std::move(g_fusedHalfOpenPieces);
+    batch.hostHalf = hostHalf;
+    batch.deviceSlot = deviceSlot;
+    batch.elementCount = g_fusedHalfOpenElements;
+    {
+        std::lock_guard<std::mutex> lock(g_fusedHalfReadyMutex);
+        g_fusedHalfReadyBatches.push_back(std::move(batch));
+    }
+    g_fusedHalfOpenPieces.clear();
+    g_fusedHalfOpenElements = 0;
+}
+
 void CudaOps::commitPinnedD2hBatch() {
-    // no-op when D2H goes straight into host matrices
+    // Fused half path commits inside enqueueDeferred via commitFusedHalfGradOffload.
 }
 
 void CudaOps::flushPinnedD2hToHost() {
-    // no-op when D2H goes straight into host matrices
+    FusedHalfGradBatch batch;
+    {
+        std::lock_guard<std::mutex> lock(g_fusedHalfReadyMutex);
+        if (g_fusedHalfReadyBatches.empty()) return;
+        batch = std::move(g_fusedHalfReadyBatches.front());
+        g_fusedHalfReadyBatches.erase(g_fusedHalfReadyBatches.begin());
+    }
+
+    if (batch.deviceSlot != nullptr) {
+        releaseFusedHalfDevice(batch.deviceSlot);
+        batch.deviceSlot = nullptr;
+    }
+
+#if defined(_OPENMP)
+    #pragma omp parallel for schedule(dynamic)
+#endif
+    for (int pieceIndex = 0; pieceIndex < static_cast<int>(batch.pieces.size()); ++pieceIndex) {
+        const FusedHalfGradPiece& piece = batch.pieces[static_cast<size_t>(pieceIndex)];
+        if (piece.host == nullptr || batch.hostHalf == nullptr) continue;
+        piece.host->ensureSize(piece.rows, piece.cols);
+        float* dst = piece.host->data.data();
+        const __half* src = reinterpret_cast<const __half*>(batch.hostHalf + piece.halfOffset);
+        for (size_t i = 0; i < piece.elementCount; ++i)
+            dst[i] = __half2float(src[i]);
+    }
+    releaseFusedHalfHost(batch.hostHalf);
+}
+
+void CudaOps::applyFusedHalfHostSgd(float stepScale) {
+    FusedHalfGradBatch batch;
+    {
+        std::lock_guard<std::mutex> lock(g_fusedHalfReadyMutex);
+        if (g_fusedHalfReadyBatches.empty()) return;
+        batch = std::move(g_fusedHalfReadyBatches.front());
+        g_fusedHalfReadyBatches.erase(g_fusedHalfReadyBatches.begin());
+    }
+
+    if (batch.deviceSlot != nullptr) {
+        releaseFusedHalfDevice(batch.deviceSlot);
+        batch.deviceSlot = nullptr;
+    }
+
+#if defined(_OPENMP)
+    #pragma omp parallel for schedule(dynamic)
+#endif
+    for (int pieceIndex = 0; pieceIndex < static_cast<int>(batch.pieces.size()); ++pieceIndex) {
+        const FusedHalfGradPiece& piece = batch.pieces[static_cast<size_t>(pieceIndex)];
+        if (piece.host == nullptr || batch.hostHalf == nullptr) continue;
+        if (piece.host->data.size() != piece.elementCount)
+            throw std::runtime_error("CudaOps::applyFusedHalfHostSgd master size mismatch");
+        float* master = piece.host->data.data();
+        const __half* grad = reinterpret_cast<const __half*>(batch.hostHalf + piece.halfOffset);
+        for (size_t i = 0; i < piece.elementCount; ++i)
+            master[i] -= stepScale * __half2float(grad[i]);
+    }
+    releaseFusedHalfHost(batch.hostHalf);
+}
+
+void CudaOps::releaseCompletedFusedHalfDevices() {
+    std::vector<FusedHalfDeviceSlot*> toRelease;
+    {
+        std::lock_guard<std::mutex> lock(g_fusedHalfReadyMutex);
+        for (FusedHalfGradBatch& batch : g_fusedHalfReadyBatches) {
+            if (batch.deviceSlot == nullptr) continue;
+            toRelease.push_back(batch.deviceSlot);
+            batch.deviceSlot = nullptr;
+        }
+    }
+    for (FusedHalfDeviceSlot* slot : toRelease)
+        releaseFusedHalfDevice(slot);
 }
 
 void CudaOps::downloadIntoHostAsyncSlice(
