@@ -2667,7 +2667,8 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
 
         if (!this->tieEmbeddingProjection)
             pushOffload(this->projectionWeight, this->hostProjectionWeightState, &gradients.projectionWeight, &this->hostProjectionWeightMaster, nullptr);
-        pushOffload(this->projectionBias, this->hostProjectionBiasState, &gradients.projectionBias, &this->hostProjectionBiasMaster, nullptr);
+        if (this->useBias)
+            pushOffload(this->projectionBias, this->hostProjectionBiasState, &gradients.projectionBias, &this->hostProjectionBiasMaster, nullptr);
         pushOffload(this->finalNorm.gamma, this->hostFinalNormGammaState, &gradients.finalNormGamma, &this->hostFinalNormGammaMaster, nullptr);
 
         for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
@@ -2688,9 +2689,11 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
             }
             pushOffload(block.attentionNorm.gamma, blockStates.attentionNormGamma, &blockGradients.attentionNormGamma, &blockStates.attentionNormGammaMaster, nullptr);
             pushOffload(block.feedForwardNorm.gamma, blockStates.feedForwardNormGamma, &blockGradients.feedForwardNormGamma, &blockStates.feedForwardNormGammaMaster, nullptr);
-            pushOffload(block.feedForward.gateBias, blockStates.feedForwardGateBias, &blockGradients.feedForwardGateBias, &blockStates.feedForwardGateBiasMaster, nullptr);
-            pushOffload(block.feedForward.upBias, blockStates.feedForwardUpBias, &blockGradients.feedForwardUpBias, &blockStates.feedForwardUpBiasMaster, nullptr);
-            pushOffload(block.feedForward.downBias, blockStates.feedForwardDownBias, &blockGradients.feedForwardDownBias, &blockStates.feedForwardDownBiasMaster, nullptr);
+            if (this->useBias) {
+                pushOffload(block.feedForward.gateBias, blockStates.feedForwardGateBias, &blockGradients.feedForwardGateBias, &blockStates.feedForwardGateBiasMaster, nullptr);
+                pushOffload(block.feedForward.upBias, blockStates.feedForwardUpBias, &blockGradients.feedForwardUpBias, &blockStates.feedForwardUpBiasMaster, nullptr);
+                pushOffload(block.feedForward.downBias, blockStates.feedForwardDownBias, &blockGradients.feedForwardDownBias, &blockStates.feedForwardDownBiasMaster, nullptr);
+            }
         }
 
         pushOffload(this->tokenEmbeddingWeight, this->hostTokenEmbeddingState, &gradients.tokenEmbedding, &this->hostTokenEmbeddingMaster, nullptr);
@@ -2769,7 +2772,8 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
 
     if (!this->tieEmbeddingProjection)
         pushItem(this->projectionWeight, this->projectionWeightState, gradients.projectionWeight);
-    pushItem(this->projectionBias, this->projectionBiasState, gradients.projectionBias);
+    if (this->useBias)
+        pushItem(this->projectionBias, this->projectionBiasState, gradients.projectionBias);
     pushItem(this->finalNorm.gamma, this->finalNormGammaState, gradients.finalNormGamma);
 
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
@@ -2788,9 +2792,11 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
         }
         pushItem(block.attentionNorm.gamma, blockStates.attentionNormGamma, blockGradients.attentionNormGamma);
         pushItem(block.feedForwardNorm.gamma, blockStates.feedForwardNormGamma, blockGradients.feedForwardNormGamma);
-        pushItem(block.feedForward.gateBias, blockStates.feedForwardGateBias, blockGradients.feedForwardGateBias);
-        pushItem(block.feedForward.upBias, blockStates.feedForwardUpBias, blockGradients.feedForwardUpBias);
-        pushItem(block.feedForward.downBias, blockStates.feedForwardDownBias, blockGradients.feedForwardDownBias);
+        if (this->useBias) {
+            pushItem(block.feedForward.gateBias, blockStates.feedForwardGateBias, blockGradients.feedForwardGateBias);
+            pushItem(block.feedForward.upBias, blockStates.feedForwardUpBias, blockGradients.feedForwardUpBias);
+            pushItem(block.feedForward.downBias, blockStates.feedForwardDownBias, blockGradients.feedForwardDownBias);
+        }
     }
 
     pushItem(this->tokenEmbeddingWeight, this->tokenEmbeddingState, gradients.tokenEmbedding);
@@ -3921,6 +3927,7 @@ void CudaLanguageModel::uploadFrom(const LanguageModel& host) {
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaLanguageModel::uploadFrom no CUDA device");
 
     this->tieEmbeddingProjection = host.tieEmbeddingProjection;
+    this->useBias = host.useBias();
     this->tokenEmbeddingWeight.upload(host.tokenEmbedding.weight);
     this->blocks.clear();
     this->blocks.reserve(host.blocks.size());

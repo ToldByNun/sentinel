@@ -84,8 +84,20 @@ LanguageModel::LanguageModel(
     int blockCount,
     int headCount,
     int intermediateSize,
-    float ropeTheta)
-    : tokenEmbedding(vocabularySize, embeddingDim), finalNorm(embeddingDim), outputProjection(UniformInit::matrix(vocabularySize, embeddingDim, 0.1f, 31u), UniformInit::matrix(vocabularySize, 1, 0.01f, 32u)), optimizer(optimizer), maximumPositionCount(maximumPositionCount), tieEmbeddingProjection(true), deviceStale(false), deviceTrainEnabled(false) {
+    float ropeTheta,
+    bool useBias)
+    : tokenEmbedding(vocabularySize, embeddingDim),
+      finalNorm(embeddingDim),
+      outputProjection(
+          UniformInit::matrix(vocabularySize, embeddingDim, 0.1f, 31u),
+          useBias
+              ? UniformInit::matrix(vocabularySize, 1, 0.01f, 32u)
+              : Matrix(static_cast<size_t>(vocabularySize), 1, 0.0f)),
+      optimizer(optimizer),
+      maximumPositionCount(maximumPositionCount),
+      tieEmbeddingProjection(true),
+      deviceStale(false),
+      deviceTrainEnabled(false) {
     if (maximumPositionCount <= 0) throw std::invalid_argument("LanguageModel maximumPositionCount must be > 0");
     if (blockCount <= 0) throw std::invalid_argument("LanguageModel blockCount must be > 0");
     if (headCount <= 0) throw std::invalid_argument("LanguageModel headCount must be > 0");
@@ -100,7 +112,8 @@ LanguageModel::LanguageModel(
             maximumPositionCount,
             21u + static_cast<unsigned>(blockIndex) * 100u,
             intermediateSize,
-            ropeTheta));
+            ropeTheta,
+            useBias));
 
     // weight tying: LM head shares tokenEmbedding; drop untied projection weight + Adam
     this->outputProjection.weight = Matrix();
@@ -119,6 +132,11 @@ int LanguageModel::intermediateSize() const {
 float LanguageModel::ropeTheta() const {
     if (this->blocks.empty()) return RotaryEmbedding::DefaultBase;
     return this->blocks[0].attention.rotaryEmbedding.base;
+}
+
+bool LanguageModel::useBias() const {
+    if (this->blocks.empty()) return true;
+    return this->blocks[0].feedForward.useBias;
 }
 
 Matrix& LanguageModel::lmHeadWeight() {
@@ -849,8 +867,10 @@ Matrix LanguageModel::sumColumns(const Matrix& gradient) {
 
 Matrix LanguageModel::broadcastBiasAdd(const Matrix& product, const Matrix& bias) {
     Matrix result = product;
+    if (bias.empty()) return result;
     for (size_t row = 0; row < result.rows; ++row) {
         const float biasValue = bias.at(row, 0);
+        if (biasValue == 0.0f) continue;
         for (size_t column = 0; column < result.cols; ++column)
             result.at(row, column) += biasValue;
     }
@@ -872,6 +892,8 @@ Matrix LanguageModel::forwardLocal(const std::vector<int>& tokenIds, LanguageMod
 
     cache.blockOutput = this->finalNorm.forward(hidden, cache.finalNormCache);
     Matrix product = Matrix::multiply(this->lmHeadWeight(), cache.blockOutput);
+    if (!this->useBias())
+        return product;
     return LanguageModel::broadcastBiasAdd(product, this->outputProjection.bias);
 }
 
@@ -925,7 +947,9 @@ float LanguageModel::accumulateExample(const LanguageModelExample& example, Lang
 
     Matrix logitGradient = CrossEntropy::gradient(cache.probabilities, target);
     Matrix projectionWeightGradient = Matrix::multiply(logitGradient, cache.blockOutput, false, true);
-    Matrix projectionBiasGradient = LanguageModel::sumColumns(logitGradient);
+    Matrix projectionBiasGradient = this->useBias()
+        ? LanguageModel::sumColumns(logitGradient)
+        : Matrix(static_cast<size_t>(this->tokenEmbedding.vocabSize()), 1, 0.0f);
     Matrix hiddenGradient = Matrix::multiply(this->lmHeadWeight(), logitGradient, true, false);
 
     Matrix finalNormGammaGradient;
@@ -951,7 +975,8 @@ void LanguageModel::applyGradients(const LanguageModelGradients& gradients) {
     this->optimizer.step();
     if (!this->tieEmbeddingProjection)
         this->optimizer.update(this->outputProjection.weight, this->projectionWeightState, gradients.projectionWeight);
-    this->optimizer.update(this->outputProjection.bias, this->projectionBiasState, gradients.projectionBias);
+    if (this->useBias())
+        this->optimizer.update(this->outputProjection.bias, this->projectionBiasState, gradients.projectionBias);
     this->optimizer.update(this->finalNorm.gamma, this->finalNormGammaState, gradients.finalNormGamma);
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex)
         this->blocks[blockIndex].applyGradients(this->optimizer, gradients.blocks[blockIndex]);
@@ -1570,6 +1595,7 @@ void LanguageModel::saveSafeTensors(const std::string& path) {
     file.metadata["head_count"] = std::to_string(this->blocks[0].attention.headCount);
     file.metadata["intermediate_size"] = std::to_string(this->intermediateSize());
     file.metadata["rope_theta"] = std::to_string(this->ropeTheta());
+    file.metadata["use_bias"] = this->useBias() ? "1" : "0";
     file.metadata["tie_embedding"] = this->tieEmbeddingProjection ? "1" : "0";
 
     SafeTensors::putMatrix(file, "token_embedding.weight", this->tokenEmbedding.weight);
@@ -1583,16 +1609,19 @@ void LanguageModel::saveSafeTensors(const std::string& path) {
         SafeTensors::putMatrix(file, prefix + "attn_norm.weight", block.attentionNorm.gamma);
         SafeTensors::putMatrix(file, prefix + "ffn_norm.weight", block.feedForwardNorm.gamma);
         SafeTensors::putMatrix(file, prefix + "ffn.gate_proj.weight", block.feedForward.gateWeight);
-        SafeTensors::putMatrix(file, prefix + "ffn.gate_proj.bias", block.feedForward.gateBias);
         SafeTensors::putMatrix(file, prefix + "ffn.up_proj.weight", block.feedForward.upWeight);
-        SafeTensors::putMatrix(file, prefix + "ffn.up_proj.bias", block.feedForward.upBias);
         SafeTensors::putMatrix(file, prefix + "ffn.down_proj.weight", block.feedForward.downWeight);
-        SafeTensors::putMatrix(file, prefix + "ffn.down_proj.bias", block.feedForward.downBias);
+        if (this->useBias()) {
+            SafeTensors::putMatrix(file, prefix + "ffn.gate_proj.bias", block.feedForward.gateBias);
+            SafeTensors::putMatrix(file, prefix + "ffn.up_proj.bias", block.feedForward.upBias);
+            SafeTensors::putMatrix(file, prefix + "ffn.down_proj.bias", block.feedForward.downBias);
+        }
     }
     SafeTensors::putMatrix(file, "final_norm.weight", this->finalNorm.gamma);
     if (!this->tieEmbeddingProjection)
         SafeTensors::putMatrix(file, "lm_head.weight", this->outputProjection.weight);
-    SafeTensors::putMatrix(file, "lm_head.bias", this->outputProjection.bias);
+    if (this->useBias())
+        SafeTensors::putMatrix(file, "lm_head.bias", this->outputProjection.bias);
 
     SafeTensors::save(path, file);
 }
@@ -1621,19 +1650,32 @@ void LanguageModel::loadSafeTensors(const std::string& path) {
         return std::stof(it->second);
     };
     const float ropeTheta = metaFloat("rope_theta", this->ropeTheta());
+    const auto metaBool = [&](const char* key, bool fallback) -> bool {
+        const auto it = file.metadata.find(key);
+        if (it == file.metadata.end()) return fallback;
+        return it->second == "1" || it->second == "true";
+    };
+    const bool useBias = metaBool("use_bias", this->useBias());
     if (vocabularySize != this->tokenEmbedding.vocabSize()
         || embeddingDim != this->tokenEmbedding.embeddingDim()
         || maximumPositionCount != this->maximumPositionCount
         || blockCount != static_cast<int>(this->blocks.size())
         || headCount != this->blocks[0].attention.headCount
         || intermediateSize != this->intermediateSize()
-        || std::fabs(ropeTheta - this->ropeTheta()) > 1.0e-3f * (std::max)(1.0f, std::fabs(this->ropeTheta())))
+        || std::fabs(ropeTheta - this->ropeTheta()) > 1.0e-3f * (std::max)(1.0f, std::fabs(this->ropeTheta()))
+        || useBias != this->useBias())
         throw std::runtime_error("LanguageModel::loadSafeTensors architecture mismatch");
 
     const auto tieIt = file.metadata.find("tie_embedding");
     const bool tieWeights = tieIt == file.metadata.end()
         ? this->tieEmbeddingProjection
         : (tieIt->second == "1" || tieIt->second == "true");
+
+    auto loadBiasOrZero = [&](const std::string& name, size_t rows) -> Matrix {
+        if (file.tensors.find(name) == file.tensors.end())
+            return Matrix(rows, 1, 0.0f);
+        return SafeTensors::requireMatrixFlexible(file, name, rows, 1);
+    };
 
     this->tokenEmbedding.weight = SafeTensors::requireMatrix(
         file, "token_embedding.weight",
@@ -1650,11 +1692,18 @@ void LanguageModel::loadSafeTensors(const std::string& path) {
         block.attentionNorm.gamma = SafeTensors::requireMatrixFlexible(file, prefix + "attn_norm.weight", d, 1);
         block.feedForwardNorm.gamma = SafeTensors::requireMatrixFlexible(file, prefix + "ffn_norm.weight", d, 1);
         block.feedForward.gateWeight = SafeTensors::requireMatrix(file, prefix + "ffn.gate_proj.weight", block.feedForward.gateWeight.rows, block.feedForward.gateWeight.cols);
-        block.feedForward.gateBias = SafeTensors::requireMatrixFlexible(file, prefix + "ffn.gate_proj.bias", block.feedForward.gateBias.rows, 1);
         block.feedForward.upWeight = SafeTensors::requireMatrix(file, prefix + "ffn.up_proj.weight", block.feedForward.upWeight.rows, block.feedForward.upWeight.cols);
-        block.feedForward.upBias = SafeTensors::requireMatrixFlexible(file, prefix + "ffn.up_proj.bias", block.feedForward.upBias.rows, 1);
         block.feedForward.downWeight = SafeTensors::requireMatrix(file, prefix + "ffn.down_proj.weight", block.feedForward.downWeight.rows, block.feedForward.downWeight.cols);
-        block.feedForward.downBias = SafeTensors::requireMatrixFlexible(file, prefix + "ffn.down_proj.bias", block.feedForward.downBias.rows, 1);
+        block.feedForward.useBias = useBias;
+        if (useBias) {
+            block.feedForward.gateBias = loadBiasOrZero(prefix + "ffn.gate_proj.bias", block.feedForward.gateBias.rows);
+            block.feedForward.upBias = loadBiasOrZero(prefix + "ffn.up_proj.bias", block.feedForward.upBias.rows);
+            block.feedForward.downBias = loadBiasOrZero(prefix + "ffn.down_proj.bias", block.feedForward.downBias.rows);
+        } else {
+            block.feedForward.gateBias = Matrix(block.feedForward.gateBias.rows, 1, 0.0f);
+            block.feedForward.upBias = Matrix(block.feedForward.upBias.rows, 1, 0.0f);
+            block.feedForward.downBias = Matrix(block.feedForward.downBias.rows, 1, 0.0f);
+        }
     }
 
     this->finalNorm.gamma = SafeTensors::requireMatrixFlexible(file, "final_norm.weight", static_cast<size_t>(embeddingDim), 1);
@@ -1667,8 +1716,9 @@ void LanguageModel::loadSafeTensors(const std::string& path) {
             file, "lm_head.weight",
             static_cast<size_t>(vocabularySize), static_cast<size_t>(embeddingDim));
     }
-    this->outputProjection.bias = SafeTensors::requireMatrixFlexible(
-        file, "lm_head.bias", static_cast<size_t>(vocabularySize), 1);
+    this->outputProjection.bias = useBias
+        ? loadBiasOrZero("lm_head.bias", static_cast<size_t>(vocabularySize))
+        : Matrix(static_cast<size_t>(vocabularySize), 1, 0.0f);
 
     if (this->device != nullptr) {
         this->device->uploadFrom(*this);
@@ -1824,6 +1874,78 @@ void LanguageModel::runRopeThetaSmokeDemo() {
         legacy,
         llama3,
         maxAbsDiff);
+}
+
+void LanguageModel::runBiasPolicySmokeDemo() {
+    const int embed = 64;
+    const int heads = 4;
+    const int maxPos = 32;
+
+    LanguageModel withBias(32, embed, maxPos, Adam(1e-3f), 1, heads, 0, RotaryEmbedding::DefaultBase, true);
+    LanguageModel noBias(32, embed, maxPos, Adam(1e-3f), 1, heads, 0, RotaryEmbedding::DefaultBase, false);
+    if (!withBias.useBias() || noBias.useBias())
+        throw std::runtime_error("LanguageModel useBias accessor mismatch");
+
+    auto assertAllZero = [](const Matrix& m, const char* name) {
+        for (float v : m.data) {
+            if (v != 0.0f)
+                throw std::runtime_error(std::string("expected zero bias: ") + name);
+        }
+    };
+    assertAllZero(noBias.outputProjection.bias, "lm_head");
+    assertAllZero(noBias.blocks[0].feedForward.gateBias, "gate");
+    assertAllZero(noBias.blocks[0].feedForward.upBias, "up");
+    assertAllZero(noBias.blocks[0].feedForward.downBias, "down");
+
+    LanguageModelDataset dataset;
+    LanguageModelExample example;
+    example.inputTokenIds = { 1, 2, 3, 4 };
+    example.targetTokenIds = { 2, 3, 4, 5 };
+    dataset.examples.push_back(example);
+    noBias.train(dataset, 1, 0);
+
+    assertAllZero(noBias.outputProjection.bias, "lm_head after train");
+    assertAllZero(noBias.blocks[0].feedForward.gateBias, "gate after train");
+    assertAllZero(noBias.blocks[0].feedForward.upBias, "up after train");
+    assertAllZero(noBias.blocks[0].feedForward.downBias, "down after train");
+
+    const std::string path = "bias_policy_smoke.safetensors";
+    noBias.saveSafeTensors(path);
+    const SafeTensors::File saved = SafeTensors::load(path);
+    if (saved.metadata.at("use_bias") != "0")
+        throw std::runtime_error("safetensors use_bias metadata should be 0");
+    if (saved.tensors.count("lm_head.bias") != 0
+        || saved.tensors.count("blocks.0.ffn.gate_proj.bias") != 0)
+        throw std::runtime_error("useBias=false save should omit bias tensors");
+
+    LanguageModel restored(32, embed, maxPos, Adam(1e-3f), 1, heads, 0, RotaryEmbedding::DefaultBase, false);
+    restored.loadSafeTensors(path);
+    if (restored.useBias())
+        throw std::runtime_error("restored useBias should stay false");
+    assertAllZero(restored.outputProjection.bias, "restored lm_head");
+
+    Matrix afterTrain = noBias.forward(example.inputTokenIds);
+    Matrix afterLoad = restored.forward(example.inputTokenIds);
+    float restoreDiff = 0.0f;
+    for (size_t i = 0; i < afterTrain.data.size(); ++i)
+        restoreDiff = (std::max)(restoreDiff, std::fabs(afterTrain.data[i] - afterLoad.data[i]));
+    if (restoreDiff > 1.0e-5f)
+        throw std::runtime_error("bias-policy safetensors roundtrip logits mismatch");
+
+    bool rejected = false;
+    try {
+        withBias.loadSafeTensors(path);
+    } catch (const std::exception&) {
+        rejected = true;
+    }
+    if (!rejected)
+        throw std::runtime_error("loadSafeTensors should reject use_bias mismatch");
+
+    std::remove(path.c_str());
+    SmokeLog::result(
+        "LanguageModel bias_policy",
+        "use_bias=0  omit_tensors=ok  train_keeps_zero=ok  restoreDiff=%.2e",
+        restoreDiff);
 }
 
 void LanguageModel::runStreamingSmokeDemo() {

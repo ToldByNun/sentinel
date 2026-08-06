@@ -117,7 +117,8 @@ model = S.LanguageModel(
     block_count=2,
     head_count=4,
     intermediate_size=0,  # 0 = legacy expand-4 SwiGLU width; set for HF-style MLP width
-    rope_theta=10000.0,   # HF rope_theta (Llama-3.x often 500000)
+    rope_theta=10000.0,   # HF rope_theta
+    use_bias=True,        # False when HF config has no FFN/lm_head bias
 )
 ```
 
@@ -158,6 +159,7 @@ if S.cuda_available():
 | `parameter_count` | `int` (ro) | Trainable elements (tied head counted once) |
 | `intermediate_size` | `int` (ro) | FFN gate/up width (`0` only if no blocks) |
 | `rope_theta` | `float` (ro) | RoPE base (HF `rope_theta`) |
+| `use_bias` | `bool` (ro) | `False` → fixed-zero FFN/`lm_head` biases (common HF causal LMs) |
 
 Prefer setting host-SGD / SBAO **before** `enable_cuda_train` so pack/ckpt resolve correctly.
 

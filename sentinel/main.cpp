@@ -76,6 +76,17 @@ int main() {
         return 0;
     }
     free(ropeSmokeEnv);
+    char* biasSmokeEnv = nullptr;
+    size_t biasSmokeLen = 0;
+    if (_dupenv_s(&biasSmokeEnv, &biasSmokeLen, "SENTINEL_BIAS_POLICY_SMOKE") == 0
+        && biasSmokeEnv != nullptr
+        && biasSmokeEnv[0] == '1'
+        && biasSmokeEnv[1] == '\0') {
+        free(biasSmokeEnv);
+        LanguageModel::runBiasPolicySmokeDemo();
+        return 0;
+    }
+    free(biasSmokeEnv);
 #else
     if (const char* halfSmoke = std::getenv("SENTINEL_SAFETENSORS_HALF_SMOKE")) {
         if (halfSmoke[0] == '1' && halfSmoke[1] == '\0') {
@@ -92,6 +103,12 @@ int main() {
     if (const char* ropeSmoke = std::getenv("SENTINEL_ROPE_THETA_SMOKE")) {
         if (ropeSmoke[0] == '1' && ropeSmoke[1] == '\0') {
             LanguageModel::runRopeThetaSmokeDemo();
+            return 0;
+        }
+    }
+    if (const char* biasSmoke = std::getenv("SENTINEL_BIAS_POLICY_SMOKE")) {
+        if (biasSmoke[0] == '1' && biasSmoke[1] == '\0') {
+            LanguageModel::runBiasPolicySmokeDemo();
             return 0;
         }
     }
@@ -253,6 +270,7 @@ int main() {
             LanguageModel::runCheckpointSmokeDemo();
             LanguageModel::runIntermediateSizeSmokeDemo();
             LanguageModel::runRopeThetaSmokeDemo();
+            LanguageModel::runBiasPolicySmokeDemo();
             LanguageModel::runStreamingSmokeDemo();
             SafeTensors::runHalfLoadSmokeDemo();
             CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);

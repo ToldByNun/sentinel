@@ -83,7 +83,8 @@ public:
 
     /// <summary>
     /// build LM; intermediateSize &lt;= 0 → legacy expand-4 SwiGLU width per block;
-    /// ropeTheta is HF rope_theta (default 10000; Llama-3.x often 500000)
+    /// ropeTheta is HF rope_theta (default 10000; some models use much larger bases);
+    /// useBias=false → zero FFN + lm_head biases (HF models without those biases; tensors kept for CUDA)
     /// </summary>
     LanguageModel(
         int vocabularySize,
@@ -93,7 +94,8 @@ public:
         int blockCount = 2,
         int headCount = 4,
         int intermediateSize = 0,
-        float ropeTheta = RotaryEmbedding::DefaultBase);
+        float ropeTheta = RotaryEmbedding::DefaultBase,
+        bool useBias = true);
     ~LanguageModel();
 
     LanguageModel(const LanguageModel&) = delete;
@@ -106,6 +108,9 @@ public:
 
     /// <summary>RoPE base (HF rope_theta); DefaultBase if no blocks</summary>
     float ropeTheta() const;
+
+    /// <summary>false → FFN/lm_head biases are fixed zeros; true → trainable biases</summary>
+    bool useBias() const;
 
     /// <summary>upload host weights to optional CUDA device mirror for forward and generate</summary>
     void enableCuda();
@@ -235,6 +240,9 @@ public:
 
     /// <summary>configurable rope_theta tables + safetensors metadata gate</summary>
     static void runRopeThetaSmokeDemo();
+
+    /// <summary>useBias=false zeros + omit bias tensors on save; missing bias → zeros on load</summary>
+    static void runBiasPolicySmokeDemo();
 
     /// <summary>JSONL chunk source smoke: tiny file, one streamed epoch</summary>
     static void runStreamingSmokeDemo();

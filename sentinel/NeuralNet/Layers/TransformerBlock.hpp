@@ -84,7 +84,8 @@ public:
 
     /// <summary>
     /// create pre-norm block; intermediateSize &lt;= 0 uses FeedForward::defaultIntermediateSize(embed, 4);
-    /// ropeTheta is HF rope_theta (RoPE base), default 10000
+    /// ropeTheta is HF rope_theta (RoPE base), default 10000;
+    /// useBias=false → zero FFN biases (HF models without MLP bias)
     /// </summary>
     TransformerBlock(
         int embeddingDim,
@@ -92,7 +93,8 @@ public:
         int maximumPositionCount,
         unsigned seed,
         int intermediateSize = 0,
-        float ropeTheta = RotaryEmbedding::DefaultBase);
+        float ropeTheta = RotaryEmbedding::DefaultBase,
+        bool useBias = true);
 
     /// <summary>forward through one block writes cache</summary>
     Matrix forward(const Matrix& input, TransformerBlockCache& cache) const;

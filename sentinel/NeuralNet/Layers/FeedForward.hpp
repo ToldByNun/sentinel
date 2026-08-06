@@ -32,17 +32,19 @@ public:
     Matrix upBias;
     Matrix downWeight;
     Matrix downBias;
+    /// <summary>false → biases are zero tensors (common HF causal LMs); still shaped for CUDA</summary>
+    bool useBias = true;
 
-    FeedForward(Matrix gateWeight, Matrix gateBias, Matrix upWeight, Matrix upBias, Matrix downWeight, Matrix downBias);
+    FeedForward(Matrix gateWeight, Matrix gateBias, Matrix upWeight, Matrix upBias, Matrix downWeight, Matrix downBias, bool useBias = true);
 
     /// <summary>SwiGLU hidden = (2 * embeddingDim * expandRatio) / 3 (legacy Sentinel default expandRatio=4)</summary>
     static int defaultIntermediateSize(int embeddingDim, int expandRatio = 4);
 
     /// <summary>create SwiGLU weights using defaultIntermediateSize(embeddingDim, expandRatio)</summary>
-    static FeedForward create(int embeddingDim, int expandRatio = 4, unsigned seed = 41u);
+    static FeedForward create(int embeddingDim, int expandRatio = 4, unsigned seed = 41u, bool useBias = true);
 
     /// <summary>create SwiGLU weights with an explicit MLP intermediate width (e.g. HF intermediate_size)</summary>
-    static FeedForward createWithIntermediateSize(int embeddingDim, int intermediateSize, unsigned seed = 41u);
+    static FeedForward createWithIntermediateSize(int embeddingDim, int intermediateSize, unsigned seed = 41u, bool useBias = true);
 
     /// <summary>gate/up row count (MLP hidden / intermediate size)</summary>
     int intermediateSize() const;

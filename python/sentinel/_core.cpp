@@ -20,7 +20,8 @@ LanguageModel makeLanguageModel(
     int blockCount = 2,
     int headCount = 4,
     int intermediateSize = 0,
-    float ropeTheta = 10000.0f) {
+    float ropeTheta = 10000.0f,
+    bool useBias = true) {
     return LanguageModel(
         vocabularySize,
         embeddingDim,
@@ -29,7 +30,8 @@ LanguageModel makeLanguageModel(
         blockCount,
         headCount,
         intermediateSize,
-        ropeTheta);
+        ropeTheta,
+        useBias);
 }
 
 } // namespace
@@ -96,7 +98,8 @@ NB_MODULE(_core, m) {
                int blockCount,
                int headCount,
                int intermediateSize,
-               float ropeTheta) {
+               float ropeTheta,
+               bool useBias) {
                 new (self) LanguageModel(makeLanguageModel(
                     vocabularySize,
                     embeddingDim,
@@ -105,7 +108,8 @@ NB_MODULE(_core, m) {
                     blockCount,
                     headCount,
                     intermediateSize,
-                    ropeTheta));
+                    ropeTheta,
+                    useBias));
             },
             nb::arg("vocabulary_size"),
             nb::arg("embedding_dim"),
@@ -115,7 +119,8 @@ NB_MODULE(_core, m) {
             nb::arg("head_count") = 4,
             nb::arg("intermediate_size") = 0,
             nb::arg("rope_theta") = 10000.0f,
-            "intermediate_size<=0 uses legacy expand-4 SwiGLU width; rope_theta is HF RoPE base")
+            nb::arg("use_bias") = true,
+            "intermediate_size<=0 uses legacy expand-4 SwiGLU width; rope_theta is HF RoPE base; use_bias=false when the HF arch has no FFN/lm_head bias")
         .def("enable_cuda", &LanguageModel::enableCuda)
         .def("enable_cuda_train", &LanguageModel::enableCudaTrain)
         .def(
@@ -176,6 +181,7 @@ NB_MODULE(_core, m) {
         .def_prop_ro("parameter_count", &LanguageModel::parameterElementCount)
         .def_prop_ro("intermediate_size", &LanguageModel::intermediateSize)
         .def_prop_ro("rope_theta", &LanguageModel::ropeTheta)
+        .def_prop_ro("use_bias", &LanguageModel::useBias)
         .def_prop_ro("max_packed_columns", &LanguageModel::cudaMaxPackedColumns)
         .def(
             "average_loss",

@@ -7,8 +7,21 @@
 #include <stdexcept>
 #include <utility>
 
-FeedForward::FeedForward(Matrix gateWeight, Matrix gateBias, Matrix upWeight, Matrix upBias, Matrix downWeight, Matrix downBias)
-    : gateWeight(std::move(gateWeight)), gateBias(std::move(gateBias)), upWeight(std::move(upWeight)), upBias(std::move(upBias)), downWeight(std::move(downWeight)), downBias(std::move(downBias)) {}
+FeedForward::FeedForward(
+    Matrix gateWeight,
+    Matrix gateBias,
+    Matrix upWeight,
+    Matrix upBias,
+    Matrix downWeight,
+    Matrix downBias,
+    bool useBias)
+    : gateWeight(std::move(gateWeight)),
+      gateBias(std::move(gateBias)),
+      upWeight(std::move(upWeight)),
+      upBias(std::move(upBias)),
+      downWeight(std::move(downWeight)),
+      downBias(std::move(downBias)),
+      useBias(useBias) {}
 
 int FeedForward::defaultIntermediateSize(int embeddingDim, int expandRatio) {
     if (embeddingDim <= 0) throw std::invalid_argument("FeedForward::defaultIntermediateSize embeddingDim must be > 0");
@@ -18,24 +31,36 @@ int FeedForward::defaultIntermediateSize(int embeddingDim, int expandRatio) {
     return hiddenDim;
 }
 
-FeedForward FeedForward::createWithIntermediateSize(int embeddingDim, int intermediateSize, unsigned seed) {
+FeedForward FeedForward::createWithIntermediateSize(int embeddingDim, int intermediateSize, unsigned seed, bool useBias) {
     if (embeddingDim <= 0) throw std::invalid_argument("FeedForward::createWithIntermediateSize embeddingDim must be > 0");
     if (intermediateSize <= 0) throw std::invalid_argument("FeedForward::createWithIntermediateSize intermediateSize must be > 0");
 
+    Matrix gateBias = useBias
+        ? UniformInit::matrix(intermediateSize, 1, 0.01f, seed + 1u)
+        : Matrix(static_cast<size_t>(intermediateSize), 1, 0.0f);
+    Matrix upBias = useBias
+        ? UniformInit::matrix(intermediateSize, 1, 0.01f, seed + 3u)
+        : Matrix(static_cast<size_t>(intermediateSize), 1, 0.0f);
+    Matrix downBias = useBias
+        ? UniformInit::matrix(embeddingDim, 1, 0.01f, seed + 5u)
+        : Matrix(static_cast<size_t>(embeddingDim), 1, 0.0f);
+
     return FeedForward(
         UniformInit::matrix(intermediateSize, embeddingDim, 0.1f, seed),
-        UniformInit::matrix(intermediateSize, 1, 0.01f, seed + 1u),
+        std::move(gateBias),
         UniformInit::matrix(intermediateSize, embeddingDim, 0.1f, seed + 2u),
-        UniformInit::matrix(intermediateSize, 1, 0.01f, seed + 3u),
+        std::move(upBias),
         UniformInit::matrix(embeddingDim, intermediateSize, 0.1f, seed + 4u),
-        UniformInit::matrix(embeddingDim, 1, 0.01f, seed + 5u));
+        std::move(downBias),
+        useBias);
 }
 
-FeedForward FeedForward::create(int embeddingDim, int expandRatio, unsigned seed) {
+FeedForward FeedForward::create(int embeddingDim, int expandRatio, unsigned seed, bool useBias) {
     return FeedForward::createWithIntermediateSize(
         embeddingDim,
         FeedForward::defaultIntermediateSize(embeddingDim, expandRatio),
-        seed);
+        seed,
+        useBias);
 }
 
 int FeedForward::intermediateSize() const {
@@ -43,8 +68,10 @@ int FeedForward::intermediateSize() const {
 }
 
 void FeedForward::broadcastBiasAddInPlace(Matrix& product, const Matrix& bias) {
+    if (bias.empty()) return;
     for (size_t row = 0; row < product.rows; ++row) {
         const float biasValue = bias.at(row, 0);
+        if (biasValue == 0.0f) continue;
         for (size_t column = 0; column < product.cols; ++column)
             product.at(row, column) += biasValue;
     }
@@ -73,15 +100,18 @@ Matrix FeedForward::forward(const Matrix& input, FeedForwardCache& cache) const 
 
     cache.input = input;
     Matrix::gemm(this->gateWeight, input, cache.gatePreActivation);
-    FeedForward::broadcastBiasAddInPlace(cache.gatePreActivation, this->gateBias);
+    if (this->useBias)
+        FeedForward::broadcastBiasAddInPlace(cache.gatePreActivation, this->gateBias);
     SiLU::applyInto(cache.gatePreActivation, cache.gateActivated);
 
     Matrix::gemm(this->upWeight, input, cache.up);
-    FeedForward::broadcastBiasAddInPlace(cache.up, this->upBias);
+    if (this->useBias)
+        FeedForward::broadcastBiasAddInPlace(cache.up, this->upBias);
     FeedForward::multiplyElementwiseInto(cache.gateActivated, cache.up, cache.hidden);
 
     Matrix::gemm(this->downWeight, cache.hidden, cache.output);
-    FeedForward::broadcastBiasAddInPlace(cache.output, this->downBias);
+    if (this->useBias)
+        FeedForward::broadcastBiasAddInPlace(cache.output, this->downBias);
     return cache.output;
 }
 
@@ -90,7 +120,10 @@ Matrix FeedForward::backward(const Matrix& outputGradient, FeedForwardCache& cac
     if (outputGradient.rows != this->downWeight.rows || outputGradient.cols != cache.input.cols) throw std::invalid_argument("FeedForward::backward shape mismatch");
 
     Matrix::gemm(outputGradient, cache.hidden, downWeightGradient, false, true);
-    FeedForward::sumColumnsInto(outputGradient, downBiasGradient);
+    if (this->useBias)
+        FeedForward::sumColumnsInto(outputGradient, downBiasGradient);
+    else
+        downBiasGradient = Matrix(this->downBias.rows, 1, 0.0f);
 
     Matrix::gemm(this->downWeight, outputGradient, cache.hiddenGradient, true, false);
     FeedForward::multiplyElementwiseInto(cache.hiddenGradient, cache.gateActivated, cache.upGradient);
@@ -100,9 +133,14 @@ Matrix FeedForward::backward(const Matrix& outputGradient, FeedForwardCache& cac
     Matrix::multiplyElementwiseInPlace(cache.gateGradient, cache.siluDerivative);
 
     Matrix::gemm(cache.gateGradient, cache.input, gateWeightGradient, false, true);
-    FeedForward::sumColumnsInto(cache.gateGradient, gateBiasGradient);
     Matrix::gemm(cache.upGradient, cache.input, upWeightGradient, false, true);
-    FeedForward::sumColumnsInto(cache.upGradient, upBiasGradient);
+    if (this->useBias) {
+        FeedForward::sumColumnsInto(cache.gateGradient, gateBiasGradient);
+        FeedForward::sumColumnsInto(cache.upGradient, upBiasGradient);
+    } else {
+        gateBiasGradient = Matrix(this->gateBias.rows, 1, 0.0f);
+        upBiasGradient = Matrix(this->upBias.rows, 1, 0.0f);
+    }
 
     Matrix::gemm(this->gateWeight, cache.gateGradient, cache.inputGradient, true, false);
     Matrix::gemm(this->upWeight, cache.upGradient, cache.temp, true, false);

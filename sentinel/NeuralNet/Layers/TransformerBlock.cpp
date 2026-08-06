@@ -70,15 +70,16 @@ TransformerBlock::TransformerBlock(
     int maximumPositionCount,
     unsigned seed,
     int intermediateSize,
-    float ropeTheta)
+    float ropeTheta,
+    bool useBias)
     : attentionNorm(embeddingDim),
       attention(CausalSelfAttention::create(
           embeddingDim, headCount, maximumPositionCount, seed, -1, 0, ropeTheta)),
       feedForwardNorm(embeddingDim),
       feedForward(
           intermediateSize > 0
-              ? FeedForward::createWithIntermediateSize(embeddingDim, intermediateSize, seed + 20u)
-              : FeedForward::create(embeddingDim, 4, seed + 20u)) {
+              ? FeedForward::createWithIntermediateSize(embeddingDim, intermediateSize, seed + 20u, useBias)
+              : FeedForward::create(embeddingDim, 4, seed + 20u, useBias)) {
     if (embeddingDim <= 0) throw std::invalid_argument("TransformerBlock embeddingDim must be > 0");
     if (intermediateSize < 0) throw std::invalid_argument("TransformerBlock intermediateSize must be >= 0");
     if (ropeTheta <= 0.0f) throw std::invalid_argument("TransformerBlock ropeTheta must be > 0");
@@ -139,11 +140,14 @@ Matrix TransformerBlock::backward(const Matrix& outputGradient, TransformerBlock
 
 void TransformerBlock::applyGradients(Adam& optimizer, const TransformerBlockGradients& gradients) {
     optimizer.update(this->feedForward.downWeight, this->feedForwardDownWeightState, gradients.feedForwardDownWeight);
-    optimizer.update(this->feedForward.downBias, this->feedForwardDownBiasState, gradients.feedForwardDownBias);
+    if (this->feedForward.useBias)
+        optimizer.update(this->feedForward.downBias, this->feedForwardDownBiasState, gradients.feedForwardDownBias);
     optimizer.update(this->feedForward.upWeight, this->feedForwardUpWeightState, gradients.feedForwardUpWeight);
-    optimizer.update(this->feedForward.upBias, this->feedForwardUpBiasState, gradients.feedForwardUpBias);
+    if (this->feedForward.useBias)
+        optimizer.update(this->feedForward.upBias, this->feedForwardUpBiasState, gradients.feedForwardUpBias);
     optimizer.update(this->feedForward.gateWeight, this->feedForwardGateWeightState, gradients.feedForwardGateWeight);
-    optimizer.update(this->feedForward.gateBias, this->feedForwardGateBiasState, gradients.feedForwardGateBias);
+    if (this->feedForward.useBias)
+        optimizer.update(this->feedForward.gateBias, this->feedForwardGateBiasState, gradients.feedForwardGateBias);
     optimizer.update(this->feedForwardNorm.gamma, this->feedForwardNormGammaState, gradients.feedForwardNormGamma);
     optimizer.update(this->attention.outputWeight, this->attentionOutputWeightState, gradients.attentionOutputWeight);
     optimizer.update(this->attention.valueWeight, this->valueWeightState, gradients.valueWeight);

@@ -215,6 +215,9 @@ public:
     /// <summary>share tokenEmbeddingWeight with LM head (mirrors LanguageModel::tieEmbeddingProjection)</summary>
     bool tieEmbeddingProjection;
 
+    /// <summary>mirrors LanguageModel::useBias(); false → skip Adam on FFN/lm_head biases</summary>
+    bool useBias = true;
+
     /// <summary>cap packed columns so attention stays manageable default high with segmented attention</summary>
 
     int maxPackedColumns;
