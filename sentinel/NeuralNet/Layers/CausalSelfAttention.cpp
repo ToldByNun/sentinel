@@ -11,14 +11,42 @@
 #include <utility>
 #include <vector>
 
-CausalSelfAttention::CausalSelfAttention(Matrix queryWeight, Matrix keyWeight, Matrix valueWeight, Matrix outputWeight, RotaryEmbedding rotaryEmbedding, int headCount, int windowSize, int globalTokenCount)
-    : queryWeight(std::move(queryWeight)), keyWeight(std::move(keyWeight)), valueWeight(std::move(valueWeight)), outputWeight(std::move(outputWeight)), rotaryEmbedding(std::move(rotaryEmbedding)), headCount(headCount), headDimension(0), windowSize(windowSize), globalTokenCount(globalTokenCount), preferSparseCompute(true) {
+CausalSelfAttention::CausalSelfAttention(
+    Matrix queryWeight,
+    Matrix keyWeight,
+    Matrix valueWeight,
+    Matrix outputWeight,
+    RotaryEmbedding rotaryEmbedding,
+    int headCount,
+    int windowSize,
+    int globalTokenCount,
+    int kvHeadCount)
+    : queryWeight(std::move(queryWeight)),
+      keyWeight(std::move(keyWeight)),
+      valueWeight(std::move(valueWeight)),
+      outputWeight(std::move(outputWeight)),
+      rotaryEmbedding(std::move(rotaryEmbedding)),
+      headCount(headCount),
+      kvHeadCount(kvHeadCount <= 0 ? headCount : kvHeadCount),
+      headDimension(0),
+      windowSize(windowSize),
+      globalTokenCount(globalTokenCount),
+      preferSparseCompute(true) {
     if (this->headCount <= 0) throw std::invalid_argument("CausalSelfAttention headCount must be > 0");
+    if (this->kvHeadCount <= 0) throw std::invalid_argument("CausalSelfAttention kvHeadCount must be > 0");
+    if (this->headCount % this->kvHeadCount != 0)
+        throw std::invalid_argument("CausalSelfAttention headCount must be divisible by kvHeadCount");
     if (this->queryWeight.empty()) throw std::invalid_argument("CausalSelfAttention empty weights");
-    if (static_cast<int>(this->queryWeight.rows) % this->headCount != 0) throw std::invalid_argument("CausalSelfAttention embeddingDim must be divisible by headCount");
+    if (static_cast<int>(this->queryWeight.rows) % this->headCount != 0)
+        throw std::invalid_argument("CausalSelfAttention query rows must be divisible by headCount");
     if (this->globalTokenCount < 0) throw std::invalid_argument("CausalSelfAttention globalTokenCount must be >= 0");
     this->headDimension = static_cast<int>(this->queryWeight.rows) / this->headCount;
     if (this->headDimension % 2 != 0) throw std::invalid_argument("CausalSelfAttention headDimension must be even for RoPE");
+    const int expectedKvRows = this->kvHeadCount * this->headDimension;
+    if (static_cast<int>(this->keyWeight.rows) != expectedKvRows || static_cast<int>(this->valueWeight.rows) != expectedKvRows)
+        throw std::invalid_argument("CausalSelfAttention key/value rows must equal kvHeadCount * headDimension");
+    if (this->keyWeight.cols != this->queryWeight.cols || this->valueWeight.cols != this->queryWeight.cols)
+        throw std::invalid_argument("CausalSelfAttention Q/K/V embedding dim mismatch");
 }
 
 CausalSelfAttention CausalSelfAttention::create(
@@ -28,7 +56,8 @@ CausalSelfAttention CausalSelfAttention::create(
     unsigned seed,
     int windowSize,
     int globalTokenCount,
-    float ropeBase) {
+    float ropeBase,
+    int kvHeadCount) {
     if (embeddingDim <= 0) throw std::invalid_argument("CausalSelfAttention::create embeddingDim must be > 0");
     if (headCount <= 0) throw std::invalid_argument("CausalSelfAttention::create headCount must be > 0");
     if (maximumPositionCount <= 0) throw std::invalid_argument("CausalSelfAttention::create maximumPositionCount must be > 0");
@@ -37,17 +66,30 @@ CausalSelfAttention CausalSelfAttention::create(
     if (globalTokenCount < 0) throw std::invalid_argument("CausalSelfAttention::create globalTokenCount must be >= 0");
     if (ropeBase <= 0.0f) throw std::invalid_argument("CausalSelfAttention::create ropeBase must be > 0");
 
+    const int resolvedKvHeadCount = (kvHeadCount <= 0) ? headCount : kvHeadCount;
+    if (resolvedKvHeadCount <= 0) throw std::invalid_argument("CausalSelfAttention::create kvHeadCount must be > 0");
+    if (headCount % resolvedKvHeadCount != 0)
+        throw std::invalid_argument("CausalSelfAttention::create headCount must be divisible by kvHeadCount");
+
+    const int headDimension = embeddingDim / headCount;
+    const int kvRows = resolvedKvHeadCount * headDimension;
     const int resolvedWindowSize = (windowSize <= 0) ? maximumPositionCount : windowSize;
-    RotaryEmbedding rotaryEmbedding(embeddingDim / headCount, maximumPositionCount, ropeBase);
+    RotaryEmbedding rotaryEmbedding(headDimension, maximumPositionCount, ropeBase);
     return CausalSelfAttention(
         UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed),
-        UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 1u),
-        UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 2u),
+        UniformInit::matrix(kvRows, embeddingDim, 0.1f, seed + 1u),
+        UniformInit::matrix(kvRows, embeddingDim, 0.1f, seed + 2u),
         UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 3u),
         std::move(rotaryEmbedding),
         headCount,
         resolvedWindowSize,
-        globalTokenCount);
+        globalTokenCount,
+        resolvedKvHeadCount);
+}
+
+int CausalSelfAttention::kvHeadIndexForQueryHead(int queryHeadIndex) const {
+    const int groupSize = this->headCount / this->kvHeadCount;
+    return queryHeadIndex / groupSize;
 }
 
 bool CausalSelfAttention::allowsKey(int queryIndex, int keyIndex, int windowSize, int globalTokenCount) {
@@ -142,6 +184,14 @@ void CausalSelfAttention::writeHead(Matrix& full, int headIndex, int headDimensi
     }
 }
 
+void CausalSelfAttention::addHeadInto(Matrix& full, int headIndex, int headDimension, const Matrix& head) {
+    const size_t rowOffset = static_cast<size_t>(headIndex * headDimension);
+    for (int row = 0; row < headDimension; ++row) {
+        for (size_t column = 0; column < head.cols; ++column)
+            full.at(rowOffset + static_cast<size_t>(row), column) += head.at(static_cast<size_t>(row), column);
+    }
+}
+
 void CausalSelfAttention::softmaxBackwardInto(const Matrix& probabilities, const Matrix& probabilityGradient, Matrix& scoreGradient) {
     if (probabilities.rows != probabilityGradient.rows || probabilities.cols != probabilityGradient.cols) throw std::invalid_argument("CausalSelfAttention::softmaxBackwardInto shape mismatch");
 
@@ -168,7 +218,7 @@ Matrix CausalSelfAttention::forward(const Matrix& input, CausalSelfAttentionCach
     Matrix::gemm(this->keyWeight, input, cache.key);
     Matrix::gemm(this->valueWeight, input, cache.value);
     this->rotaryEmbedding.rotateInPlace(cache.query, this->headCount);
-    this->rotaryEmbedding.rotateInPlace(cache.key, this->headCount);
+    this->rotaryEmbedding.rotateInPlace(cache.key, this->kvHeadCount);
 
     const size_t sequenceLength = input.cols;
     const float scale = 1.0f / std::sqrt(static_cast<float>(this->headDimension));
@@ -180,9 +230,10 @@ Matrix CausalSelfAttention::forward(const Matrix& input, CausalSelfAttentionCach
     Matrix::zeroInPlace(cache.attended);
 
     for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
+        const int kvHeadIndex = this->kvHeadIndexForQueryHead(headIndex);
         CausalSelfAttention::extractHeadInto(cache.query, headIndex, this->headDimension, cache.queryHead);
-        CausalSelfAttention::extractHeadInto(cache.key, headIndex, this->headDimension, cache.keyHead);
-        CausalSelfAttention::extractHeadInto(cache.value, headIndex, this->headDimension, cache.valueHead);
+        CausalSelfAttention::extractHeadInto(cache.key, kvHeadIndex, this->headDimension, cache.keyHead);
+        CausalSelfAttention::extractHeadInto(cache.value, kvHeadIndex, this->headDimension, cache.valueHead);
 
         Matrix& scores = cache.scores[static_cast<size_t>(headIndex)];
         Matrix& probabilities = cache.probabilities[static_cast<size_t>(headIndex)];
@@ -226,10 +277,11 @@ Matrix CausalSelfAttention::backward(const Matrix& outputGradient, CausalSelfAtt
     const bool sparseCompute = this->usesSparseCompute(sequenceLength);
 
     for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
+        const int kvHeadIndex = this->kvHeadIndexForQueryHead(headIndex);
         CausalSelfAttention::extractHeadInto(cache.attendedGradient, headIndex, this->headDimension, cache.attendedHead);
         CausalSelfAttention::extractHeadInto(cache.query, headIndex, this->headDimension, cache.queryHead);
-        CausalSelfAttention::extractHeadInto(cache.key, headIndex, this->headDimension, cache.keyHead);
-        CausalSelfAttention::extractHeadInto(cache.value, headIndex, this->headDimension, cache.valueHead);
+        CausalSelfAttention::extractHeadInto(cache.key, kvHeadIndex, this->headDimension, cache.keyHead);
+        CausalSelfAttention::extractHeadInto(cache.value, kvHeadIndex, this->headDimension, cache.valueHead);
         const Matrix& probabilities = cache.probabilities[static_cast<size_t>(headIndex)];
 
         if (sparseCompute) {
@@ -296,12 +348,12 @@ Matrix CausalSelfAttention::backward(const Matrix& outputGradient, CausalSelfAtt
         }
 
         CausalSelfAttention::writeHead(cache.queryGradient, headIndex, this->headDimension, cache.queryHeadGradient);
-        CausalSelfAttention::writeHead(cache.keyGradient, headIndex, this->headDimension, cache.keyHeadGradient);
-        CausalSelfAttention::writeHead(cache.valueGradient, headIndex, this->headDimension, cache.valueHeadGradient);
+        CausalSelfAttention::addHeadInto(cache.keyGradient, kvHeadIndex, this->headDimension, cache.keyHeadGradient);
+        CausalSelfAttention::addHeadInto(cache.valueGradient, kvHeadIndex, this->headDimension, cache.valueHeadGradient);
     }
 
     this->rotaryEmbedding.rotateInverseInPlace(cache.queryGradient, this->headCount);
-    this->rotaryEmbedding.rotateInverseInPlace(cache.keyGradient, this->headCount);
+    this->rotaryEmbedding.rotateInverseInPlace(cache.keyGradient, this->kvHeadCount);
 
     Matrix::gemm(cache.queryGradient, cache.input, queryWeightGradient, false, true);
     Matrix::gemm(cache.keyGradient, cache.input, keyWeightGradient, false, true);
@@ -492,4 +544,141 @@ void CausalSelfAttention::runSparseComputeSmokeDemo(int embeddingDim, int headCo
 
     SmokeLog::result("Sparse Attn S3", "embed=%d heads=%d seq=%d W=%d G=%d  fwd=%.2e  bwd=%.2e",
         embeddingDim, headCount, sequenceLength, windowSize, globalTokenCount, forwardParity, backwardParity);
+}
+
+void CausalSelfAttention::runGqaHostSmokeDemo() {
+    const int embed = 64;
+    const int heads = 8;
+    const int kvHeads = 2;
+    const int seq = 16;
+    const int maxPos = 32;
+    const unsigned seed = 41u;
+
+    auto maxAbsDiff = [](const Matrix& a, const Matrix& b) -> float {
+        if (a.data.size() != b.data.size())
+            throw std::runtime_error("CausalSelfAttention GQA smoke size mismatch");
+        float diff = 0.0f;
+        for (size_t i = 0; i < a.data.size(); ++i)
+            diff = (std::max)(diff, std::fabs(a.data[i] - b.data[i]));
+        return diff;
+    };
+
+    auto makeInput = [&]() -> Matrix {
+        Matrix input(static_cast<size_t>(embed), static_cast<size_t>(seq), 0.0f);
+        unsigned state = 123u;
+        for (size_t i = 0; i < input.data.size(); ++i) {
+            state = state * 1664525u + 1013904223u;
+            input.data[i] = (static_cast<float>(state >> 8) / 16777216.0f) * 2.0f - 1.0f;
+        }
+        return input;
+    };
+
+    // 1) MHA default ≡ explicit kvHeadCount == headCount
+    CausalSelfAttention mhaDefault = CausalSelfAttention::create(embed, heads, maxPos, seed);
+    CausalSelfAttention mhaExplicit = CausalSelfAttention::create(
+        embed, heads, maxPos, seed, -1, 0, RotaryEmbedding::DefaultBase, heads);
+    if (mhaDefault.kvHeadCount != heads || mhaExplicit.kvHeadCount != heads)
+        throw std::runtime_error("CausalSelfAttention GQA smoke expected MHA kvHeadCount");
+    if (static_cast<int>(mhaDefault.keyWeight.rows) != embed)
+        throw std::runtime_error("CausalSelfAttention GQA smoke MHA key rows mismatch");
+
+    const Matrix input = makeInput();
+    CausalSelfAttentionCache cacheA;
+    CausalSelfAttentionCache cacheB;
+    Matrix outDefault = mhaDefault.forward(input, cacheA);
+    Matrix outExplicit = mhaExplicit.forward(input, cacheB);
+    const float mhaParity = maxAbsDiff(outDefault, outExplicit);
+    if (mhaParity > 1.0e-6f)
+        throw std::runtime_error("CausalSelfAttention GQA smoke MHA parity failed");
+
+    Matrix outGrad(static_cast<size_t>(embed), static_cast<size_t>(seq), 0.01f);
+    Matrix qgA, kgA, vgA, ogA, qgB, kgB, vgB, ogB;
+    Matrix inGradA = mhaDefault.backward(outGrad, cacheA, qgA, kgA, vgA, ogA);
+    Matrix inGradB = mhaExplicit.backward(outGrad, cacheB, qgB, kgB, vgB, ogB);
+    const float mhaBwdParity = (std::max)(
+        maxAbsDiff(inGradA, inGradB),
+        (std::max)(
+            maxAbsDiff(qgA, qgB),
+            (std::max)(
+                maxAbsDiff(kgA, kgB),
+                (std::max)(maxAbsDiff(vgA, vgB), maxAbsDiff(ogA, ogB)))));
+    if (mhaBwdParity > 1.0e-5f)
+        throw std::runtime_error("CausalSelfAttention GQA smoke MHA backward parity failed");
+
+    // 2) True GQA vs MHA with K/V heads repeated (same math)
+    CausalSelfAttention gqa = CausalSelfAttention::create(
+        embed, heads, maxPos, seed + 7u, -1, 0, RotaryEmbedding::DefaultBase, kvHeads);
+    if (gqa.kvHeadCount != kvHeads)
+        throw std::runtime_error("CausalSelfAttention GQA smoke kvHeadCount mismatch");
+    if (static_cast<int>(gqa.keyWeight.rows) != kvHeads * (embed / heads)
+        || static_cast<int>(gqa.valueWeight.rows) != kvHeads * (embed / heads))
+        throw std::runtime_error("CausalSelfAttention GQA smoke key/value shape mismatch");
+
+    CausalSelfAttention mhaExpanded = CausalSelfAttention::create(
+        embed, heads, maxPos, seed + 7u, -1, 0, RotaryEmbedding::DefaultBase, heads);
+    mhaExpanded.queryWeight = gqa.queryWeight;
+    mhaExpanded.outputWeight = gqa.outputWeight;
+    mhaExpanded.rotaryEmbedding = gqa.rotaryEmbedding;
+
+    const int headDim = embed / heads;
+    const int groupSize = heads / kvHeads;
+    mhaExpanded.keyWeight = Matrix(static_cast<size_t>(embed), static_cast<size_t>(embed), 0.0f);
+    mhaExpanded.valueWeight = Matrix(static_cast<size_t>(embed), static_cast<size_t>(embed), 0.0f);
+    for (int qHead = 0; qHead < heads; ++qHead) {
+        const int kvHead = qHead / groupSize;
+        for (int row = 0; row < headDim; ++row) {
+            for (size_t col = 0; col < static_cast<size_t>(embed); ++col) {
+                mhaExpanded.keyWeight.at(static_cast<size_t>(qHead * headDim + row), col) =
+                    gqa.keyWeight.at(static_cast<size_t>(kvHead * headDim + row), col);
+                mhaExpanded.valueWeight.at(static_cast<size_t>(qHead * headDim + row), col) =
+                    gqa.valueWeight.at(static_cast<size_t>(kvHead * headDim + row), col);
+            }
+        }
+    }
+
+    CausalSelfAttentionCache gqaCache;
+    CausalSelfAttentionCache mhaCache;
+    Matrix gqaOut = gqa.forward(input, gqaCache);
+    Matrix mhaOut = mhaExpanded.forward(input, mhaCache);
+    const float expandFwdParity = maxAbsDiff(gqaOut, mhaOut);
+    if (expandFwdParity > 1.0e-5f)
+        throw std::runtime_error("CausalSelfAttention GQA smoke expanded-KV forward parity failed");
+
+    Matrix qgG, kgG, vgG, ogG, qgM, kgM, vgM, ogM;
+    Matrix inGradG = gqa.backward(outGrad, gqaCache, qgG, kgG, vgG, ogG);
+    Matrix inGradM = mhaExpanded.backward(outGrad, mhaCache, qgM, kgM, vgM, ogM);
+    const float expandInParity = maxAbsDiff(inGradG, inGradM);
+    const float expandQParity = maxAbsDiff(qgG, qgM);
+    const float expandOParity = maxAbsDiff(ogG, ogM);
+    if (expandInParity > 1.0e-4f || expandQParity > 1.0e-4f || expandOParity > 1.0e-4f)
+        throw std::runtime_error("CausalSelfAttention GQA smoke expanded-KV input/Q/O grad parity failed");
+
+    // K/V grads on GQA must equal sum of repeated MHA head grads
+    Matrix kgExpandedSum = Matrix::zerosLike(gqa.keyWeight);
+    Matrix vgExpandedSum = Matrix::zerosLike(gqa.valueWeight);
+    for (int qHead = 0; qHead < heads; ++qHead) {
+        const int kvHead = qHead / groupSize;
+        for (int row = 0; row < headDim; ++row) {
+            for (size_t col = 0; col < static_cast<size_t>(embed); ++col) {
+                kgExpandedSum.at(static_cast<size_t>(kvHead * headDim + row), col) +=
+                    kgM.at(static_cast<size_t>(qHead * headDim + row), col);
+                vgExpandedSum.at(static_cast<size_t>(kvHead * headDim + row), col) +=
+                    vgM.at(static_cast<size_t>(qHead * headDim + row), col);
+            }
+        }
+    }
+    const float expandKvParity = (std::max)(maxAbsDiff(kgG, kgExpandedSum), maxAbsDiff(vgG, vgExpandedSum));
+    if (expandKvParity > 1.0e-4f)
+        throw std::runtime_error("CausalSelfAttention GQA smoke expanded-KV K/V grad accumulate parity failed");
+
+    SmokeLog::result(
+        "CausalSelfAttention GQA host",
+        "q=%d kv=%d  mhaFwd=%.2e  mhaBwd=%.2e  expandFwd=%.2e  expandIn=%.2e  expandKV=%.2e",
+        heads,
+        kvHeads,
+        mhaParity,
+        mhaBwdParity,
+        expandFwdParity,
+        expandInParity,
+        expandKvParity);
 }

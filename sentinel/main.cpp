@@ -87,6 +87,17 @@ int main() {
         return 0;
     }
     free(biasSmokeEnv);
+    char* gqaSmokeEnv = nullptr;
+    size_t gqaSmokeLen = 0;
+    if (_dupenv_s(&gqaSmokeEnv, &gqaSmokeLen, "SENTINEL_GQA_HOST_SMOKE") == 0
+        && gqaSmokeEnv != nullptr
+        && gqaSmokeEnv[0] == '1'
+        && gqaSmokeEnv[1] == '\0') {
+        free(gqaSmokeEnv);
+        CausalSelfAttention::runGqaHostSmokeDemo();
+        return 0;
+    }
+    free(gqaSmokeEnv);
 #else
     if (const char* halfSmoke = std::getenv("SENTINEL_SAFETENSORS_HALF_SMOKE")) {
         if (halfSmoke[0] == '1' && halfSmoke[1] == '\0') {
@@ -109,6 +120,12 @@ int main() {
     if (const char* biasSmoke = std::getenv("SENTINEL_BIAS_POLICY_SMOKE")) {
         if (biasSmoke[0] == '1' && biasSmoke[1] == '\0') {
             LanguageModel::runBiasPolicySmokeDemo();
+            return 0;
+        }
+    }
+    if (const char* gqaSmoke = std::getenv("SENTINEL_GQA_HOST_SMOKE")) {
+        if (gqaSmoke[0] == '1' && gqaSmoke[1] == '\0') {
+            CausalSelfAttention::runGqaHostSmokeDemo();
             return 0;
         }
     }
@@ -257,6 +274,7 @@ int main() {
             CausalSelfAttention::runSparseMaskSmokeDemo(32, 2, 16, 32, 4, 2);
             CausalSelfAttention::runSparseBackwardSmokeDemo(32, 2, 12, 32, 4, 2);
             CausalSelfAttention::runSparseComputeSmokeDemo(32, 2, 16, 32, 4, 2);
+            CausalSelfAttention::runGqaHostSmokeDemo();
             CudaCausalSelfAttention::runSmokeDemo(64, 4, 32, 64);
             CudaCausalSelfAttention::runBackwardSmokeDemo(32, 2, 16, 32);
             CudaCausalSelfAttention::runFlashParitySmokeDemo(64, 4, 48, 64);
@@ -1599,6 +1617,7 @@ int main() {
         CausalSelfAttention::runSparseMaskSmokeDemo(32, 2, 16, 32, 4, 2);
         CausalSelfAttention::runSparseBackwardSmokeDemo(32, 2, 12, 32, 4, 2);
         CausalSelfAttention::runSparseComputeSmokeDemo(32, 2, 16, 32, 4, 2);
+        CausalSelfAttention::runGqaHostSmokeDemo();
         CudaCausalSelfAttention::runSmokeDemo(64, 4, 32, 64);
         CudaCausalSelfAttention::runBackwardSmokeDemo(32, 2, 16, 32);
         CudaCausalSelfAttention::runFlashParitySmokeDemo(64, 4, 48, 64);

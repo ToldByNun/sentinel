@@ -12,6 +12,7 @@ All notable changes to this project are documented here.
 - Explicit FFN `intermediate_size` on `FeedForward` / `TransformerBlock` / `LanguageModel` (+ safetensors metadata); `<=0` keeps legacy expand-4 width
 - Configurable RoPE `rope_theta` (base) through Attention / Block / LM (+ safetensors metadata); default `10000`
 - Optional FFN / `lm_head` bias via `use_bias` (default `true`); `false` keeps zero-shaped biases for CUDA, omits bias tensors on safetensors save, and skips Adam updates (HF arches without those biases)
+- Host `CausalSelfAttention` **GQA** (`kvHeadCount`); MHA when `kvHeadCount == headCount`
 
 ## [0.1.0] — 2026-08-06
 
@@ -37,3 +38,4 @@ First library-oriented release surface.
 - Intermediate-size smoke: `SENTINEL_INTERMEDIATE_SIZE_SMOKE=1`.
 - RoPE-theta smoke: `SENTINEL_ROPE_THETA_SMOKE=1`.
 - Bias-policy smoke: `SENTINEL_BIAS_POLICY_SMOKE=1`.
+- Host GQA smoke: `SENTINEL_GQA_HOST_SMOKE=1`.

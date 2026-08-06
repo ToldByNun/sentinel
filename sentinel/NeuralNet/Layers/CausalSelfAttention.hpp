@@ -49,14 +49,28 @@ public:
     Matrix outputWeight;
     RotaryEmbedding rotaryEmbedding;
     int headCount;
+    /// <summary>K/V head count; equals headCount for MHA; headCount % kvHeadCount == 0 for GQA</summary>
+    int kvHeadCount;
     int headDimension;
     int windowSize;
     int globalTokenCount;
     bool preferSparseCompute;
 
-    CausalSelfAttention(Matrix queryWeight, Matrix keyWeight, Matrix valueWeight, Matrix outputWeight, RotaryEmbedding rotaryEmbedding, int headCount, int windowSize, int globalTokenCount);
+    CausalSelfAttention(
+        Matrix queryWeight,
+        Matrix keyWeight,
+        Matrix valueWeight,
+        Matrix outputWeight,
+        RotaryEmbedding rotaryEmbedding,
+        int headCount,
+        int windowSize,
+        int globalTokenCount,
+        int kvHeadCount = -1);
 
-    /// <summary>create dim x dim weights; windowSize&lt;=0 means full causal; ropeBase is HF rope_theta</summary>
+    /// <summary>
+    /// create weights; windowSize&lt;=0 means full causal; ropeBase is HF rope_theta;
+    /// kvHeadCount&lt;=0 → MHA (same as headCount); else GQA with K/V rows = kvHeadCount * headDim
+    /// </summary>
     static CausalSelfAttention create(
         int embeddingDim,
         int headCount,
@@ -64,7 +78,8 @@ public:
         unsigned seed = 11u,
         int windowSize = -1,
         int globalTokenCount = 0,
-        float ropeBase = RotaryEmbedding::DefaultBase);
+        float ropeBase = RotaryEmbedding::DefaultBase,
+        int kvHeadCount = -1);
 
     /// <summary>causal multi head attention writes intermediates into cache</summary>
     Matrix forward(const Matrix& input, CausalSelfAttentionCache& cache) const;
@@ -81,7 +96,13 @@ public:
     /// <summary>smoke sparse compute path vs dense masked path parity</summary>
     static void runSparseComputeSmokeDemo(int embeddingDim = 32, int headCount = 2, int sequenceLength = 16, int maximumPositionCount = 32, int windowSize = 4, int globalTokenCount = 2);
 
+    /// <summary>GQA: MHA parity when kv==q heads; expanded-KV vs true MHA forward/backward</summary>
+    static void runGqaHostSmokeDemo();
+
 private:
+    /// <summary>KV head index for a query head under GQA (identity when MHA)</summary>
+    int kvHeadIndexForQueryHead(int queryHeadIndex) const;
+
     /// <summary>true when key may attend for this query under causal window/global rules</summary>
     static bool allowsKey(int queryIndex, int keyIndex, int windowSize, int globalTokenCount);
 
@@ -111,6 +132,9 @@ private:
 
     /// <summary>write one head block of rows into a full projection</summary>
     static void writeHead(Matrix& full, int headIndex, int headDimension, const Matrix& head);
+
+    /// <summary>add one head block into a full projection (GQA K/V grad accumulate)</summary>
+    static void addHeadInto(Matrix& full, int headIndex, int headDimension, const Matrix& head);
 };
 
 #endif // CAUSALSELFATTENTION_HPP
