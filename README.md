@@ -125,12 +125,13 @@ Full reference:
 | **[docs/](docs/README.md)** | Index |
 | **[docs/python.md](docs/python.md)** | Python (`import sentinel`) |
 | **[docs/cpp.md](docs/cpp.md)** | C++ (`Sentinel::sentinel`) |
+| **[docs/huggingface.md](docs/huggingface.md)** | HF causal-LM import + tokenizer |
 
 Treat those pages as the supported surface. The `sentinel` demo harness (`main.cpp`) is for smokes/benches — not the API contract.
 
-**Python (summary):** `cuda_available`, `BPETokenizer`, `LanguageModelDataset.build`, `LanguageModel` (train / generate / checkpoints), `ActivationCheckpointMode`, `SbaoMode`.
+**Python (summary):** `cuda_available`, `BPETokenizer`, `HfTokenizer`, `LanguageModelDataset.build`, `LanguageModel` (train / generate / checkpoints / `load_huggingface`), `ActivationCheckpointMode`, `SbaoMode`.
 
-**C++ (summary):** `LanguageModel.hpp`, `LanguageModelDataset.hpp`, `LanguageModelChunkSource.hpp` (streaming), `BPETokenizer.hpp`, `SafeTensors.hpp`, `CudaSbao.hpp`.
+**C++ (summary):** `LanguageModel.hpp` (incl. `loadHuggingFace`), `LanguageModelDataset.hpp`, `LanguageModelChunkSource.hpp` (streaming), `BPETokenizer.hpp`, `HfTokenizer.hpp`, `SafeTensors.hpp`, `HuggingFaceConfig.hpp` / `HuggingFaceWeights.hpp`, `CudaSbao.hpp`.
 
 ## Training knobs (short)
 

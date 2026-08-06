@@ -10,6 +10,8 @@ S.__version__
 
 Bindings live in [`python/sentinel/_core.cpp`](../python/sentinel/_core.cpp) and are re-exported from [`python/sentinel/__init__.py`](../python/sentinel/__init__.py).
 
+HuggingFace checkpoint import (supported `model_type`s, rejects, VRAM): **[huggingface.md](huggingface.md)**.
+
 On Windows, importing `sentinel` adds CUDA `bin\x64` / `bin` via `os.add_dll_directory` so `cublasLt` loads. Set `CUDA_PATH` if the toolkit is non-default.
 
 ---
@@ -93,7 +95,7 @@ text = tok.decode(ids, skip_special_tokens=True)
 | `vocab_size`, `bos_token_id`, `eos_token_id`, `pad_token_id`, `unk_token_id` | `-1` when absent |
 | `ignore_merges` | Llama-3-style whole-piece vocab hits |
 
-Unsupported: WordPiece / Unigram / Metaspace (Llama-2 SentencePiece).
+Unsupported: WordPiece / Unigram / Metaspace (Llama-2 SentencePiece). Full import guide: [huggingface.md](huggingface.md).
 
 ---
 
@@ -221,9 +223,9 @@ cont = model.generate(prompt_ids, new_token_count=32, temperature=0.9, top_k=20,
 | `load_checkpoint` | `(path) -> None` | `.snlm` or `.safetensors` |
 | `save_safetensors` | `(path) -> None` | Weights + arch metadata |
 | `load_safetensors` | `(path) -> None` | Architecture must already match |
-| `load_huggingface` | `(path, learning_rate=3e-4) -> LanguageModel` | Static: HF dir (`config.json` + safetensors) → sized model + weights |
+| `load_huggingface` | `(path, learning_rate=3e-4) -> LanguageModel` | Static: HF dir (`config.json` + safetensors) → sized model + weights; see [huggingface.md](huggingface.md) |
 
-Rebuild a model with the **same** dims before load. Tokenizer is separate.
+Rebuild a model with the **same** dims before `load_safetensors`. Tokenizer is separate (`BPETokenizer` / `HfTokenizer`).
 
 ### Probe
 
@@ -240,6 +242,8 @@ Requires `enable_cuda_train`. Unset `SENTINEL_PHASE_TRACE` when quoting tok/s.
 **Tiny CPU/GPU toy** — [`examples/python/train_tiny.py`](../examples/python/train_tiny.py)
 
 **JSONL (in-memory)** — [`examples/python/train_jsonl.py`](../examples/python/train_jsonl.py)
+
+**HuggingFace import** — [huggingface.md](huggingface.md) (`LanguageModel.load_huggingface` + `HfTokenizer`)
 
 **Large model on 16 GB (HostSGD)**
 

@@ -21,6 +21,8 @@ Includes are rooted at the NeuralNet tree, e.g.:
 
 Sources live under [`sentinel/NeuralNet/`](../sentinel/NeuralNet/). The `sentinel` executable from `main.cpp` is a **harness**, not the API contract.
 
+HuggingFace checkpoint import (allowlist, weight map, tokenizer, VRAM): **[huggingface.md](huggingface.md)**.
+
 ---
 
 ## Quick pattern
@@ -199,7 +201,7 @@ Set offload / SBAO preferences **before** `enableCudaTrain()` when pack and chec
 | `saveCheckpoint(path, includeOptimizer=true)` | Native `.snlm` |
 | `loadCheckpoint(path)` | `.snlm` or routes `.safetensors` |
 | `saveSafeTensors` / `loadSafeTensors` | Weights + metadata (`IO/SafeTensors.hpp`); overload accepts in-memory `SafeTensors::File` |
-| `loadHuggingFace(dir, lr=3e-4)` | Static: parse HF `config.json`, size model, remap/load safetensors shards |
+| `loadHuggingFace(dir, lr=3e-4)` | Static: parse HF `config.json`, size model, remap/load safetensors shards; see [huggingface.md](huggingface.md) |
 
 Focused smoke: `SENTINEL_HF_ROUNDTRIP_SMOKE=1` — stub HF dir → import + `HfTokenizer` encode + 1 host train step + generate (finite gate).
 
@@ -246,4 +248,4 @@ Useful options: `SENTINEL_BUILD_SHARED`, `SENTINEL_CUDA_ARCHITECTURES`, `SENTINE
 
 ## Python parity
 
-Most train/generate/checkpoint knobs are also on the [Python API](python.md). Gaps may include streaming `ChunkSource`, `forward` logits, and some fine-grained CUDA setters. Tokenizer **`.sbpe`** I/O is available on both sides.
+Most train/generate/checkpoint knobs are also on the [Python API](python.md). Gaps may include streaming `ChunkSource`, `forward` logits, and some fine-grained CUDA setters. Tokenizer **`.sbpe`** I/O is available on both sides; HF `tokenizer.json` is `HfTokenizer` / `HuggingFace::Tokenizer` — see [huggingface.md](huggingface.md).

@@ -20,6 +20,7 @@ All notable changes to this project are documented here.
 - `LanguageModel::loadHuggingFace` / Python `LanguageModel.load_huggingface` — config-driven arch + remapped weights from an HF model directory
 - `HuggingFace::Tokenizer` / Python `HfTokenizer` — load HF `tokenizer.json` (ByteLevel BPE, Llama-3 `ignore_merges`); encode/decode + specials
 - HF roundtrip smoke gate: import + encode + host microtrain + generate (finite logits/loss)
+- Docs: [`docs/huggingface.md`](docs/huggingface.md) — supported HF arches, rejects, tokenizer, VRAM notes (+ links from Python/C++ API docs)
 
 ## [0.1.0] — 2026-08-06
 
