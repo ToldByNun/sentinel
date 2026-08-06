@@ -8,6 +8,7 @@ All notable changes to this project are documented here.
 
 - `BPETokenizer` persistence: binary `.sbpe` via `save` / `load` / `loadFrom` (C++ + Python)
 - Examples write/load sibling `{stem}.sbpe` next to checkpoints
+- SafeTensors load accepts **BF16** / **F16** (converts to host F32); save remains F32
 
 ## [0.1.0] — 2026-08-06
 
@@ -29,3 +30,4 @@ First library-oriented release surface.
 
 - Python v0.1 exposes **in-memory** datasets (`LanguageModelDataset`). Streaming JSONL/Arrow epochs are C++ (`LanguageModelChunkSource`) unless wrapped in bindings.
 - Throughput numbers in the README are indicative (RTX 5070 Ti 16 GB); re-measure on your machine.
+- SafeTensors half-load smoke: `SENTINEL_SAFETENSORS_HALF_SMOKE=1` when running the `sentinel` harness.

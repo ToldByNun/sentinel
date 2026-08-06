@@ -1,11 +1,16 @@
 #include "SafeTensors.hpp"
 
+#include "../Utils/SmokeLog.hpp"
+
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 
 namespace SafeTensors {
 namespace {
@@ -285,37 +290,164 @@ void parseHeader(
     }
 }
 
+size_t elementBytes(const std::string& dtype) {
+    if (dtype == "F32") return 4;
+    if (dtype == "F16" || dtype == "BF16") return 2;
+    throw std::runtime_error("SafeTensors: unsupported dtype " + dtype);
+}
+
+float floatFromBf16Bits(std::uint16_t bits) {
+    const std::uint32_t f32Bits = static_cast<std::uint32_t>(bits) << 16;
+    float value = 0.0f;
+    std::memcpy(&value, &f32Bits, sizeof(value));
+    return value;
+}
+
+float floatFromF16Bits(std::uint16_t bits) {
+    const std::uint32_t sign = (static_cast<std::uint32_t>(bits) & 0x8000u) << 16;
+    const std::uint32_t exp = (bits >> 10) & 0x1fu;
+    const std::uint32_t mant = bits & 0x3ffu;
+    std::uint32_t f32Bits = 0;
+    if (exp == 0) {
+        if (mant == 0) {
+            f32Bits = sign;
+        } else {
+            // Subnormal half → normalized float.
+            std::uint32_t m = mant;
+            std::uint32_t e = 127 - 15 + 1;
+            while ((m & 0x400u) == 0u) {
+                m <<= 1;
+                --e;
+            }
+            m &= 0x3ffu;
+            f32Bits = sign | (e << 23) | (m << 13);
+        }
+    } else if (exp == 31) {
+        f32Bits = sign | 0x7f800000u | (mant << 13);
+    } else {
+        f32Bits = sign | ((exp + (127 - 15)) << 23) | (mant << 13);
+    }
+    float value = 0.0f;
+    std::memcpy(&value, &f32Bits, sizeof(value));
+    return value;
+}
+
+std::uint16_t bf16BitsFromFloat(float value) {
+    std::uint32_t f32Bits = 0;
+    std::memcpy(&f32Bits, &value, sizeof(f32Bits));
+    // Round-to-nearest-even on the discarded low 16 bits.
+    const std::uint32_t lsb = (f32Bits >> 16) & 1u;
+    const std::uint32_t rounding = 0x7fffu + lsb;
+    return static_cast<std::uint16_t>((f32Bits + rounding) >> 16);
+}
+
+std::uint16_t f16BitsFromFloat(float value) {
+    std::uint32_t f32Bits = 0;
+    std::memcpy(&f32Bits, &value, sizeof(f32Bits));
+    const std::uint32_t sign = (f32Bits >> 16) & 0x8000u;
+    std::int32_t exp = static_cast<std::int32_t>((f32Bits >> 23) & 0xffu) - 127 + 15;
+    std::uint32_t mant = f32Bits & 0x7fffffu;
+    if ((f32Bits & 0x7fffffffu) == 0u)
+        return static_cast<std::uint16_t>(sign);
+    if (exp >= 31) {
+        // Overflow → inf (preserve nan payload coarsely).
+        if (((f32Bits >> 23) & 0xffu) == 0xffu && mant != 0u)
+            return static_cast<std::uint16_t>(sign | 0x7e00u);
+        return static_cast<std::uint16_t>(sign | 0x7c00u);
+    }
+    if (exp <= 0) {
+        if (exp < -10)
+            return static_cast<std::uint16_t>(sign);
+        mant |= 0x800000u;
+        const std::uint32_t shift = static_cast<std::uint32_t>(1 - exp);
+        std::uint32_t halfMant = mant >> (shift + 13);
+        const std::uint32_t remainder = mant & ((1u << (shift + 13)) - 1u);
+        if (remainder > (1u << (shift + 12)) || (remainder == (1u << (shift + 12)) && (halfMant & 1u)))
+            ++halfMant;
+        return static_cast<std::uint16_t>(sign | halfMant);
+    }
+    std::uint32_t half = (static_cast<std::uint32_t>(exp) << 10) | (mant >> 13);
+    const std::uint32_t remainder = mant & 0x1fffu;
+    if (remainder > 0x1000u || (remainder == 0x1000u && (half & 1u)))
+        ++half;
+    return static_cast<std::uint16_t>(sign | half);
+}
+
+void shapeToRowsCols(const std::vector<size_t>& shape, size_t& rows, size_t& cols) {
+    if (shape.empty()) {
+        rows = 1;
+        cols = 1;
+    } else if (shape.size() == 1) {
+        rows = shape[0];
+        cols = 1;
+    } else if (shape.size() == 2) {
+        rows = shape[0];
+        cols = shape[1];
+    } else {
+        throw std::runtime_error("SafeTensors: only rank-0/1/2 tensors supported");
+    }
+}
+
 Matrix matrixFromBuffer(const std::vector<char>& data, const ParsedTensor& info) {
-    if (info.dtype != "F32")
-        throw std::runtime_error("SafeTensors: only F32 tensors are supported (got " + info.dtype + ")");
+    if (info.dtype != "F32" && info.dtype != "F16" && info.dtype != "BF16")
+        throw std::runtime_error("SafeTensors: unsupported dtype " + info.dtype + " (need F32/F16/BF16)");
     if (info.end < info.begin)
         throw std::runtime_error("SafeTensors: invalid data_offsets");
     const size_t byteCount = info.end - info.begin;
     const size_t elems = elementCount(info.shape);
-    if (byteCount != elems * sizeof(float))
+    const size_t bytesPerElem = elementBytes(info.dtype);
+    if (byteCount != elems * bytesPerElem)
         throw std::runtime_error("SafeTensors: tensor byte size mismatch for " + info.dtype);
     if (info.begin + byteCount > data.size())
         throw std::runtime_error("SafeTensors: tensor extends past file");
 
     size_t rows = 0;
     size_t cols = 0;
-    if (info.shape.empty()) {
-        rows = 1;
-        cols = 1;
-    } else if (info.shape.size() == 1) {
-        rows = info.shape[0];
-        cols = 1;
-    } else if (info.shape.size() == 2) {
-        rows = info.shape[0];
-        cols = info.shape[1];
-    } else {
-        throw std::runtime_error("SafeTensors: only rank-0/1/2 F32 tensors supported");
-    }
+    shapeToRowsCols(info.shape, rows, cols);
 
     Matrix matrix(rows, cols, 0.0f);
-    if (!matrix.data.empty())
-        std::memcpy(matrix.data.data(), data.data() + info.begin, byteCount);
+    if (matrix.data.empty())
+        return matrix;
+
+    const char* src = data.data() + info.begin;
+    if (info.dtype == "F32") {
+        std::memcpy(matrix.data.data(), src, byteCount);
+        return matrix;
+    }
+
+    for (size_t index = 0; index < elems; ++index) {
+        std::uint16_t bits = 0;
+        std::memcpy(&bits, src + index * 2, sizeof(bits));
+        matrix.data[index] = (info.dtype == "BF16") ? floatFromBf16Bits(bits) : floatFromF16Bits(bits);
+    }
     return matrix;
+}
+
+void writeRawSafeTensors(
+    const std::string& path,
+    const std::string& tensorName,
+    const std::string& dtype,
+    const std::vector<size_t>& shape,
+    const void* payload,
+    size_t payloadBytes) {
+    std::ostringstream header;
+    header << "{\"" << tensorName << "\":{\"dtype\":\"" << dtype << "\",\"shape\":[";
+    for (size_t i = 0; i < shape.size(); ++i) {
+        if (i) header << ',';
+        header << shape[i];
+    }
+    header << "],\"data_offsets\":[0," << payloadBytes << "]}}";
+    std::string headerJson = header.str();
+    while (((8ull + headerJson.size()) % 8ull) != 0ull)
+        headerJson.push_back(' ');
+
+    const std::uint64_t headerSize = static_cast<std::uint64_t>(headerJson.size());
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) throw std::runtime_error("SafeTensors smoke cannot open " + path);
+    writeExact(out, &headerSize, sizeof(headerSize));
+    writeExact(out, headerJson.data(), headerJson.size());
+    if (payloadBytes > 0)
+        writeExact(out, payload, payloadBytes);
 }
 
 } // namespace
@@ -481,6 +613,79 @@ File load(const std::string& path) {
     for (const auto& entry : parsed)
         file.tensors[entry.first] = matrixFromBuffer(data, entry.second);
     return file;
+}
+
+void runHalfLoadSmokeDemo() {
+    const std::vector<float> reference = {
+        0.0f, 1.0f, -2.0f, 0.5f, 3.1415926f, -0.125f, 65504.0f, 1.0e-4f
+    };
+    const std::vector<size_t> shape = { 2, 4 };
+    const size_t elems = reference.size();
+
+    std::vector<std::uint16_t> bf16Payload(elems);
+    std::vector<std::uint16_t> f16Payload(elems);
+    for (size_t i = 0; i < elems; ++i) {
+        bf16Payload[i] = bf16BitsFromFloat(reference[i]);
+        f16Payload[i] = f16BitsFromFloat(reference[i]);
+    }
+
+    const std::string bf16Path = "safetensors_smoke_bf16.safetensors";
+    const std::string f16Path = "safetensors_smoke_f16.safetensors";
+    writeRawSafeTensors(bf16Path, "weight", "BF16", shape, bf16Payload.data(), bf16Payload.size() * 2);
+    writeRawSafeTensors(f16Path, "weight", "F16", shape, f16Payload.data(), f16Payload.size() * 2);
+
+    const File bf16File = load(bf16Path);
+    const File f16File = load(f16Path);
+    const Matrix& bf16Mat = requireMatrix(bf16File, "weight", 2, 4);
+    const Matrix& f16Mat = requireMatrix(f16File, "weight", 2, 4);
+
+    float bf16MaxDiff = 0.0f;
+    float f16MaxDiff = 0.0f;
+    for (size_t i = 0; i < elems; ++i) {
+        bf16MaxDiff = (std::max)(bf16MaxDiff, std::fabs(bf16Mat.data[i] - floatFromBf16Bits(bf16Payload[i])));
+        f16MaxDiff = (std::max)(f16MaxDiff, std::fabs(f16Mat.data[i] - floatFromF16Bits(f16Payload[i])));
+        // Loaded value must match bit-exact decode of the stored half.
+        if (bf16Mat.data[i] != floatFromBf16Bits(bf16Payload[i]))
+            throw std::runtime_error("SafeTensors BF16 load mismatch");
+        if (f16Mat.data[i] != floatFromF16Bits(f16Payload[i]))
+            throw std::runtime_error("SafeTensors F16 load mismatch");
+    }
+
+    // F32 path still works (save → load).
+    File f32File;
+    Matrix f32Ref(2, 4, 0.0f);
+    f32Ref.data = reference;
+    putMatrix(f32File, "weight", f32Ref);
+    const std::string f32Path = "safetensors_smoke_f32.safetensors";
+    save(f32Path, f32File);
+    const File f32Loaded = load(f32Path);
+    const Matrix& f32Mat = requireMatrix(f32Loaded, "weight", 2, 4);
+    float f32MaxDiff = 0.0f;
+    for (size_t i = 0; i < elems; ++i)
+        f32MaxDiff = (std::max)(f32MaxDiff, std::fabs(f32Mat.data[i] - reference[i]));
+    if (f32MaxDiff != 0.0f)
+        throw std::runtime_error("SafeTensors F32 roundtrip mismatch");
+
+    // Reject unknown dtype in header.
+    {
+        const std::uint32_t junk = 0;
+        writeRawSafeTensors("safetensors_smoke_bad.safetensors", "weight", "F64", { 1 }, &junk, 0);
+        bool rejected = false;
+        try {
+            (void)load("safetensors_smoke_bad.safetensors");
+        } catch (const std::exception&) {
+            rejected = true;
+        }
+        if (!rejected)
+            throw std::runtime_error("SafeTensors should reject F64");
+    }
+
+    SmokeLog::result(
+        "SafeTensors half load",
+        "bf16MaxDiff=%.2e  f16MaxDiff=%.2e  f32MaxDiff=%.2e  ok",
+        bf16MaxDiff,
+        f16MaxDiff,
+        f32MaxDiff);
 }
 
 } // namespace SafeTensors

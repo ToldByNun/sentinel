@@ -212,7 +212,7 @@ Unset env `SENTINEL_PHASE_TRACE` when quoting throughput.
 | Header | Role |
 | ------ | ---- |
 | `Optimizers/Adam.hpp` / `SGD.hpp` | Host optimizers |
-| `IO/SafeTensors.hpp` | Weight file format |
+| `IO/SafeTensors.hpp` | Weight file format — **load** F32/BF16/F16 → host F32; **save** F32 |
 | `Data/TextRowReader.hpp` / `JsonlLoader.hpp` / `ArrowChunkReader.hpp` | Corpus I/O |
 | `Cuda/CudaMatmul.hpp` | `CudaMatmul::isAvailable()` |
 | `Cuda/CudaSbao.hpp` | SBAO policy + fused-half offload helpers |

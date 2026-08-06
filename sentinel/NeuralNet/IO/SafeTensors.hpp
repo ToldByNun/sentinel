@@ -10,8 +10,10 @@
 #include <vector>
 
 /// <summary>
-/// Minimal safetensors I/O (F32 row-major only) — zero third-party deps.
-/// Spec: https://github.com/huggingface/safetensors
+/// Minimal safetensors I/O — zero third-party deps.
+/// Spec: https://huggingface.co/docs/safetensors
+/// Save: F32 row-major only.
+/// Load: F32, BF16, and F16 (IEEE) → host F32 Matrix.
 /// </summary>
 namespace SafeTensors {
 
@@ -25,13 +27,13 @@ struct TensorInfo {
 
 struct File {
     std::map<std::string, std::string> metadata;
-    std::map<std::string, Matrix> tensors; // F32 matrices; shape [rows, cols] or [rows] as cols=1
+    std::map<std::string, Matrix> tensors; // always F32 after load; shape [rows, cols] or [rows] as cols=1
 };
 
 /// <summary>write tensors + string metadata; F32 little-endian row-major</summary>
 void save(const std::string& path, const File& file);
 
-/// <summary>load F32 tensors (other dtypes rejected)</summary>
+/// <summary>load tensors as host F32 (accepts F32 / BF16 / F16 storage dtypes)</summary>
 File load(const std::string& path);
 
 /// <summary>true if path looks like a safetensors file (header size + '{')</summary>
@@ -45,6 +47,9 @@ Matrix requireMatrix(const File& file, const std::string& name, size_t rows, siz
 
 /// <summary>helper: require tensor present; 1D [n] accepted as [n, 1]</summary>
 Matrix requireMatrixFlexible(const File& file, const std::string& name, size_t rows, size_t cols);
+
+/// <summary>write tiny BF16/F16 fixtures, load, check values vs F32 reference</summary>
+void runHalfLoadSmokeDemo();
 
 } // namespace SafeTensors
 

@@ -15,6 +15,7 @@
 #include "NeuralNet/Data/LanguageModelDataset.hpp"
 #include "NeuralNet/Data/ArrowChunkReader.hpp"
 #include "NeuralNet/Network/LanguageModel.hpp"
+#include "NeuralNet/IO/SafeTensors.hpp"
 #include "NeuralNet/Optimizers/Adam.hpp"
 #include "NeuralNet/Utils/SmokeLog.hpp"
 
@@ -22,6 +23,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cuda_runtime.h>
 #include <iostream>
 #include <stdexcept>
@@ -38,6 +40,28 @@
 /// </summary>
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
+
+    // Focused fixture: SENTINEL_SAFETENSORS_HALF_SMOKE=1 ./sentinel
+#if defined(_MSC_VER)
+    char* halfSmokeEnv = nullptr;
+    size_t halfSmokeLen = 0;
+    if (_dupenv_s(&halfSmokeEnv, &halfSmokeLen, "SENTINEL_SAFETENSORS_HALF_SMOKE") == 0
+        && halfSmokeEnv != nullptr
+        && halfSmokeEnv[0] == '1'
+        && halfSmokeEnv[1] == '\0') {
+        free(halfSmokeEnv);
+        SafeTensors::runHalfLoadSmokeDemo();
+        return 0;
+    }
+    free(halfSmokeEnv);
+#else
+    if (const char* halfSmoke = std::getenv("SENTINEL_SAFETENSORS_HALF_SMOKE")) {
+        if (halfSmoke[0] == '1' && halfSmoke[1] == '\0') {
+            SafeTensors::runHalfLoadSmokeDemo();
+            return 0;
+        }
+    }
+#endif
 
     const bool runSmokes = false;
     const bool runSpeedBench = false;
@@ -194,6 +218,7 @@ int main() {
             CudaLanguageModel::runKvCacheSmokeDemo(128, 64, 32, 2, 4);
             LanguageModel::runCheckpointSmokeDemo();
             LanguageModel::runStreamingSmokeDemo();
+            SafeTensors::runHalfLoadSmokeDemo();
             CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);
             CudaLanguageModel::runTrainSmokeDemo(1000, 64, 48, 2, 4);
             CudaLanguageModel::runTrainInt8AdamSmokeDemo(1000, 64, 48, 2, 4);
