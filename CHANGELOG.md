@@ -16,6 +16,7 @@ All notable changes to this project are documented here.
 - CUDA / flash attention GQA (dense Repeat-KV; flash via expanded K/V heads) + host/flash parity smoke
 - `kv_head_count` on `TransformerBlock` / `LanguageModel` / Python (+ safetensors metadata); `<=0` → MHA
 - Minimal HuggingFace `config.json` parser (`HuggingFace::loadConfig` / `parseConfigJson`); allowlist `llama` / `mistral` / `qwen2`; rejects MoE, sliding-window, quantized, unknown `model_type`
+- HF→Sentinel weight map + sharded safetensors (`HuggingFace::loadMappedWeights`, Llama/Mistral-like layout family); respects `tie_word_embeddings` / `use_bias`
 
 ## [0.1.0] — 2026-08-06
 
@@ -45,3 +46,4 @@ First library-oriented release surface.
 - CUDA GQA smoke: `SENTINEL_GQA_CUDA_SMOKE=1`.
 - LM `kv_head_count` smoke: `SENTINEL_KV_HEAD_COUNT_SMOKE=1`.
 - HF config parse smoke: `SENTINEL_HF_CONFIG_SMOKE=1`.
+- HF weight-map smoke: `SENTINEL_HF_WEIGHT_MAP_SMOKE=1`.

@@ -17,6 +17,7 @@
 #include "NeuralNet/Network/LanguageModel.hpp"
 #include "NeuralNet/IO/SafeTensors.hpp"
 #include "NeuralNet/IO/HuggingFaceConfig.hpp"
+#include "NeuralNet/IO/HuggingFaceWeights.hpp"
 #include "NeuralNet/Optimizers/Adam.hpp"
 #include "NeuralNet/Utils/SmokeLog.hpp"
 
@@ -110,6 +111,17 @@ int main() {
         return 0;
     }
     free(hfConfigSmokeEnv);
+    char* hfWeightSmokeEnv = nullptr;
+    size_t hfWeightSmokeLen = 0;
+    if (_dupenv_s(&hfWeightSmokeEnv, &hfWeightSmokeLen, "SENTINEL_HF_WEIGHT_MAP_SMOKE") == 0
+        && hfWeightSmokeEnv != nullptr
+        && hfWeightSmokeEnv[0] == '1'
+        && hfWeightSmokeEnv[1] == '\0') {
+        free(hfWeightSmokeEnv);
+        HuggingFace::runWeightMapSmokeDemo();
+        return 0;
+    }
+    free(hfWeightSmokeEnv);
     char* gqaSmokeEnv = nullptr;
     size_t gqaSmokeLen = 0;
     if (_dupenv_s(&gqaSmokeEnv, &gqaSmokeLen, "SENTINEL_GQA_HOST_SMOKE") == 0
@@ -166,6 +178,12 @@ int main() {
     if (const char* hfConfigSmoke = std::getenv("SENTINEL_HF_CONFIG_SMOKE")) {
         if (hfConfigSmoke[0] == '1' && hfConfigSmoke[1] == '\0') {
             HuggingFace::runConfigParseSmokeDemo();
+            return 0;
+        }
+    }
+    if (const char* hfWeightSmoke = std::getenv("SENTINEL_HF_WEIGHT_MAP_SMOKE")) {
+        if (hfWeightSmoke[0] == '1' && hfWeightSmoke[1] == '\0') {
+            HuggingFace::runWeightMapSmokeDemo();
             return 0;
         }
     }
@@ -344,6 +362,7 @@ int main() {
             LanguageModel::runBiasPolicySmokeDemo();
             LanguageModel::runKvHeadCountSmokeDemo();
             HuggingFace::runConfigParseSmokeDemo();
+            HuggingFace::runWeightMapSmokeDemo();
             LanguageModel::runStreamingSmokeDemo();
             SafeTensors::runHalfLoadSmokeDemo();
             CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);

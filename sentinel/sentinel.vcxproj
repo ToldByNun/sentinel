@@ -32,6 +32,7 @@
     <ClCompile Include="NeuralNet\Initializers\UniformInit.cpp" />
     <ClCompile Include="NeuralNet\IO\SafeTensors.cpp" />
     <ClCompile Include="NeuralNet\IO\HuggingFaceConfig.cpp" />
+    <ClCompile Include="NeuralNet\IO\HuggingFaceWeights.cpp" />
     <ClCompile Include="NeuralNet\Utils\TextUtil.cpp" />
     <ClCompile Include="NeuralNet\Layers\Dense.cpp" />
     <ClCompile Include="NeuralNet\Layers\Dropout.cpp" />
