@@ -16,6 +16,7 @@
 #include "NeuralNet/Data/ArrowChunkReader.hpp"
 #include "NeuralNet/Network/LanguageModel.hpp"
 #include "NeuralNet/IO/SafeTensors.hpp"
+#include "NeuralNet/IO/HuggingFaceConfig.hpp"
 #include "NeuralNet/Optimizers/Adam.hpp"
 #include "NeuralNet/Utils/SmokeLog.hpp"
 
@@ -98,6 +99,17 @@ int main() {
         return 0;
     }
     free(kvHeadSmokeEnv);
+    char* hfConfigSmokeEnv = nullptr;
+    size_t hfConfigSmokeLen = 0;
+    if (_dupenv_s(&hfConfigSmokeEnv, &hfConfigSmokeLen, "SENTINEL_HF_CONFIG_SMOKE") == 0
+        && hfConfigSmokeEnv != nullptr
+        && hfConfigSmokeEnv[0] == '1'
+        && hfConfigSmokeEnv[1] == '\0') {
+        free(hfConfigSmokeEnv);
+        HuggingFace::runConfigParseSmokeDemo();
+        return 0;
+    }
+    free(hfConfigSmokeEnv);
     char* gqaSmokeEnv = nullptr;
     size_t gqaSmokeLen = 0;
     if (_dupenv_s(&gqaSmokeEnv, &gqaSmokeLen, "SENTINEL_GQA_HOST_SMOKE") == 0
@@ -148,6 +160,12 @@ int main() {
     if (const char* kvHeadSmoke = std::getenv("SENTINEL_KV_HEAD_COUNT_SMOKE")) {
         if (kvHeadSmoke[0] == '1' && kvHeadSmoke[1] == '\0') {
             LanguageModel::runKvHeadCountSmokeDemo();
+            return 0;
+        }
+    }
+    if (const char* hfConfigSmoke = std::getenv("SENTINEL_HF_CONFIG_SMOKE")) {
+        if (hfConfigSmoke[0] == '1' && hfConfigSmoke[1] == '\0') {
+            HuggingFace::runConfigParseSmokeDemo();
             return 0;
         }
     }
@@ -325,6 +343,7 @@ int main() {
             LanguageModel::runRopeThetaSmokeDemo();
             LanguageModel::runBiasPolicySmokeDemo();
             LanguageModel::runKvHeadCountSmokeDemo();
+            HuggingFace::runConfigParseSmokeDemo();
             LanguageModel::runStreamingSmokeDemo();
             SafeTensors::runHalfLoadSmokeDemo();
             CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);
