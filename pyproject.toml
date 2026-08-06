@@ -30,7 +30,8 @@ dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/ToldByNun/sentinel"
-Documentation = "https://github.com/ToldByNun/sentinel#readme"
+Documentation = "https://github.com/ToldByNun/sentinel/blob/main/docs/README.md"
+Changelog = "https://github.com/ToldByNun/sentinel/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]

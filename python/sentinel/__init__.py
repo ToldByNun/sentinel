@@ -1,3 +1,11 @@
+"""Sentinel — C++/CUDA full-train causal LM (pip: sentinel-lm).
+
+Public surface: BPETokenizer, LanguageModelDataset, LanguageModel,
+ActivationCheckpointMode, SbaoMode, cuda_available.
+
+API docs: https://github.com/ToldByNun/sentinel/blob/main/docs/python.md
+"""
+
 from __future__ import annotations
 
 import os

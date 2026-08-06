@@ -1,0 +1,8 @@
+{"text": "the cat sat on the mat"}
+{"text": "the dog ran in the park"}
+{"text": "a quick brown fox jumps over the lazy dog"}
+{"problem_statement": "sentinel trains causal language models on a single consumer GPU"}
+{"text": "cuda packs batches for throughput"}
+{"content": "tiny models learn short patterns from small corpora"}
+{"text": "flash attention and fp16 amp keep the device busy"}
+{"text": "host sgd offload fits larger models into sixteen gigabytes"}

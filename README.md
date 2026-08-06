@@ -1,44 +1,71 @@
 # Sentinel
 
-C++/CUDA framework for **full-train** causal LMs (no LoRA): CPU/OpenMP plus a device train path with packed batches, flash attention, FP16 AMP, int8 Adam / Muon, selective activation checkpointing, and **SBAO** (Sentinel Backend Adaptive Optimization) — GpuInt8 Adam, HostFusedHalfAdam, or HostFusedHalfSgd (FP16 GPU weights + fused FP16 grad D2H + async host update).
+**Sentinel** is a C++/CUDA library for **full-train** causal language models on a single consumer GPU — no LoRA, no PyTorch/TensorFlow runtime, no cuDNN.
 
-**v0.1** ships as an installable C++ library (`Sentinel::sentinel`), a demo harness, examples, and a **pip-installable Python package** (`sentinel-lm`).
+You get a linkable C++ library (`Sentinel::sentinel`), small CLI examples, and a pip package (`sentinel-lm`, import name `sentinel`).
 
-> **Note on “zero-dependency”:** That claim (e.g. in the GitHub *About* blurb — *zero-dependency C++/CUDA DL framework focused on single consumer GPUs*) refers to the **engine runtime itself**: the C++/CUDA library links only against the CUDA toolkit (cuBLAS / cuBLASLt), OpenMP, and the C++ standard library — no cuDNN, no PyTorch/TensorFlow, no other third-party DL stacks at train/infer time. It does **not** mean the optional **Python bindings** are dependency-free: building `sentinel-lm` needs a Python toolchain plus build-time packages (`scikit-build-core`, `nanobind`, CMake, a CUDA-capable compiler). At Python *runtime* there are still no extra PyPI deps — only the same CUDA / driver / OpenMP requirements as the C++ engine.
+| | |
+| --- | --- |
+| **Engine runtime deps** | CUDA toolkit (cuBLAS / cuBLASLt), OpenMP, C++20 stdlib |
+| **Not required at train/infer** | cuDNN, PyTorch, TensorFlow, other DL frameworks |
+| **Python package** | Build needs scikit-build-core + nanobind + CMake + CUDA compiler; **no** extra PyPI runtime deps |
 
-## Requirements
+> The “zero-dependency” blurb means the **engine**, not the optional Python build toolchain.
 
-- **OS:** Windows or Linux (x86_64)
-- C++20 compiler — MSVC (`v145+`), GCC ≥ 11, or Clang ≥ 14 — plus **CMake ≥ 3.24**
-- CUDA Toolkit (**13.x**; developed against v13.3) with matching NVIDIA driver
-- NVIDIA GPU — GeForce **20 / 30 / 40 / 50** (`sm_75` / `sm_80`+`sm_86` / `sm_89` / `sm_120`). CUDA 13 floor is Turing.
-- OpenMP (libgomp / LLVM OpenMP / MSVC OpenMP)
-- **Python ≥ 3.10** (only for the Python package)
-- Data for the SERA demo only (not included): `SERA-Data/sera_best_subset` (HF Arrow) and/or `*.jsonl`
+## Install
 
-## Python (pip)
+### Python (`sentinel-lm`)
 
-Needs CUDA toolkit on the **build** machine (compiles the same C++/CUDA core) and at **runtime** (cuBLASLt DLLs / `.so`). No extra PyPI runtime deps.
-
-On Windows, `import sentinel` auto-adds `$CUDA_PATH\bin\x64` (and `bin`) via `os.add_dll_directory` so Python 3.8+ can load `cublasLt64_*.dll`. Set `CUDA_PATH` if the toolkit is not under the default `Program Files\NVIDIA GPU Computing Toolkit\CUDA` layout.
+Needs a CUDA **13.x** toolkit on the build machine and at runtime (matching driver). On Windows, `import sentinel` adds `$CUDA_PATH\bin\x64` (and `bin`) via `os.add_dll_directory`.
 
 ```bash
-# From repo root (editable / local wheel)
+# From a release / PyPI (when published):
+pip install sentinel-lm
+
+# From this repo:
 pip install .
-
-# Or editable while hacking bindings (needs build deps already installed):
+# Editable while hacking bindings:
 pip install -e . --no-build-isolation
-
-python examples/python/train_tiny.py
-python examples/python/generate.py tiny_demo.snlm "the cat"
 ```
 
-On Windows, `cmake` is often only on PATH inside a **VS Developer** shell. If pip fails with `CMakeNotFoundError`, open *x64 Native Tools Command Prompt for VS*, or prepend the VS CMake bin once:
+Windows tip: if pip cannot find CMake, use a VS *x64 Native Tools* shell, or prepend the VS CMake bin:
 
 ```powershell
 $env:PATH = "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;$env:CUDA_PATH\bin;$env:PATH"
 pip install -e . --no-build-isolation
 ```
+
+Faster local wheel (your GPU only):
+
+```bash
+pip install . -C cmake.define.SENTINEL_CUDA_ARCHITECTURES=native
+```
+
+### C++ (CMake)
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+cmake --install build --prefix /path/to/prefix
+```
+
+```cmake
+find_package(Sentinel 0.1 REQUIRED)
+target_link_libraries(my_app PRIVATE Sentinel::sentinel)
+# #include "NeuralNet/Network/LanguageModel.hpp"
+```
+
+| Option | Default | Meaning |
+| ------ | ------- | ------- |
+| `SENTINEL_CUDA_ARCHITECTURES` | `75;80;86;89;120` | Fat binary (`native` = host GPU) |
+| `SENTINEL_BUILD_SHARED` | `OFF` | Shared instead of static |
+| `SENTINEL_BUILD_DEMO` | `ON` | `sentinel` harness (`main.cpp`) |
+| `SENTINEL_BUILD_EXAMPLES` | `ON` | `sentinel_train_tiny`, `sentinel_generate` |
+| `SENTINEL_BUILD_PYTHON` | `OFF` (`ON` via pip) | nanobind `sentinel._core` |
+
+**Requirements:** Windows or Linux x86_64 · C++20 · CMake ≥ 3.24 · CUDA 13.x · GeForce 20/30/40/50 (`sm_75` … `sm_120`) · OpenMP · Python ≥ 3.10 only for the pip package.
+
+## Quickstart (Python)
 
 ```python
 import sentinel as S
@@ -58,218 +85,115 @@ model.save_safetensors("toy.safetensors")
 print(tok.decode(model.generate(tok.encode("the"), new_token_count=16)))
 ```
 
-Override CUDA arches (e.g. faster local build for your GPU only):
-
 ```bash
-pip install . -C cmake.define.SENTINEL_CUDA_ARCHITECTURES=native
-# or a subset:
-pip install . -C cmake.define.SENTINEL_CUDA_ARCHITECTURES="75;86;89;120"
+python examples/python/train_tiny.py
+python examples/python/generate.py tiny_demo.snlm "the cat"
+python examples/python/train_jsonl.py examples/data/sample.jsonl --out run.safetensors
 ```
 
-### Publishing wheels (GitHub → PyPI)
-
-Workflow: [`.github/workflows/publish.yml`](.github/workflows/publish.yml). Builds **sdist** + **cp310–cp312** wheels for **Linux** (`manylinux_2_34`, Ubuntu 22.04 / glibc ≥ 2.34) and **Windows** (CUDA 13 toolkit on the runner; fat binary arches). Publishes on a GitHub **Release**, or via *workflow_dispatch* with `publish_to_pypi=true`.
-
-One-time setup:
-
-1. On [PyPI Trusted Publishers](https://pypi.org/manage/account/publishing/), add publisher for project **`sentinel-lm`**: repo + workflow `publish.yml` + environment `pypi`.
-2. In GitHub → Settings → Environments, create **`pypi`** (optional protection rules).
-3. Cut a release (or run the workflow manually).
-
-Wheels do **not** bundle the CUDA runtime — installers still need CUDA 13 + a matching driver, same as the C++ engine.
-
-## Build & run (C++)
-
-### CMake (recommended)
-
-Builds **`libsentinel`** (static by default), the **`sentinel`** demo harness, and C++ examples.
-
-**Linux**
+## Quickstart (C++)
 
 ```bash
-# CUDA on PATH, e.g. export PATH=/usr/local/cuda/bin:$PATH
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j"$(nproc)"
-
-# Tiny end-to-end (no dataset)
 ./build/bin/sentinel_train_tiny tiny_demo.snlm
 ./build/bin/sentinel_generate tiny_demo.snlm "the cat"
-
-# Full harness (cwd matters for SERA paths)
-cd sentinel && ../build/bin/sentinel
 ```
 
-**Windows**
+```cpp
+#include "NeuralNet/Network/LanguageModel.hpp"
+#include "NeuralNet/Data/LanguageModelDataset.hpp"
+#include "NeuralNet/Tokenizer/BPETokenizer.hpp"
+#include "NeuralNet/Optimizers/Adam.hpp"
 
-```bat
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release -j
-build\bin\sentinel_train_tiny.exe tiny_demo.snlm
-build\bin\sentinel_generate.exe tiny_demo.snlm "the cat"
-cd sentinel
-..\build\bin\sentinel.exe
+BPETokenizer tok;
+tok.train(corpus, 256);
+auto train = LanguageModelDataset::build(corpus, tok, 48, false);
+LanguageModel model(tok.vocabSize(), 64, 64, Adam(3e-3f), 2, 4);
+model.enableCuda();
+model.enableCudaTrain();
+model.train(train, /*test=*/{}, 4, 1, 4, 1);
+model.saveSafeTensors("toy.safetensors");
 ```
 
-Useful options:
+Streaming corpora (JSONL / HF Arrow) use `LanguageModelChunkSource` on the **C++** API — not yet wrapped in Python. See [examples/README.md](examples/README.md).
 
-| Option | Default | Meaning |
-| ------ | ------- | ------- |
-| `SENTINEL_CUDA_ARCHITECTURES` | `75;80;86;89;120` | Fat binary arches (`native` = host GPU only) |
-| `SENTINEL_BUILD_SHARED` | `OFF` | Shared library instead of static |
-| `SENTINEL_BUILD_DEMO` | `ON` | `sentinel` harness from `main.cpp` |
-| `SENTINEL_BUILD_EXAMPLES` | `ON` | `sentinel_train_tiny`, `sentinel_generate` |
-| `SENTINEL_BUILD_PYTHON` | `OFF` (`ON` via pip) | nanobind module `sentinel._core` |
+## Docs / Public API (v0.1)
 
-### Install / consume from another CMake project
+Full reference:
 
-```bash
-cmake --install build --prefix /path/to/prefix
+| | |
+| --- | --- |
+| **[docs/](docs/README.md)** | Index |
+| **[docs/python.md](docs/python.md)** | Python (`import sentinel`) |
+| **[docs/cpp.md](docs/cpp.md)** | C++ (`Sentinel::sentinel`) |
+
+Treat those pages as the supported surface. The `sentinel` demo harness (`main.cpp`) is for smokes/benches — not the API contract.
+
+**Python (summary):** `cuda_available`, `BPETokenizer`, `LanguageModelDataset.build`, `LanguageModel` (train / generate / checkpoints), `ActivationCheckpointMode`, `SbaoMode`.
+
+**C++ (summary):** `LanguageModel.hpp`, `LanguageModelDataset.hpp`, `LanguageModelChunkSource.hpp` (streaming), `BPETokenizer.hpp`, `SafeTensors.hpp`, `CudaSbao.hpp`.
+
+## Training knobs (short)
+
+Defaults aim at **throughput when VRAM fits**. Large models on 16 GB typically need host offload.
+
+| Knob | Notes |
+| ---- | ----- |
+| Flash attention | Prefer on (`set_prefer_flash_attention(True)`) |
+| AMP | FP16 GEMMs when CUDA train is on |
+| Pack budget | Auto from free VRAM; override with `set_max_packed_columns` |
+| Activation ckpt | `Off` = fastest when acts fit; `Full`/`Selective` when VRAM-tight |
+| **SBAO** | Auto: **GpuInt8Adam** if resident fit, else **HostFusedHalfAdam**, else **HostFusedHalfSgd** (e.g. ~4B on 16 GB) |
+| Weight tying | On (LM head shares token embedding) |
+| CUDA graphs | Only with checkpointing **Off** and stable shapes |
+
+HostSGD path (4B-style): FP16 weights on GPU, FP32 masters on host, fused FP16 grad D2H + async host SGD (no Adam `m`/`v`).
+
+```python
+model.set_prefer_host_sgd(True)          # or set_sbao_mode(S.SbaoMode.HostFusedHalfSgd)
+model.enable_cuda_train()
+model.set_activation_checkpoint_mode(S.ActivationCheckpointMode.Full)
 ```
 
-```cmake
-find_package(Sentinel 0.1 REQUIRED)
-target_link_libraries(my_app PRIVATE Sentinel::sentinel)
-# #include "NeuralNet/Network/LanguageModel.hpp"
+## Checkpoints
+
+| Format | Contents |
+| ------ | -------- |
+| `.snlm` | Native weights + optional optimizer (Adam/Muon) |
+| `.safetensors` | Weights only, HF-compatible names + arch metadata |
+
+```python
+model.save_checkpoint("run.snlm", include_optimizer=True)
+model.save_safetensors("run.safetensors")
+model.load_checkpoint("run.safetensors")  # also accepts .safetensors
 ```
 
-### MSBuild / Visual Studio (Windows only)
+## Performance (indicative)
 
-Monolithic `sentinel.vcxproj` still builds the harness only (no separate lib). Prefer CMake for library + examples.
+Measured on **RTX 5070 Ti 16 GB** (WDDM). Desktop clocks and pack budget matter — re-measure after train-path changes. Paper / cross-lib runners: [`benchmarks/`](benchmarks/README.md).
 
-```bat
-msbuild sentinel\sentinel.vcxproj /p:Configuration=Release /p:Platform=x64
-cd sentinel
-..\x64\Release\sentinel.exe
-```
+| Shape | Setup | ~tok/s |
+| ----- | ----- | ------ |
+| ~60M (8×768) | Selective ckpt, int8 Adam, flash | ~18–20k |
+| ~97M (12×768) | ckpt Off, int8 Adam, flash | ~25–26k |
+| ~4B (34×3072) | HostFusedHalfSgd, Full ckpt, pack 8 @ seq 512 | ~950–1000 |
 
-### Demo harness flags (`main.cpp`)
-
-| Flag                     | Purpose                                                         |
-| ------------------------ | --------------------------------------------------------------- |
-| `runSmallSuite`          | Smokes + parities + speed 768 + ~100M probe (no corpus / no 4B) |
-| `runScale100M`           | Full multi-epoch ~100M train on `sera_scale.jsonl`              |
-| `runMuonThroughputProbe` | Adam vs Muon × ckpt tok/s table                                 |
-| `runScale4BTrainStep`    | One packed ~4B train step (FP16w + host SGD)                    |
-| `runSpeedBench` / others | Focused benches                                                 |
-
-Default SERA demo (when suite flags are off): Arrow corpus, ~8×768. Working directory must be `sentinel/` for relative `../SERA-Data/...`.
+Probe: `benchmarks/_lib/probe_4b_safe.py` or `LanguageModel.probe_cuda_packed_train_tokens_per_second`.
 
 ## Layout
 
-| Path                   | Role                                                                 |
-| ---------------------- | -------------------------------------------------------------------- |
-| `CMakeLists.txt`       | `Sentinel::sentinel` library, demo, examples, install/export         |
-| `pyproject.toml`       | pip package `sentinel-lm` (scikit-build-core + nanobind)             |
-| `python/sentinel/`     | Python package + nanobind `_core` (import name still `sentinel`)     |
-| `sentinel/`            | C++/CUDA engine sources (`NeuralNet/`, demo `main.cpp`, …)           |
-| `examples/`            | C++ + `examples/python/` — no external data                          |
-| `benchmarks/`          | Paper: sentinel / pytorch / deepspeed / fsdp (shared `paper_config`) |
-| `cmake/`               | `find_package(Sentinel)` package config                              |
-| `sentinel/NeuralNet/`  | Engine: Network, Cuda, Layers, Data, Tokenizer, …                    |
-| `sentinel/main.cpp`    | Smokes / scale harness / SERA demo                                   |
+| Path | Role |
+| ---- | ---- |
+| `CMakeLists.txt` / `cmake/` | Library, install, `find_package(Sentinel)` |
+| `pyproject.toml` / `python/sentinel/` | pip package `sentinel-lm` |
+| `sentinel/NeuralNet/` | Engine sources |
+| `sentinel/main.cpp` | Smoke / scale harness (not public API) |
+| `examples/` | C++ + Python usage (no external data required) |
+| `docs/` | Python + C++ API reference |
+| `benchmarks/` | Paper comparisons + 4B probe |
 
-## Data
+## Publishing wheels
 
-```cpp
-LanguageModelChunkSource source(path, maxChars, maxTokens, chunk, trainRatio, seed, testCap);
-auto sample = source.prepareTokenizerSample(2000);
-tokenizer.train(sample, vocabSize);
-source.setTokenizer(&tokenizer);
-source.materialize();   // one corpus+BPE pass → cached token ids
-model.train(source, epochs, logEvery, batchSize, gradAccum);
-```
-
-- **JSONL** (`.jsonl`) or **HF Arrow** (`.arrow` / `save_to_disk` dir with `data-*.arrow`; `cache-`* skipped)
-- Path auto-detect via `createTextRowReader` — no Apache Arrow C++ dependency (custom IPC stream reader)
-- Progress logs for sample / BPE / materialize (`SmokeLog::progress`)
-
-## Training
-
-```cpp
-LanguageModel model(vocab, embed, maxPos, Adam(0.001f), blocks, heads);
-model.enableCuda();
-model.enableCudaTrain();  // pack budget, AMP, int8 Adam, ckpt=Off (peak tok/s)
-model.setCudaPreferFlashAttention(true);
-model.train(source, epochs, 1, batchSize, gradAccum);
-```
-
-| Knob                | Default / notes                                                                                                                                                  |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Pack budget         | `applyVramPackBudget` (default **70%** of usable free VRAM, **≥20%** display floor, slack 1.2×, cap **4096** cols). Override with `setCudaMaxPackedColumns`.     |
-| Flash attention     | Prefer on for train/forward                                                                                                                                      |
-| AMP                 | FP16 GEMMs + saturated FP16 block-input checkpoints; loss scale when embed≥256                                                                                   |
-| Adam                | Int8 moments on GPU; or `setCudaPreferCpuAdamOffload(true)` → **SBAO HostFusedHalfAdam** (fused FP16 grad D2H + async host Adam) |
-| Muon                | `setCudaPreferMuon(true)` — Newton–Schulz on 2D hidden weights; Adam on embed / norms / biases / head                                                            |
-| SBAO                | `CudaSbao` (`setCudaPreferSbao` / `setCudaSbaoMode`): Auto picks **GpuInt8Adam** when fit (ckpt Off + pack toward 8192), else **HostFusedHalfAdam** (ckpt Off mid / Full large, fused-half async Adam), else **HostFusedHalfSgd** (Full, 4B). Re-resolves at `enableCudaTrain`; GpuInt8 pack-starve falls back to HostAdam. |
-| Large-model offload | HostFusedHalfSgd (4B): FP16 weights on GPU, FP32 masters on host, **fused FP16** weight-grad slab D2H + async host SGD from half (no Adam `m`/`v`). |
-| Weight tying        | On — LM head shares token embedding                                                                                                                              |
-| Activation ckpt     | Default **Off** (retain act scratch across steps). `Selective`/`Full` when VRAM is tight; `enableActivationCheckpointing(bool)` maps true→Selective, false→Off   |
-| CUDA graphs         | Only when checkpointing is **Off** and shapes are stable (`preferTrainGraph`)                                                                                    |
-
-```cpp
-model.setActivationCheckpointMode(ActivationCheckpointMode::Selective); // or Full / Off
-model.saveCheckpoint("run.snlm", true);
-model.loadCheckpoint("run.snlm");
-model.saveSafeTensors("run.safetensors");   // weights only, HF-compatible container
-model.loadSafeTensors("run.safetensors");   // or loadCheckpoint("*.safetensors")
-```
-
-Checkpoint files:
-- **`.snlm`** — native `SNLM` (weights + optional Adam/Muon)
-- **`.safetensors`** — zero-dep F32 safetensors export (`token_embedding.weight`, `blocks.{i}.attn.*`, `ffn.*`, `final_norm.weight`, `lm_head.*`); metadata carries arch dims / `tie_embedding`
-
-## Measured throughput (RTX 5070 Ti 16 GB)
-
-Numbers below are **fresh synthetic packed-train probes** (`probeCudaPackedTrainTokensPerSecond`, seq=256) unless noted. Desktop WDDM / pack budget matter — re-measure after big train-path changes (`runMuonThroughputProbe`, `runSmallSuite`).
-
-### ~60M — 8×768 (speed path)
-
-|       |                                                                    |
-| ----- | ------------------------------------------------------------------ |
-| Shape | vocab 4k, d=768, L=8, H=12, maxPos=512                             |
-| Flags | Selective ckpt, FP16 AMP, int8 Adam, flash, auto pack (~4096 cols) |
-| Probe | **~18–20k** tok/s                                                  |
-
-### ~97M — 12×768 (consumer VRAM proof)
-
-`runScale100M` — full multi-epoch train on `sera_scale.jsonl` (tied embed, no LoRA). Headline probe is Adam with **ckpt=off** (act scratch retained; graphs on).
-
-|                         |                                                                                                    |
-| ----------------------- | -------------------------------------------------------------------------------------------------- |
-| Model                   | **~97M** (tied), vocab 16k, d=768, L=12, H=12, maxTok=512                                          |
-| Flags                   | ckpt=off, FP16 AMP, int8 Adam, flash (WMMA TC hot path), train graph on                            |
-| Pack                    | auto budget (~3840–4096 cols on 16 GB)                                                             |
-| Probe (Adam + ckpt=off) | **~25–26k** tok/s                                                                                  |
-| Note                    | Selective is slower here (~11–13k) because Attn is recomputed each layer — use when VRAM is tight. |
-
-#### Adam vs Muon × checkpoint (same 12×768 shape)
-
-Fresh one-shot models (`runMuonThroughputProbe`), FP16 AMP + int8 Adam + flash:
-
-| Optimizer | ckpt      | pack              | tok/s       |
-| --------- | --------- | ----------------- | ----------- |
-| Adam      | **Off**   | auto / ~3840–4096 | **~25–26k** |
-| Adam      | Selective | ~3840             | ~11–13k     |
-| Muon      | Off / Sel | auto / ~3840      | lower (NS)  |
-
-Muon adds Newton–Schulz cost on hidden weights; comparing a Muon probe to an Adam README number looks like a 2× “regression” even when Adam is unchanged.
-
-Full SERA epoch numbers still need `sera_scale.jsonl` + `runScale100M=true`.
-
-### ~4B — SBAO HostFusedHalfSgd (fits 16 GB)
-
-`runScale4BTrainStep` / `benchmarks/_lib/probe_4b_safe.py` — packed train probe (not multi-epoch). Measured on **RTX 5070 Ti 16 GB** (WDDM):
-
-|            |                                                                                               |
-| ---------- | --------------------------------------------------------------------------------------------- |
-| Shape      | vocab 32k, d=3072, L=34, H=48, maxPos=2048, seq=512, **Full** ckpt, pack=8 (4096 tokens/step) |
-| Mode       | SBAO **HostFusedHalfSgd**: FP16 GPU weights, host FP32 masters, **fused FP16** weight-grad D2H + async host SGD from half (no Adam moments), flash |
-| VRAM       | ~12.4–12.5 GiB                                                                                |
-| Host RAM   | ~FP32 masters (~7–8 GiB); Adam `m`/`v` would roughly double that                              |
-| Probe      | **~950–1050** tok/s warm (`probe_4b_safe`, Full@4096, depth‑4 fused-half pipeline)           |
-| Notes      | Pipeline overlaps fused-half D2H with the next layer’s GPU bwd; host update trails depth‑4. Mid **HostFusedHalfAdam** keeps ckpt Off; SBAO Auto picks **GpuInt8Adam** when VRAM fits (pack toward 8192), else HostAdam, else HostSGD. |
-
-Smaller smoke: `CudaLanguageModel::runConsumerVramDemo()` (~8k/256/4L).
+Workflow: [`.github/workflows/publish.yml`](.github/workflows/publish.yml) — sdist + cp310–cp312 wheels (Linux manylinux + Windows), CUDA 13 on the runner. Publish on GitHub Release or `workflow_dispatch`. Wheels do **not** bundle the CUDA runtime.
 
 ## Verify
 
@@ -277,10 +201,13 @@ Smaller smoke: `CudaLanguageModel::runConsumerVramDemo()` (~8k/256/4L).
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 ./build/bin/sentinel_train_tiny
 ./build/bin/sentinel_generate tiny_demo.snlm "the cat"
-# Optional: in main.cpp set runSmallSuite=true, then:
-# cd sentinel && ../build/bin/sentinel
+python examples/python/train_tiny.py
 ```
 
-Expect tiny examples to run without external data. Full suite: smokes/parities OK, **speed 768 ~18–20k** tok/s, **scale-100M probe ~25k** (Adam ckpt=off, WMMA flash).
+## Contributing
 
-FlashAttention `headDim=64` / tiles `64×64` uses CUDA WMMA Tensor Cores (toolkit only — no cuDNN). Toggle `runWmmaFaVerify` in `main.cpp` for a quick parity + probe.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Changes that touch the CUDA train path should include a before/after probe — no speculative “speed” stacks without a measured keep/revert gate.
+
+## License
+
+MIT — [LICENSE.md](LICENSE.md).
