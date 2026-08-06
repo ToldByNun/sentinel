@@ -246,5 +246,11 @@ NB_MODULE(_core, m) {
         .def(
             "load_safetensors",
             &LanguageModel::loadSafeTensors,
-            nb::arg("path"));
+            nb::arg("path"))
+        .def_static(
+            "load_huggingface",
+            &LanguageModel::loadHuggingFace,
+            nb::arg("path"),
+            nb::arg("learning_rate") = 3e-4f,
+            "Build + load a causal LM from a HuggingFace model directory (config.json + safetensors)");
 }

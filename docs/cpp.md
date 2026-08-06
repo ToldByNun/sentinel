@@ -198,7 +198,8 @@ Set offload / SBAO preferences **before** `enableCudaTrain()` when pack and chec
 | ------ | ----- |
 | `saveCheckpoint(path, includeOptimizer=true)` | Native `.snlm` |
 | `loadCheckpoint(path)` | `.snlm` or routes `.safetensors` |
-| `saveSafeTensors` / `loadSafeTensors` | Weights + metadata (`IO/SafeTensors.hpp`) |
+| `saveSafeTensors` / `loadSafeTensors` | Weights + metadata (`IO/SafeTensors.hpp`); overload accepts in-memory `SafeTensors::File` |
+| `loadHuggingFace(dir, lr=3e-4)` | Static: parse HF `config.json`, size model, remap/load safetensors shards |
 
 Safetensors names follow HF-style keys (`token_embedding.weight`, `blocks.{i}.attn.*`, `ffn.*`, `final_norm.weight`, `lm_head.*`).
 

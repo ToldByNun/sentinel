@@ -9,6 +9,7 @@
 #include "../Layers/TransformerBlock.hpp"
 #include "../Math/Matrix.hpp"
 #include "../Cuda/CudaSbao.hpp"
+#include "../IO/SafeTensors.hpp"
 #include "../Optimizers/Adam.hpp"
 
 #include <memory>
@@ -237,6 +238,15 @@ public:
     /// <summary>import weights from safetensors (F32); architecture must already match</summary>
     void loadSafeTensors(const std::string& path);
 
+    /// <summary>import weights from an in-memory safetensors File; architecture must already match</summary>
+    void loadSafeTensors(const SafeTensors::File& file);
+
+    /// <summary>
+    /// build a LanguageModel from a HuggingFace model directory (config.json + safetensors shards)
+    /// and load remapped weights; unsupported arches throw
+    /// </summary>
+    static LanguageModel loadHuggingFace(const std::string& modelDirectory, float learningRate = 3e-4f);
+
     /// <summary>save/load roundtrip smoke on a tiny model</summary>
     static void runCheckpointSmokeDemo();
 
@@ -251,6 +261,9 @@ public:
 
     /// <summary>kv_head_count ctor + safetensors metadata mismatch gate</summary>
     static void runKvHeadCountSmokeDemo();
+
+    /// <summary>HF dir → loadHuggingFace sizes + weights + forward sanity</summary>
+    static void runHuggingFaceImportSmokeDemo();
 
     /// <summary>JSONL chunk source smoke: tiny file, one streamed epoch</summary>
     static void runStreamingSmokeDemo();

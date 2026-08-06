@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -21,6 +22,8 @@
 #include "../Cuda/CudaMuon.hpp"
 #include "../Initializers/UniformInit.hpp"
 #include "../IO/SafeTensors.hpp"
+#include "../IO/HuggingFaceConfig.hpp"
+#include "../IO/HuggingFaceWeights.hpp"
 #include "../Losses/CrossEntropy.hpp"
 #include "../Tokenizer/BPETokenizer.hpp"
 #include "../Utils/SmokeLog.hpp"
@@ -1640,9 +1643,11 @@ void LanguageModel::saveSafeTensors(const std::string& path) {
 
 void LanguageModel::loadSafeTensors(const std::string& path) {
     if (path.empty()) throw std::invalid_argument("LanguageModel::loadSafeTensors empty path");
-    if (this->blocks.empty()) throw std::logic_error("LanguageModel::loadSafeTensors no blocks");
+    this->loadSafeTensors(SafeTensors::load(path));
+}
 
-    const SafeTensors::File file = SafeTensors::load(path);
+void LanguageModel::loadSafeTensors(const SafeTensors::File& file) {
+    if (this->blocks.empty()) throw std::logic_error("LanguageModel::loadSafeTensors no blocks");
 
     auto metaInt = [&](const char* key, int fallback) -> int {
         const auto it = file.metadata.find(key);
@@ -1738,6 +1743,39 @@ void LanguageModel::loadSafeTensors(const std::string& path) {
         this->device->uploadFrom(*this);
         this->deviceStale = false;
     }
+}
+
+LanguageModel LanguageModel::loadHuggingFace(const std::string& modelDirectory, float learningRate) {
+    if (modelDirectory.empty())
+        throw std::invalid_argument("LanguageModel::loadHuggingFace empty modelDirectory");
+    if (!(learningRate > 0.0f))
+        throw std::invalid_argument("LanguageModel::loadHuggingFace learningRate must be > 0");
+
+    const HuggingFace::Config config = HuggingFace::loadConfig(modelDirectory);
+    LanguageModel model(
+        config.vocabSize,
+        config.hiddenSize,
+        config.maxPositionEmbeddings,
+        Adam(learningRate),
+        config.numHiddenLayers,
+        config.numAttentionHeads,
+        config.intermediateSize,
+        config.ropeTheta,
+        config.useBias,
+        config.numKeyValueHeads);
+
+    model.finalNorm.epsilon = config.rmsNormEps;
+    for (TransformerBlock& block : model.blocks) {
+        block.attentionNorm.epsilon = config.rmsNormEps;
+        block.feedForwardNorm.epsilon = config.rmsNormEps;
+    }
+
+    if (config.tieWordEmbeddings != model.tieEmbeddingProjection)
+        model.setTieEmbeddingProjection(config.tieWordEmbeddings);
+
+    const SafeTensors::File mapped = HuggingFace::loadMappedWeights(modelDirectory, config);
+    model.loadSafeTensors(mapped);
+    return model;
 }
 
 void LanguageModel::runCheckpointSmokeDemo() {
@@ -2023,6 +2061,99 @@ void LanguageModel::runKvHeadCountSmokeDemo() {
         heads,
         kvHeads,
         expectedKvRows);
+}
+
+void LanguageModel::runHuggingFaceImportSmokeDemo() {
+    namespace fs = std::filesystem;
+
+    const fs::path dir = fs::path("hf_import_smoke_dir");
+    fs::create_directories(dir);
+
+    const std::string configJson = R"json({
+  "architectures": ["LlamaForCausalLM"],
+  "model_type": "llama",
+  "vocab_size": 32,
+  "hidden_size": 16,
+  "intermediate_size": 32,
+  "num_hidden_layers": 2,
+  "num_attention_heads": 4,
+  "num_key_value_heads": 2,
+  "max_position_embeddings": 64,
+  "rms_norm_eps": 1e-5,
+  "rope_theta": 10000.0,
+  "tie_word_embeddings": true,
+  "attention_bias": false,
+  "mlp_bias": false
+})json";
+    {
+        std::ofstream out(dir / "config.json", std::ios::binary);
+        if (!out) throw std::runtime_error("HF import smoke: cannot write config.json");
+        out << configJson;
+    }
+
+    auto filled = [](size_t rows, size_t cols, float value) {
+        return Matrix(rows, cols, value);
+    };
+
+    SafeTensors::File weights;
+    SafeTensors::putMatrix(weights, "model.embed_tokens.weight", filled(32, 16, 0.11f));
+    SafeTensors::putMatrix(weights, "model.layers.0.input_layernorm.weight", filled(16, 1, 0.21f));
+    SafeTensors::putMatrix(weights, "model.layers.0.self_attn.q_proj.weight", filled(16, 16, 0.31f));
+    SafeTensors::putMatrix(weights, "model.layers.0.self_attn.k_proj.weight", filled(8, 16, 0.32f));
+    SafeTensors::putMatrix(weights, "model.layers.0.self_attn.v_proj.weight", filled(8, 16, 0.33f));
+    SafeTensors::putMatrix(weights, "model.layers.0.self_attn.o_proj.weight", filled(16, 16, 0.34f));
+    SafeTensors::putMatrix(weights, "model.layers.0.post_attention_layernorm.weight", filled(16, 1, 0.22f));
+    SafeTensors::putMatrix(weights, "model.layers.0.mlp.gate_proj.weight", filled(32, 16, 0.41f));
+    SafeTensors::putMatrix(weights, "model.layers.0.mlp.up_proj.weight", filled(32, 16, 0.42f));
+    SafeTensors::putMatrix(weights, "model.layers.0.mlp.down_proj.weight", filled(16, 32, 0.43f));
+    SafeTensors::putMatrix(weights, "model.layers.1.input_layernorm.weight", filled(16, 1, 0.51f));
+    SafeTensors::putMatrix(weights, "model.layers.1.self_attn.q_proj.weight", filled(16, 16, 0.61f));
+    SafeTensors::putMatrix(weights, "model.layers.1.self_attn.k_proj.weight", filled(8, 16, 0.62f));
+    SafeTensors::putMatrix(weights, "model.layers.1.self_attn.v_proj.weight", filled(8, 16, 0.63f));
+    SafeTensors::putMatrix(weights, "model.layers.1.self_attn.o_proj.weight", filled(16, 16, 0.64f));
+    SafeTensors::putMatrix(weights, "model.layers.1.post_attention_layernorm.weight", filled(16, 1, 0.52f));
+    SafeTensors::putMatrix(weights, "model.layers.1.mlp.gate_proj.weight", filled(32, 16, 0.71f));
+    SafeTensors::putMatrix(weights, "model.layers.1.mlp.up_proj.weight", filled(32, 16, 0.72f));
+    SafeTensors::putMatrix(weights, "model.layers.1.mlp.down_proj.weight", filled(16, 32, 0.73f));
+    SafeTensors::putMatrix(weights, "model.norm.weight", filled(16, 1, 0.91f));
+    SafeTensors::save((dir / "model.safetensors").string(), weights);
+
+    LanguageModel model = LanguageModel::loadHuggingFace(dir.string(), 1e-3f);
+    if (model.tokenEmbedding.vocabSize() != 32 || model.tokenEmbedding.embeddingDim() != 16)
+        throw std::runtime_error("HF import smoke: vocab/embed mismatch");
+    if (static_cast<int>(model.blocks.size()) != 2 || model.kvHeadCount() != 2)
+        throw std::runtime_error("HF import smoke: blocks/kv heads mismatch");
+    if (model.intermediateSize() != 32 || !model.tieEmbeddingProjection || model.useBias())
+        throw std::runtime_error("HF import smoke: intermediate/tie/bias mismatch");
+    if (std::fabs(model.tokenEmbedding.weight.data[0] - 0.11f) > 1.0e-6f)
+        throw std::runtime_error("HF import smoke: embed weight not loaded");
+    if (std::fabs(model.blocks[0].attention.keyWeight.data[0] - 0.32f) > 1.0e-6f)
+        throw std::runtime_error("HF import smoke: GQA k weight not loaded");
+
+    const Matrix logits = model.forward({ 1, 2, 3, 4 });
+    if (logits.rows != 32 || logits.cols != 4)
+        throw std::runtime_error("HF import smoke: forward shape mismatch");
+    for (float v : logits.data) {
+        if (!std::isfinite(v))
+            throw std::runtime_error("HF import smoke: non-finite logits");
+    }
+
+    bool rejected = false;
+    try {
+        std::ofstream bad(dir / "config.json", std::ios::binary);
+        bad << R"json({"model_type":"gpt2","vocab_size":32,"hidden_size":16,"intermediate_size":32,"num_hidden_layers":2,"num_attention_heads":4,"max_position_embeddings":64})json";
+        bad.close();
+        (void)LanguageModel::loadHuggingFace(dir.string());
+    } catch (const std::exception&) {
+        rejected = true;
+    }
+    if (!rejected)
+        throw std::runtime_error("HF import smoke: should reject unsupported model_type");
+
+    fs::remove_all(dir);
+    SmokeLog::result(
+        "LanguageModel loadHuggingFace",
+        "arch=ok  GQA=2  tie=1  forward=ok  reject=model_type");
 }
 
 void LanguageModel::runStreamingSmokeDemo() {

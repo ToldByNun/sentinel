@@ -125,6 +125,12 @@ model = S.LanguageModel(
 
 `embedding_dim` must be divisible by `head_count`. `intermediate_size` is the SwiGLU gate/up row count (HF `intermediate_size`). For GQA, `head_count` must be divisible by `kv_head_count`.
 
+Or load a HuggingFace causal-LM directory (allowlisted `model_type`: `llama` / `mistral` / `qwen2`):
+
+```python
+model = S.LanguageModel.load_huggingface("/path/to/hf_model", learning_rate=3e-4)
+```
+
 ### Device setup
 
 Call **before** heavy train when using CUDA:
@@ -193,7 +199,8 @@ cont = model.generate(prompt_ids, new_token_count=32, temperature=0.9, top_k=20,
 | `save_checkpoint` | `(path, include_optimizer=True) -> None` | Native `.snlm` |
 | `load_checkpoint` | `(path) -> None` | `.snlm` or `.safetensors` |
 | `save_safetensors` | `(path) -> None` | Weights + arch metadata |
-| `load_safetensors` | `(path) -> None` | |
+| `load_safetensors` | `(path) -> None` | Architecture must already match |
+| `load_huggingface` | `(path, learning_rate=3e-4) -> LanguageModel` | Static: HF dir (`config.json` + safetensors) → sized model + weights |
 
 Rebuild a model with the **same** dims before load. Tokenizer is separate.
 
