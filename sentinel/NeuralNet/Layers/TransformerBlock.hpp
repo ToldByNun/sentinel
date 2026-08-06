@@ -82,7 +82,10 @@ public:
     MuonState feedForwardUpWeightMuon;
     MuonState feedForwardDownWeightMuon;
 
-    TransformerBlock(int embeddingDim, int headCount, int maximumPositionCount, unsigned seed);
+    /// <summary>
+    /// create pre-norm block; intermediateSize &lt;= 0 uses FeedForward::defaultIntermediateSize(embed, 4)
+    /// </summary>
+    TransformerBlock(int embeddingDim, int headCount, int maximumPositionCount, unsigned seed, int intermediateSize = 0);
 
     /// <summary>forward through one block writes cache</summary>
     Matrix forward(const Matrix& input, TransformerBlockCache& cache) const;

@@ -116,10 +116,11 @@ model = S.LanguageModel(
     learning_rate=3e-4,
     block_count=2,
     head_count=4,
+    intermediate_size=0,  # 0 = legacy expand-4 SwiGLU width; set for HF-style MLP width
 )
 ```
 
-`embedding_dim` must be divisible by `head_count`.
+`embedding_dim` must be divisible by `head_count`. `intermediate_size` is the SwiGLU gate/up row count (HF `intermediate_size`).
 
 ### Device setup
 
@@ -154,6 +155,7 @@ if S.cuda_available():
 | `max_packed_columns` | `int` (ro) | |
 | `apply_vram_pack_budget` | `(free_fraction=0.70, safety_reserve_bytes=…) -> None` | Recompute pack from free VRAM |
 | `parameter_count` | `int` (ro) | Trainable elements (tied head counted once) |
+| `intermediate_size` | `int` (ro) | FFN gate/up width (`0` only if no blocks) |
 
 Prefer setting host-SGD / SBAO **before** `enable_cuda_train` so pack/ckpt resolve correctly.
 

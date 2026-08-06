@@ -76,15 +76,21 @@ void LanguageModelGradients::scaleInPlace(float scalar) {
     Matrix::scaleInPlace(this->projectionBias, scalar);
 }
 
-LanguageModel::LanguageModel(int vocabularySize, int embeddingDim, int maximumPositionCount, Adam optimizer, int blockCount, int headCount)
+LanguageModel::LanguageModel(int vocabularySize, int embeddingDim, int maximumPositionCount, Adam optimizer, int blockCount, int headCount, int intermediateSize)
     : tokenEmbedding(vocabularySize, embeddingDim), finalNorm(embeddingDim), outputProjection(UniformInit::matrix(vocabularySize, embeddingDim, 0.1f, 31u), UniformInit::matrix(vocabularySize, 1, 0.01f, 32u)), optimizer(optimizer), maximumPositionCount(maximumPositionCount), tieEmbeddingProjection(true), deviceStale(false), deviceTrainEnabled(false) {
     if (maximumPositionCount <= 0) throw std::invalid_argument("LanguageModel maximumPositionCount must be > 0");
     if (blockCount <= 0) throw std::invalid_argument("LanguageModel blockCount must be > 0");
     if (headCount <= 0) throw std::invalid_argument("LanguageModel headCount must be > 0");
+    if (intermediateSize < 0) throw std::invalid_argument("LanguageModel intermediateSize must be >= 0");
 
     this->blocks.reserve(static_cast<size_t>(blockCount));
     for (int blockIndex = 0; blockIndex < blockCount; ++blockIndex)
-        this->blocks.push_back(TransformerBlock(embeddingDim, headCount, maximumPositionCount, 21u + static_cast<unsigned>(blockIndex) * 100u));
+        this->blocks.push_back(TransformerBlock(
+            embeddingDim,
+            headCount,
+            maximumPositionCount,
+            21u + static_cast<unsigned>(blockIndex) * 100u,
+            intermediateSize));
 
     // weight tying: LM head shares tokenEmbedding; drop untied projection weight + Adam
     this->outputProjection.weight = Matrix();
@@ -93,6 +99,11 @@ LanguageModel::LanguageModel(int vocabularySize, int embeddingDim, int maximumPo
     this->finalNormGammaState = AdamState{};
     this->projectionWeightState = AdamState{};
     this->projectionBiasState = AdamState{};
+}
+
+int LanguageModel::intermediateSize() const {
+    if (this->blocks.empty()) return 0;
+    return this->blocks[0].feedForward.intermediateSize();
 }
 
 Matrix& LanguageModel::lmHeadWeight() {
@@ -1542,6 +1553,7 @@ void LanguageModel::saveSafeTensors(const std::string& path) {
     file.metadata["max_position"] = std::to_string(this->maximumPositionCount);
     file.metadata["block_count"] = std::to_string(this->blocks.size());
     file.metadata["head_count"] = std::to_string(this->blocks[0].attention.headCount);
+    file.metadata["intermediate_size"] = std::to_string(this->intermediateSize());
     file.metadata["tie_embedding"] = this->tieEmbeddingProjection ? "1" : "0";
 
     SafeTensors::putMatrix(file, "token_embedding.weight", this->tokenEmbedding.weight);
@@ -1586,11 +1598,13 @@ void LanguageModel::loadSafeTensors(const std::string& path) {
     const int maximumPositionCount = metaInt("max_position", this->maximumPositionCount);
     const int blockCount = metaInt("block_count", static_cast<int>(this->blocks.size()));
     const int headCount = metaInt("head_count", this->blocks[0].attention.headCount);
+    const int intermediateSize = metaInt("intermediate_size", this->intermediateSize());
     if (vocabularySize != this->tokenEmbedding.vocabSize()
         || embeddingDim != this->tokenEmbedding.embeddingDim()
         || maximumPositionCount != this->maximumPositionCount
         || blockCount != static_cast<int>(this->blocks.size())
-        || headCount != this->blocks[0].attention.headCount)
+        || headCount != this->blocks[0].attention.headCount
+        || intermediateSize != this->intermediateSize())
         throw std::runtime_error("LanguageModel::loadSafeTensors architecture mismatch");
 
     const auto tieIt = file.metadata.find("tie_embedding");
@@ -1695,6 +1709,45 @@ void LanguageModel::runCheckpointSmokeDemo() {
 
     std::remove(path.c_str());
     std::remove(safePath.c_str());
+}
+
+void LanguageModel::runIntermediateSizeSmokeDemo() {
+    FeedForward::runIntermediateSizeSmokeDemo();
+
+    const int embed = 64;
+    const int expectedDefault = FeedForward::defaultIntermediateSize(embed, 4);
+    const int custom = 256;
+
+    LanguageModel defaultLm(32, embed, 32, Adam(1e-3f), 1, 4, 0);
+    LanguageModel customLm(32, embed, 32, Adam(1e-3f), 1, 4, custom);
+    if (defaultLm.intermediateSize() != expectedDefault)
+        throw std::runtime_error("LanguageModel default intermediateSize mismatch");
+    if (customLm.intermediateSize() != custom)
+        throw std::runtime_error("LanguageModel explicit intermediateSize mismatch");
+
+    const std::string path = "intermediate_size_smoke.safetensors";
+    customLm.saveSafeTensors(path);
+    LanguageModel restored(32, embed, 32, Adam(1e-3f), 1, 4, custom);
+    restored.loadSafeTensors(path);
+    if (restored.intermediateSize() != custom)
+        throw std::runtime_error("LanguageModel safetensors intermediate_size metadata roundtrip failed");
+
+    bool rejected = false;
+    try {
+        LanguageModel wrong(32, embed, 32, Adam(1e-3f), 1, 4, expectedDefault);
+        wrong.loadSafeTensors(path);
+    } catch (const std::exception&) {
+        rejected = true;
+    }
+    if (!rejected)
+        throw std::runtime_error("loadSafeTensors should reject intermediate_size mismatch");
+
+    std::remove(path.c_str());
+    SmokeLog::result(
+        "LanguageModel intermediate_size",
+        "default=%d  custom=%d  safetensors=ok",
+        expectedDefault,
+        custom);
 }
 
 void LanguageModel::runStreamingSmokeDemo() {

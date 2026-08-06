@@ -30,7 +30,7 @@ BPETokenizer tok;
 tok.train(corpus, /*vocabSize=*/256);
 auto train = LanguageModelDataset::build(corpus, tok, /*maxTokens=*/48, /*oneHot=*/false);
 
-LanguageModel model(tok.vocabSize(), /*embed=*/64, /*maxPos=*/64, Adam(3e-3f), /*blocks=*/2, /*heads=*/4);
+LanguageModel model(tok.vocabSize(), /*embed=*/64, /*maxPos=*/64, Adam(3e-3f), /*blocks=*/2, /*heads=*/4, /*intermediateSize=*/0);
 if (CudaMatmul::isAvailable()) {
     model.enableCuda();
     model.setCudaPreferFlashAttention(true);
@@ -141,7 +141,10 @@ model.train(source, /*epochs=*/2, /*logEvery=*/1, /*batch=*/32, /*accum=*/4);
 
 Header: `Network/LanguageModel.hpp`
 
-Move-only. Construct with `Adam` (or pass learning rate via `Adam(lr)`).
+| Method | Notes |
+| ------ | ----- |
+| ctor `(vocab, embed, maxPos, Adam, blocks=2, heads=4, intermediateSize=0)` | `intermediateSize<=0` → legacy `(2*embed*4)/3` SwiGLU width |
+| `intermediateSize()` | gate/up rows |
 
 ### Lifecycle / device
 

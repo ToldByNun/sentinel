@@ -18,8 +18,16 @@ LanguageModel makeLanguageModel(
     int maximumPositionCount,
     float learningRate = 3e-4f,
     int blockCount = 2,
-    int headCount = 4) {
-    return LanguageModel(vocabularySize, embeddingDim, maximumPositionCount, Adam(learningRate), blockCount, headCount);
+    int headCount = 4,
+    int intermediateSize = 0) {
+    return LanguageModel(
+        vocabularySize,
+        embeddingDim,
+        maximumPositionCount,
+        Adam(learningRate),
+        blockCount,
+        headCount,
+        intermediateSize);
 }
 
 } // namespace
@@ -84,16 +92,25 @@ NB_MODULE(_core, m) {
                int maximumPositionCount,
                float learningRate,
                int blockCount,
-               int headCount) {
+               int headCount,
+               int intermediateSize) {
                 new (self) LanguageModel(makeLanguageModel(
-                    vocabularySize, embeddingDim, maximumPositionCount, learningRate, blockCount, headCount));
+                    vocabularySize,
+                    embeddingDim,
+                    maximumPositionCount,
+                    learningRate,
+                    blockCount,
+                    headCount,
+                    intermediateSize));
             },
             nb::arg("vocabulary_size"),
             nb::arg("embedding_dim"),
             nb::arg("maximum_position_count"),
             nb::arg("learning_rate") = 3e-4f,
             nb::arg("block_count") = 2,
-            nb::arg("head_count") = 4)
+            nb::arg("head_count") = 4,
+            nb::arg("intermediate_size") = 0,
+            "intermediate_size<=0 uses legacy expand-4 SwiGLU width")
         .def("enable_cuda", &LanguageModel::enableCuda)
         .def("enable_cuda_train", &LanguageModel::enableCudaTrain)
         .def(
@@ -152,6 +169,7 @@ NB_MODULE(_core, m) {
         .def_prop_ro("cuda_enabled", &LanguageModel::cudaEnabled)
         .def_prop_ro("cuda_train_enabled", &LanguageModel::cudaTrainEnabled)
         .def_prop_ro("parameter_count", &LanguageModel::parameterElementCount)
+        .def_prop_ro("intermediate_size", &LanguageModel::intermediateSize)
         .def_prop_ro("max_packed_columns", &LanguageModel::cudaMaxPackedColumns)
         .def(
             "average_loss",

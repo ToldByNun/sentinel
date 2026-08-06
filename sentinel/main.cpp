@@ -54,10 +54,27 @@ int main() {
         return 0;
     }
     free(halfSmokeEnv);
+    char* interSmokeEnv = nullptr;
+    size_t interSmokeLen = 0;
+    if (_dupenv_s(&interSmokeEnv, &interSmokeLen, "SENTINEL_INTERMEDIATE_SIZE_SMOKE") == 0
+        && interSmokeEnv != nullptr
+        && interSmokeEnv[0] == '1'
+        && interSmokeEnv[1] == '\0') {
+        free(interSmokeEnv);
+        LanguageModel::runIntermediateSizeSmokeDemo();
+        return 0;
+    }
+    free(interSmokeEnv);
 #else
     if (const char* halfSmoke = std::getenv("SENTINEL_SAFETENSORS_HALF_SMOKE")) {
         if (halfSmoke[0] == '1' && halfSmoke[1] == '\0') {
             SafeTensors::runHalfLoadSmokeDemo();
+            return 0;
+        }
+    }
+    if (const char* interSmoke = std::getenv("SENTINEL_INTERMEDIATE_SIZE_SMOKE")) {
+        if (interSmoke[0] == '1' && interSmoke[1] == '\0') {
+            LanguageModel::runIntermediateSizeSmokeDemo();
             return 0;
         }
     }
@@ -217,6 +234,7 @@ int main() {
             CudaLanguageModel::runSmokeDemo(128, 64, 32, 2, 4);
             CudaLanguageModel::runKvCacheSmokeDemo(128, 64, 32, 2, 4);
             LanguageModel::runCheckpointSmokeDemo();
+            LanguageModel::runIntermediateSizeSmokeDemo();
             LanguageModel::runStreamingSmokeDemo();
             SafeTensors::runHalfLoadSmokeDemo();
             CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);

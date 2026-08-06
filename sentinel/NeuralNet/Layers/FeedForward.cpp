@@ -2,6 +2,7 @@
 
 #include "../Activations/SiLU.hpp"
 #include "../Initializers/UniformInit.hpp"
+#include "../Utils/SmokeLog.hpp"
 
 #include <stdexcept>
 #include <utility>
@@ -9,14 +10,36 @@
 FeedForward::FeedForward(Matrix gateWeight, Matrix gateBias, Matrix upWeight, Matrix upBias, Matrix downWeight, Matrix downBias)
     : gateWeight(std::move(gateWeight)), gateBias(std::move(gateBias)), upWeight(std::move(upWeight)), upBias(std::move(upBias)), downWeight(std::move(downWeight)), downBias(std::move(downBias)) {}
 
-FeedForward FeedForward::create(int embeddingDim, int expandRatio, unsigned seed) {
-    if (embeddingDim <= 0) throw std::invalid_argument("FeedForward::create embeddingDim must be > 0");
-    if (expandRatio <= 0) throw std::invalid_argument("FeedForward::create expandRatio must be > 0");
-
+int FeedForward::defaultIntermediateSize(int embeddingDim, int expandRatio) {
+    if (embeddingDim <= 0) throw std::invalid_argument("FeedForward::defaultIntermediateSize embeddingDim must be > 0");
+    if (expandRatio <= 0) throw std::invalid_argument("FeedForward::defaultIntermediateSize expandRatio must be > 0");
     const int hiddenDim = (2 * embeddingDim * expandRatio) / 3;
-    if (hiddenDim <= 0) throw std::invalid_argument("FeedForward::create hiddenDim must be > 0");
+    if (hiddenDim <= 0) throw std::invalid_argument("FeedForward::defaultIntermediateSize hiddenDim must be > 0");
+    return hiddenDim;
+}
 
-    return FeedForward(UniformInit::matrix(hiddenDim, embeddingDim, 0.1f, seed), UniformInit::matrix(hiddenDim, 1, 0.01f, seed + 1u), UniformInit::matrix(hiddenDim, embeddingDim, 0.1f, seed + 2u), UniformInit::matrix(hiddenDim, 1, 0.01f, seed + 3u), UniformInit::matrix(embeddingDim, hiddenDim, 0.1f, seed + 4u), UniformInit::matrix(embeddingDim, 1, 0.01f, seed + 5u));
+FeedForward FeedForward::createWithIntermediateSize(int embeddingDim, int intermediateSize, unsigned seed) {
+    if (embeddingDim <= 0) throw std::invalid_argument("FeedForward::createWithIntermediateSize embeddingDim must be > 0");
+    if (intermediateSize <= 0) throw std::invalid_argument("FeedForward::createWithIntermediateSize intermediateSize must be > 0");
+
+    return FeedForward(
+        UniformInit::matrix(intermediateSize, embeddingDim, 0.1f, seed),
+        UniformInit::matrix(intermediateSize, 1, 0.01f, seed + 1u),
+        UniformInit::matrix(intermediateSize, embeddingDim, 0.1f, seed + 2u),
+        UniformInit::matrix(intermediateSize, 1, 0.01f, seed + 3u),
+        UniformInit::matrix(embeddingDim, intermediateSize, 0.1f, seed + 4u),
+        UniformInit::matrix(embeddingDim, 1, 0.01f, seed + 5u));
+}
+
+FeedForward FeedForward::create(int embeddingDim, int expandRatio, unsigned seed) {
+    return FeedForward::createWithIntermediateSize(
+        embeddingDim,
+        FeedForward::defaultIntermediateSize(embeddingDim, expandRatio),
+        seed);
+}
+
+int FeedForward::intermediateSize() const {
+    return static_cast<int>(this->gateWeight.rows);
 }
 
 void FeedForward::broadcastBiasAddInPlace(Matrix& product, const Matrix& bias) {
@@ -85,4 +108,30 @@ Matrix FeedForward::backward(const Matrix& outputGradient, FeedForwardCache& cac
     Matrix::gemm(this->upWeight, cache.upGradient, cache.temp, true, false);
     Matrix::addInPlace(cache.inputGradient, cache.temp);
     return cache.inputGradient;
+}
+
+void FeedForward::runIntermediateSizeSmokeDemo() {
+    const int embed = 64;
+    const int expectedDefault = FeedForward::defaultIntermediateSize(embed, 4);
+    if (expectedDefault != (2 * embed * 4) / 3)
+        throw std::runtime_error("FeedForward defaultIntermediateSize formula mismatch");
+
+    const FeedForward legacy = FeedForward::create(embed, 4, 7u);
+    if (legacy.intermediateSize() != expectedDefault
+        || static_cast<int>(legacy.upWeight.rows) != expectedDefault
+        || static_cast<int>(legacy.downWeight.cols) != expectedDefault)
+        throw std::runtime_error("FeedForward::create intermediate width mismatch");
+
+    const int custom = 256;
+    const FeedForward explicitFfn = FeedForward::createWithIntermediateSize(embed, custom, 9u);
+    if (explicitFfn.intermediateSize() != custom
+        || static_cast<int>(explicitFfn.gateWeight.cols) != embed
+        || static_cast<int>(explicitFfn.downWeight.rows) != embed)
+        throw std::runtime_error("FeedForward::createWithIntermediateSize shape mismatch");
+
+    SmokeLog::result(
+        "FeedForward intermediate_size",
+        "default=%d  custom=%d  ok",
+        expectedDefault,
+        custom);
 }
