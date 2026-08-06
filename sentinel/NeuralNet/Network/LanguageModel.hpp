@@ -8,7 +8,7 @@
 #include "../Layers/RMSNorm.hpp"
 #include "../Layers/TransformerBlock.hpp"
 #include "../Math/Matrix.hpp"
-#include "../Cuda/CudaBao.hpp"
+#include "../Cuda/CudaSbao.hpp"
 #include "../Optimizers/Adam.hpp"
 
 #include <memory>
@@ -134,13 +134,13 @@ public:
     /// <summary>
     /// Bandwidth-Aware Optimizer: enable unified residency policy (Auto resolves GpuInt8 / HostAdam / HostSgd).
     /// </summary>
-    void setCudaPreferBao(bool enabled);
+    void setCudaPreferSbao(bool enabled);
 
-    /// <summary>BAO mode override; Auto = selectBaoMode from free VRAM + param footprint</summary>
-    void setCudaBaoMode(BaoMode mode);
+    /// <summary>SBAO mode override; Auto = selectSbaoMode from free VRAM + param footprint</summary>
+    void setCudaSbaoMode(SbaoMode mode);
 
-    /// <summary>last resolved BAO mode (GpuInt8Adam if BAO unused)</summary>
-    BaoMode cudaBaoModeResolved() const;
+    /// <summary>last resolved SBAO mode (GpuInt8Adam if SBAO unused)</summary>
+    SbaoMode cudaSbaoModeResolved() const;
 
     /// <summary>toggle flash attention on device blocks</summary>
     void setCudaPreferFlashAttention(bool enabled);

@@ -50,7 +50,7 @@ _add_cuda_dll_directories()
 
 from ._core import (  # noqa: E402
     ActivationCheckpointMode,
-    BaoMode,
+    SbaoMode,
     BPETokenizer,
     LanguageModel,
     LanguageModelDataset,
@@ -60,7 +60,7 @@ from ._core import (  # noqa: E402
 
 __all__ = [
     "ActivationCheckpointMode",
-    "BaoMode",
+    "SbaoMode",
     "BPETokenizer",
     "LanguageModel",
     "LanguageModelDataset",

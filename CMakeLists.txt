@@ -86,7 +86,7 @@ set(SENTINEL_CUDA_SOURCES
     "${SENTINEL_ROOT}/NeuralNet/Cuda/CudaCausalSelfAttention.cu"
     "${SENTINEL_ROOT}/NeuralNet/Cuda/CudaFlashAttention.cu"
     "${SENTINEL_ROOT}/NeuralNet/Cuda/CudaAdam.cu"
-    "${SENTINEL_ROOT}/NeuralNet/Cuda/CudaBao.cu"
+    "${SENTINEL_ROOT}/NeuralNet/Cuda/CudaSbao.cu"
     "${SENTINEL_ROOT}/NeuralNet/Cuda/CudaMuon.cu"
     "${SENTINEL_ROOT}/NeuralNet/Cuda/CudaKvCache.cu"
     "${SENTINEL_ROOT}/NeuralNet/Cuda/CudaTransformerBlock.cu"

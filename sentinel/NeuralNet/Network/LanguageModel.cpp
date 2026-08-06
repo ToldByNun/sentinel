@@ -16,7 +16,7 @@
 #include "../Cuda/CudaLanguageModel.hpp"
 #include "../Cuda/CudaAmp.hpp"
 #include "../Cuda/CudaAdam.hpp"
-#include "../Cuda/CudaBao.hpp"
+#include "../Cuda/CudaSbao.hpp"
 #include "../Cuda/CudaMatmul.hpp"
 #include "../Cuda/CudaMuon.hpp"
 #include "../Initializers/UniformInit.hpp"
@@ -410,8 +410,8 @@ void LanguageModel::enableCudaTrain() {
 
     this->deviceTrainEnabled = true;
 
-    // BAO Auto: re-resolve after weights are on device so free VRAM is meaningful.
-    if (CudaBao::enabled && CudaBao::request == BaoMode::Auto) {
+    // SBAO Auto: re-resolve after weights are on device so free VRAM is meaningful.
+    if (CudaSbao::enabled && CudaSbao::request == SbaoMode::Auto) {
         size_t freeBytes = 0;
         size_t totalBytes = 0;
         if (CudaMatmul::isAvailable()) {
@@ -419,8 +419,8 @@ void LanguageModel::enableCudaTrain() {
             cudaMemGetInfo(&freeBytes, &totalBytes);
         }
         const size_t parameterBytes = this->parameterElementCount() * sizeof(float);
-        const BaoMode picked = CudaBao::resolveAndApply(freeBytes, parameterBytes, 0);
-        std::cout << "LanguageModel::enableCudaTrain: BAO Auto → " << CudaBao::modeName(picked)
+        const SbaoMode picked = CudaSbao::resolveAndApply(freeBytes, parameterBytes, 0);
+        std::cout << "LanguageModel::enableCudaTrain: SBAO Auto → " << CudaSbao::modeName(picked)
                   << "  freeVram=" << (freeBytes / (1024ull * 1024ull)) << " MiB"
                   << "  params=" << (parameterBytes / (1024ull * 1024ull)) << " MiB\n";
     }
@@ -431,14 +431,14 @@ void LanguageModel::enableCudaTrain() {
         this->device->releaseTrainGraph();
         if (this->device->preferMuon) {
             this->device->preferMuon = false;
-            std::cout << "LanguageModel::enableCudaTrain: disabling Muon (host BAO path)\n";
+            std::cout << "LanguageModel::enableCudaTrain: disabling Muon (host SBAO path)\n";
         }
     };
 
-    if (CudaBao::resolved == BaoMode::HostFusedHalfAdam || CudaBao::resolved == BaoMode::HostFusedHalfSgd
+    if (CudaSbao::resolved == SbaoMode::HostFusedHalfAdam || CudaSbao::resolved == SbaoMode::HostFusedHalfSgd
         || CudaAdam::preferHostGradients || CudaAdam::preferHostSgd)
         applyHostBaoSideEffects();
-    else if (CudaBao::resolved == BaoMode::GpuInt8Adam || !CudaAdam::preferCpuOffload) {
+    else if (CudaSbao::resolved == SbaoMode::GpuInt8Adam || !CudaAdam::preferCpuOffload) {
         // Fast path: keep CUDA graphs available (ckpt Off below).
         this->device->preferTrainGraph = true;
     }
@@ -446,8 +446,8 @@ void LanguageModel::enableCudaTrain() {
     // GpuInt8 / resident: Off (retain acts → graphs).
     // HostFusedHalfAdam: Off on mid (faster); Full on large (matches prior 4B offload setup).
     // HostFusedHalfSgd (~4B): Full from the start.
-    if (CudaBao::resolved == BaoMode::HostFusedHalfSgd || CudaAdam::preferHostSgd
-        || ((CudaBao::resolved == BaoMode::HostFusedHalfAdam || CudaAdam::preferHostGradients)
+    if (CudaSbao::resolved == SbaoMode::HostFusedHalfSgd || CudaAdam::preferHostSgd
+        || ((CudaSbao::resolved == SbaoMode::HostFusedHalfAdam || CudaAdam::preferHostGradients)
             && this->device->blocks.size() >= 24)) {
         this->device->setActivationCheckpointMode(ActivationCheckpointMode::Full);
     } else {
@@ -462,7 +462,7 @@ void LanguageModel::enableCudaTrain() {
     else
         CudaAdam::preferInt8Moments = true;
 
-    if (CudaBao::resolved == BaoMode::HostFusedHalfSgd || CudaAdam::preferHostSgd) {
+    if (CudaSbao::resolved == SbaoMode::HostFusedHalfSgd || CudaAdam::preferHostSgd) {
         this->device->releasePackedTrainWorkspaces();
         this->device->tuneOffloadCheckpointAndPack(4096);
     } else {
@@ -473,13 +473,13 @@ void LanguageModel::enableCudaTrain() {
         this->device->ensureTrainState();
 
         // Auto + GpuInt8 but pack starved to the minimum → fall back once to HostFusedHalfAdam.
-        if (CudaBao::enabled && CudaBao::request == BaoMode::Auto
-            && CudaBao::resolved == BaoMode::GpuInt8Adam
+        if (CudaSbao::enabled && CudaSbao::request == SbaoMode::Auto
+            && CudaSbao::resolved == SbaoMode::GpuInt8Adam
             && this->device->maxPackedColumns <= CudaLanguageModel::lengthBucketStep) {
             std::cout << "LanguageModel::enableCudaTrain: GpuInt8 pack starved (maxPackCols="
                       << this->device->maxPackedColumns << ") → HostFusedHalfAdam\n";
-            CudaBao::request = BaoMode::Auto;
-            CudaBao::apply(BaoMode::HostFusedHalfAdam);
+            CudaSbao::request = SbaoMode::Auto;
+            CudaSbao::apply(SbaoMode::HostFusedHalfAdam);
             applyHostBaoSideEffects();
             this->device->setActivationCheckpointMode(ActivationCheckpointMode::Off);
             CudaAdam::preferInt8Moments = false;
@@ -494,7 +494,7 @@ void LanguageModel::enableCudaTrain() {
     std::cout << "LanguageModel::enableCudaTrain: device training enabled (packed batches, ckpt="
               << CudaLanguageModel::activationCheckpointModeName(this->device->activationCheckpointMode)
               << ", opt=" << (this->device->preferMuon ? "muon+adam" : "adam")
-              << ", bao=" << (CudaBao::enabled ? CudaBao::modeName(CudaBao::resolved) : "off")
+              << ", sbao=" << (CudaSbao::enabled ? CudaSbao::modeName(CudaSbao::resolved) : "off")
               << ", FP16 amp "
               << (CudaAmp::preferMixedPrecision ? "on" : "off")
               << ", lossScale=" << (CudaAmp::useLossScaling ? "on" : "off")
@@ -510,9 +510,9 @@ void LanguageModel::setCudaPreferCpuAdamOffload(bool enabled) {
     if (this->device == nullptr) this->enableCuda();
     if (this->device == nullptr) return;
     if (enabled) {
-        // Legacy alias → BAO HostFusedHalfAdam (fused FP16 grad D2H + async host Adam).
-        CudaBao::request = BaoMode::HostFusedHalfAdam;
-        CudaBao::apply(BaoMode::HostFusedHalfAdam);
+        // Legacy alias → SBAO HostFusedHalfAdam (fused FP16 grad D2H + async host Adam).
+        CudaSbao::request = SbaoMode::HostFusedHalfAdam;
+        CudaSbao::apply(SbaoMode::HostFusedHalfAdam);
         CudaAmp::preferMixedPrecision = true;
         this->device->preferTrainGraph = false;
         this->device->releaseTrainGraph();
@@ -522,9 +522,9 @@ void LanguageModel::setCudaPreferCpuAdamOffload(bool enabled) {
         }
         std::cout << "LanguageModel::setCudaPreferCpuAdamOffload: disabling CUDA Graph for FP16 working weights\n";
     } else {
-        CudaBao::enabled = false;
-        CudaBao::request = BaoMode::Auto;
-        CudaBao::resolved = BaoMode::GpuInt8Adam;
+        CudaSbao::enabled = false;
+        CudaSbao::request = SbaoMode::Auto;
+        CudaSbao::resolved = SbaoMode::GpuInt8Adam;
         CudaAdam::preferCpuOffload = false;
         CudaAdam::preferFp16GpuWeights = false;
         CudaAdam::preferHostGradients = false;
@@ -546,7 +546,7 @@ void LanguageModel::setCudaPreferCpuAdamOffload(bool enabled) {
         this->device->ensureTrainState();
     }
     std::cout << "LanguageModel::setCudaPreferCpuAdamOffload: " << (enabled ? "on" : "off")
-              << "  bao=" << (CudaBao::enabled ? CudaBao::modeName(CudaBao::resolved) : "off")
+              << "  sbao=" << (CudaSbao::enabled ? CudaSbao::modeName(CudaSbao::resolved) : "off")
               << "  fp16GpuWeights=" << (CudaAdam::preferFp16GpuWeights ? "on" : "off")
               << "  hostGrads=" << (CudaAdam::preferHostGradients ? "on" : "off")
               << "  amp=" << (CudaAmp::preferMixedPrecision ? "on" : "off")
@@ -555,8 +555,8 @@ void LanguageModel::setCudaPreferCpuAdamOffload(bool enabled) {
 
 void LanguageModel::setCudaPreferHostSgd(bool enabled) {
     if (enabled) {
-        CudaBao::request = BaoMode::HostFusedHalfSgd;
-        CudaBao::apply(BaoMode::HostFusedHalfSgd);
+        CudaSbao::request = SbaoMode::HostFusedHalfSgd;
+        CudaSbao::apply(SbaoMode::HostFusedHalfSgd);
         CudaAmp::preferMixedPrecision = true;
         if (this->device != nullptr) {
             this->device->preferTrainGraph = false;
@@ -565,12 +565,12 @@ void LanguageModel::setCudaPreferHostSgd(bool enabled) {
     } else {
         CudaAdam::preferHostSgd = false;
         if (CudaAdam::preferCpuOffload) {
-            CudaBao::request = BaoMode::HostFusedHalfAdam;
-            CudaBao::apply(BaoMode::HostFusedHalfAdam);
+            CudaSbao::request = SbaoMode::HostFusedHalfAdam;
+            CudaSbao::apply(SbaoMode::HostFusedHalfAdam);
         } else {
-            CudaBao::enabled = false;
-            CudaBao::request = BaoMode::Auto;
-            CudaBao::resolved = BaoMode::GpuInt8Adam;
+            CudaSbao::enabled = false;
+            CudaSbao::request = SbaoMode::Auto;
+            CudaSbao::resolved = SbaoMode::GpuInt8Adam;
         }
     }
     if (this->device != nullptr) {
@@ -589,16 +589,16 @@ void LanguageModel::setCudaPreferHostSgd(bool enabled) {
         }
     }
     std::cout << "LanguageModel::setCudaPreferHostSgd: " << (enabled ? "on" : "off")
-              << "  bao=" << (CudaBao::enabled ? CudaBao::modeName(CudaBao::resolved) : "off") << '\n';
+              << "  sbao=" << (CudaSbao::enabled ? CudaSbao::modeName(CudaSbao::resolved) : "off") << '\n';
 }
 
-void LanguageModel::setCudaPreferBao(bool enabled) {
+void LanguageModel::setCudaPreferSbao(bool enabled) {
     if (this->device == nullptr) this->enableCuda();
     if (this->device == nullptr) return;
     if (!enabled) {
-        CudaBao::enabled = false;
-        CudaBao::request = BaoMode::Auto;
-        CudaBao::resolved = BaoMode::GpuInt8Adam;
+        CudaSbao::enabled = false;
+        CudaSbao::request = SbaoMode::Auto;
+        CudaSbao::resolved = SbaoMode::GpuInt8Adam;
         CudaAdam::preferCpuOffload = false;
         CudaAdam::preferFp16GpuWeights = false;
         CudaAdam::preferHostGradients = false;
@@ -611,24 +611,24 @@ void LanguageModel::setCudaPreferBao(bool enabled) {
             this->device->trainStateReady = false;
             this->device->ensureTrainState();
         }
-        std::cout << "LanguageModel::setCudaPreferBao: off\n";
+        std::cout << "LanguageModel::setCudaPreferSbao: off\n";
         return;
     }
-    CudaBao::enabled = true;
-    CudaBao::request = BaoMode::Auto;
+    CudaSbao::enabled = true;
+    CudaSbao::request = SbaoMode::Auto;
     // Defer concrete pick until enableCudaTrain (free VRAM after upload). If train is
     // already on, resolve immediately.
     if (this->deviceTrainEnabled)
-        this->setCudaBaoMode(BaoMode::Auto);
+        this->setCudaSbaoMode(SbaoMode::Auto);
     else
-        std::cout << "LanguageModel::setCudaPreferBao: on  request=Auto (resolve at enable_cuda_train)\n";
+        std::cout << "LanguageModel::setCudaPreferSbao: on  request=Auto (resolve at enable_cuda_train)\n";
 }
 
-void LanguageModel::setCudaBaoMode(BaoMode mode) {
+void LanguageModel::setCudaSbaoMode(SbaoMode mode) {
     if (this->device == nullptr) this->enableCuda();
     if (this->device == nullptr) return;
-    CudaBao::enabled = true;
-    CudaBao::request = mode;
+    CudaSbao::enabled = true;
+    CudaSbao::request = mode;
     size_t freeBytes = 0;
     size_t totalBytes = 0;
     if (CudaMatmul::isAvailable()) {
@@ -636,27 +636,27 @@ void LanguageModel::setCudaBaoMode(BaoMode mode) {
         cudaMemGetInfo(&freeBytes, &totalBytes);
     }
     const size_t parameterBytes = this->parameterElementCount() * sizeof(float);
-    const BaoMode resolved = CudaBao::resolveAndApply(freeBytes, parameterBytes, 0);
-    CudaBao::request = mode; // keep Auto as request when policy-selected
-    if (resolved == BaoMode::HostFusedHalfAdam || resolved == BaoMode::HostFusedHalfSgd)
+    const SbaoMode resolved = CudaSbao::resolveAndApply(freeBytes, parameterBytes, 0);
+    CudaSbao::request = mode; // keep Auto as request when policy-selected
+    if (resolved == SbaoMode::HostFusedHalfAdam || resolved == SbaoMode::HostFusedHalfSgd)
         CudaAmp::preferMixedPrecision = true;
-    if (resolved == BaoMode::GpuInt8Adam) {
+    if (resolved == SbaoMode::GpuInt8Adam) {
         this->device->preferTrainGraph = true;
     } else {
         this->device->preferTrainGraph = false;
         this->device->releaseTrainGraph();
         if (this->device->preferMuon) {
             this->device->preferMuon = false;
-            std::cout << "LanguageModel::setCudaBaoMode: disabling Muon (host BAO path)\n";
+            std::cout << "LanguageModel::setCudaSbaoMode: disabling Muon (host SBAO path)\n";
         }
     }
     this->device->trainStateReady = false;
     if (this->deviceTrainEnabled) {
-        if (resolved == BaoMode::HostFusedHalfSgd) {
+        if (resolved == SbaoMode::HostFusedHalfSgd) {
             this->device->setActivationCheckpointMode(ActivationCheckpointMode::Full);
             this->device->releasePackedTrainWorkspaces();
             this->device->tuneOffloadCheckpointAndPack(4096);
-        } else if (resolved == BaoMode::HostFusedHalfAdam) {
+        } else if (resolved == SbaoMode::HostFusedHalfAdam) {
             const bool largeHostAdam = this->device->blocks.size() >= 24;
             this->device->setActivationCheckpointMode(
                 largeHostAdam ? ActivationCheckpointMode::Full : ActivationCheckpointMode::Off);
@@ -672,13 +672,13 @@ void LanguageModel::setCudaBaoMode(BaoMode mode) {
             this->device->ensureTrainState();
         }
     }
-    std::cout << "LanguageModel::setCudaBaoMode: request=" << CudaBao::modeName(mode)
-              << "  resolved=" << CudaBao::modeName(resolved)
+    std::cout << "LanguageModel::setCudaSbaoMode: request=" << CudaSbao::modeName(mode)
+              << "  resolved=" << CudaSbao::modeName(resolved)
               << "  freeVram=" << (freeBytes / (1024ull * 1024ull)) << " MiB\n";
 }
 
-BaoMode LanguageModel::cudaBaoModeResolved() const {
-    return CudaBao::resolved;
+SbaoMode LanguageModel::cudaSbaoModeResolved() const {
+    return CudaSbao::resolved;
 }
 
 void LanguageModel::enableActivationCheckpointing(bool enabled) {

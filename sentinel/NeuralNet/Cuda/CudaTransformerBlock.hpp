@@ -82,7 +82,7 @@ struct CudaTransformerBlockHostWeightGrads {
     Matrix* feedForwardGateWeight = nullptr;
     Matrix* feedForwardUpWeight = nullptr;
     Matrix* feedForwardDownWeight = nullptr;
-    /// <summary>optional host Adam moments for BAO HostFusedHalfAdam (nullptr → SGD / expand-only)</summary>
+    /// <summary>optional host Adam moments for SBAO HostFusedHalfAdam (nullptr → SGD / expand-only)</summary>
     AdamState* queryWeightState = nullptr;
     AdamState* keyWeightState = nullptr;
     AdamState* valueWeightState = nullptr;

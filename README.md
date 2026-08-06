@@ -1,6 +1,6 @@
 # Sentinel
 
-C++/CUDA framework for **full-train** causal LMs (no LoRA): CPU/OpenMP plus a device train path with packed batches, flash attention, FP16 AMP, int8 Adam / Muon, selective activation checkpointing, and **BAO** (Bandwidth-Aware Optimizer) — GpuInt8 Adam, HostFusedHalfAdam, or HostFusedHalfSgd (FP16 GPU weights + fused FP16 grad D2H + async host update).
+C++/CUDA framework for **full-train** causal LMs (no LoRA): CPU/OpenMP plus a device train path with packed batches, flash attention, FP16 AMP, int8 Adam / Muon, selective activation checkpointing, and **SBAO** (Sentinel Backend Adaptive Optimization) — GpuInt8 Adam, HostFusedHalfAdam, or HostFusedHalfSgd (FP16 GPU weights + fused FP16 grad D2H + async host update).
 
 **v0.1** ships as an installable C++ library (`Sentinel::sentinel`), a demo harness, examples, and a **pip-installable Python package** (`sentinel-lm`).
 
@@ -198,9 +198,9 @@ model.train(source, epochs, 1, batchSize, gradAccum);
 | Pack budget         | `applyVramPackBudget` (default **70%** of usable free VRAM, **≥20%** display floor, slack 1.2×, cap **4096** cols). Override with `setCudaMaxPackedColumns`.     |
 | Flash attention     | Prefer on for train/forward                                                                                                                                      |
 | AMP                 | FP16 GEMMs + saturated FP16 block-input checkpoints; loss scale when embed≥256                                                                                   |
-| Adam                | Int8 moments on GPU; or `setCudaPreferCpuAdamOffload(true)` → **BAO HostFusedHalfAdam** (fused FP16 grad D2H + async host Adam) |
+| Adam                | Int8 moments on GPU; or `setCudaPreferCpuAdamOffload(true)` → **SBAO HostFusedHalfAdam** (fused FP16 grad D2H + async host Adam) |
 | Muon                | `setCudaPreferMuon(true)` — Newton–Schulz on 2D hidden weights; Adam on embed / norms / biases / head                                                            |
-| BAO                 | `CudaBao` (`setCudaPreferBao` / `setCudaBaoMode`): Auto picks **GpuInt8Adam** when fit (ckpt Off + pack toward 8192), else **HostFusedHalfAdam** (ckpt Off mid / Full large, fused-half async Adam), else **HostFusedHalfSgd** (Full, 4B). Re-resolves at `enableCudaTrain`; GpuInt8 pack-starve falls back to HostAdam. |
+| SBAO                | `CudaSbao` (`setCudaPreferSbao` / `setCudaSbaoMode`): Auto picks **GpuInt8Adam** when fit (ckpt Off + pack toward 8192), else **HostFusedHalfAdam** (ckpt Off mid / Full large, fused-half async Adam), else **HostFusedHalfSgd** (Full, 4B). Re-resolves at `enableCudaTrain`; GpuInt8 pack-starve falls back to HostAdam. |
 | Large-model offload | HostFusedHalfSgd (4B): FP16 weights on GPU, FP32 masters on host, **fused FP16** weight-grad slab D2H + async host SGD from half (no Adam `m`/`v`). |
 | Weight tying        | On — LM head shares token embedding                                                                                                                              |
 | Activation ckpt     | Default **Off** (retain act scratch across steps). `Selective`/`Full` when VRAM is tight; `enableActivationCheckpointing(bool)` maps true→Selective, false→Off   |
@@ -256,18 +256,18 @@ Muon adds Newton–Schulz cost on hidden weights; comparing a Muon probe to an A
 
 Full SERA epoch numbers still need `sera_scale.jsonl` + `runScale100M=true`.
 
-### ~4B — BAO HostFusedHalfSgd (fits 16 GB)
+### ~4B — SBAO HostFusedHalfSgd (fits 16 GB)
 
 `runScale4BTrainStep` / `benchmarks/_lib/probe_4b_safe.py` — packed train probe (not multi-epoch). Measured on **RTX 5070 Ti 16 GB** (WDDM):
 
 |            |                                                                                               |
 | ---------- | --------------------------------------------------------------------------------------------- |
 | Shape      | vocab 32k, d=3072, L=34, H=48, maxPos=2048, seq=512, **Full** ckpt, pack=8 (4096 tokens/step) |
-| Mode       | BAO **HostFusedHalfSgd**: FP16 GPU weights, host FP32 masters, **fused FP16** weight-grad D2H + async host SGD from half (no Adam moments), flash |
+| Mode       | SBAO **HostFusedHalfSgd**: FP16 GPU weights, host FP32 masters, **fused FP16** weight-grad D2H + async host SGD from half (no Adam moments), flash |
 | VRAM       | ~12.4–12.5 GiB                                                                                |
 | Host RAM   | ~FP32 masters (~7–8 GiB); Adam `m`/`v` would roughly double that                              |
-| Probe      | **~750–900** tok/s warm (`probe_4b_safe` with discard + Full@4096)                            |
-| Notes      | Pipeline overlaps fused-half D2H with the next layer’s GPU bwd; host update trails depth‑3. Mid **HostFusedHalfAdam** keeps ckpt Off; Auto picks **GpuInt8Adam** when VRAM fits (pack toward 8192), else HostAdam, else HostSGD. |
+| Probe      | **~950–1050** tok/s warm (`probe_4b_safe`, Full@4096, depth‑4 fused-half pipeline)           |
+| Notes      | Pipeline overlaps fused-half D2H with the next layer’s GPU bwd; host update trails depth‑4. Mid **HostFusedHalfAdam** keeps ckpt Off; SBAO Auto picks **GpuInt8Adam** when VRAM fits (pack toward 8192), else HostAdam, else HostSGD. |
 
 Smaller smoke: `CudaLanguageModel::runConsumerVramDemo()` (~8k/256/4L).
 

@@ -34,11 +34,11 @@ NB_MODULE(_core, m) {
         .value("Full", ActivationCheckpointMode::Full)
         .value("Selective", ActivationCheckpointMode::Selective);
 
-    nb::enum_<BaoMode>(m, "BaoMode")
-        .value("Auto", BaoMode::Auto)
-        .value("GpuInt8Adam", BaoMode::GpuInt8Adam)
-        .value("HostFusedHalfAdam", BaoMode::HostFusedHalfAdam)
-        .value("HostFusedHalfSgd", BaoMode::HostFusedHalfSgd);
+    nb::enum_<SbaoMode>(m, "SbaoMode")
+        .value("Auto", SbaoMode::Auto)
+        .value("GpuInt8Adam", SbaoMode::GpuInt8Adam)
+        .value("HostFusedHalfAdam", SbaoMode::HostFusedHalfAdam)
+        .value("HostFusedHalfSgd", SbaoMode::HostFusedHalfSgd);
 
     nb::class_<BPETokenizer>(m, "BPETokenizer")
         .def(nb::init<>())
@@ -113,14 +113,14 @@ NB_MODULE(_core, m) {
             &LanguageModel::setCudaPreferHostSgd,
             nb::arg("enabled"))
         .def(
-            "set_prefer_bao",
-            &LanguageModel::setCudaPreferBao,
+            "set_prefer_sbao",
+            &LanguageModel::setCudaPreferSbao,
             nb::arg("enabled"))
         .def(
-            "set_bao_mode",
-            &LanguageModel::setCudaBaoMode,
+            "set_sbao_mode",
+            &LanguageModel::setCudaSbaoMode,
             nb::arg("mode"))
-        .def_prop_ro("bao_mode_resolved", &LanguageModel::cudaBaoModeResolved)
+        .def_prop_ro("sbao_mode_resolved", &LanguageModel::cudaSbaoModeResolved)
         .def(
             "set_prefer_train_graph",
             &LanguageModel::setCudaPreferTrainGraph,

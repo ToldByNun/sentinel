@@ -244,6 +244,7 @@ private:
     friend class CudaAdam;
     friend class CudaAdamState;
     friend class CudaAmp;
+    friend class CudaSbao;
 
     static constexpr int tileSize = 16;
 

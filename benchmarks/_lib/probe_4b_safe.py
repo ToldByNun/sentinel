@@ -43,9 +43,9 @@ def main() -> int:
     model.enable_cuda_train()
     model.set_prefer_train_graph(False)
     print(f"max_packed_columns={model.max_packed_columns}", flush=True)
-    print(f"bao={model.bao_mode_resolved} VRAM used~{gpu_used_mib():.0f} MiB before probe", flush=True)
-    # Discard pass: pin freelist + boost clocks before timed window (cold WDDM first-pass is noisy).
-    _ = float(model.probe_cuda_packed_train_tokens_per_second(SEQ, 1, 1))
+    print(f"sbao={model.sbao_mode_resolved} VRAM used~{gpu_used_mib():.0f} MiB before probe", flush=True)
+    # Warm discard: pin freelist + boost clocks (cold WDDM first-pass is noisy).
+    _ = float(model.probe_cuda_packed_train_tokens_per_second(SEQ, 2, 2))
     t0 = time.perf_counter()
     tok_s = float(model.probe_cuda_packed_train_tokens_per_second(SEQ, WARMUP, TIMED))
     wall = time.perf_counter() - t0

@@ -53,6 +53,7 @@
     <CudaCompile Include="NeuralNet\Cuda\CudaCausalSelfAttention.cu" />
     <CudaCompile Include="NeuralNet\Cuda\CudaFlashAttention.cu" />
     <CudaCompile Include="NeuralNet\Cuda\CudaAdam.cu" />
+    <CudaCompile Include="NeuralNet\Cuda\CudaSbao.cu" />
     <CudaCompile Include="NeuralNet\Cuda\CudaMuon.cu" />
     <CudaCompile Include="NeuralNet\Cuda\CudaKvCache.cu" />
     <CudaCompile Include="NeuralNet\Cuda\CudaTransformerBlock.cu" />
@@ -98,6 +99,7 @@
     <ClInclude Include="NeuralNet\Cuda\CudaCausalSelfAttention.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaFlashAttention.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaAdam.hpp" />
+    <ClInclude Include="NeuralNet\Cuda\CudaSbao.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaMuon.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaKvCache.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaTransformerBlock.hpp" />

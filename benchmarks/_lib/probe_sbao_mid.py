@@ -1,6 +1,6 @@
-"""Mid-scale BAO probe — Auto policy vs forced HostFusedHalfAdam (~8×768 / ~12×768).
+"""Mid-scale SBAO probe — Auto policy vs forced HostFusedHalfAdam (~8×768 / ~12×768).
 
-Shows that BAO Auto picks GpuInt8Adam when VRAM fits (faster resident path), and
+Shows that SBAO Auto picks GpuInt8Adam when VRAM fits (faster resident path), and
 HostFusedHalfAdam when forced / VRAM-tight.
 """
 
@@ -37,19 +37,19 @@ def run_once(label: str, blocks: int, mode: str) -> float:
     model.set_prefer_flash_attention(True)
     model.set_prefer_muon(False)
     if mode == "auto":
-        model.set_prefer_bao(True)
+        model.set_prefer_sbao(True)
     elif mode == "host_adam":
-        model.set_bao_mode(S.BaoMode.HostFusedHalfAdam)
+        model.set_sbao_mode(S.SbaoMode.HostFusedHalfAdam)
     elif mode == "cpu_adam":
         model.set_prefer_cpu_adam_offload(True)
     else:
         raise ValueError(mode)
     model.enable_cuda_train()
     # GpuInt8 Auto: keep CUDA graphs. Host FP16w paths: graphs off.
-    use_graphs = mode == "auto" and model.bao_mode_resolved == S.BaoMode.GpuInt8Adam
+    use_graphs = mode == "auto" and model.sbao_mode_resolved == S.SbaoMode.GpuInt8Adam
     model.set_prefer_train_graph(use_graphs)
     print(
-        f"{label}: bao_resolved={model.bao_mode_resolved} max_pack={model.max_packed_columns} "
+        f"{label}: sbao_resolved={model.sbao_mode_resolved} max_pack={model.max_packed_columns} "
         f"graphs={'on' if use_graphs else 'off'} VRAM~{gpu_used_mib():.0f} MiB",
         flush=True,
     )
@@ -60,7 +60,7 @@ def run_once(label: str, blocks: int, mode: str) -> float:
     if tok_s <= 0 and wall > 0:
         tok_s = (SEQ * pack * TIMED) / wall
     print(
-        f"RESULT {label} tok/s={tok_s:.0f} pack={pack} bao={model.bao_mode_resolved} "
+        f"RESULT {label} tok/s={tok_s:.0f} pack={pack} sbao={model.sbao_mode_resolved} "
         f"VRAM~{gpu_used_mib():.0f} MiB",
         flush=True,
     )
@@ -68,13 +68,13 @@ def run_once(label: str, blocks: int, mode: str) -> float:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="BAO mid-scale probe")
+    parser = argparse.ArgumentParser(description="SBAO mid-scale probe")
     parser.add_argument("--blocks", type=int, default=8, choices=(8, 12))
     parser.add_argument(
         "--mode",
         default="both",
         choices=("auto", "host_adam", "cpu_adam", "both"),
-        help="auto=BAO policy; host_adam=force HostFusedHalfAdam; both=compare Auto vs host_adam",
+        help="auto=SBAO policy; host_adam=force HostFusedHalfAdam; both=compare Auto vs host_adam",
     )
     args = parser.parse_args()
 

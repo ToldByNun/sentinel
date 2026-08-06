@@ -72,6 +72,9 @@
     <CudaCompile Include="NeuralNet\Cuda\CudaAdam.cu">
       <Filter>Quelldateien</Filter>
     </CudaCompile>
+    <CudaCompile Include="NeuralNet\Cuda\CudaSbao.cu">
+      <Filter>Quelldateien</Filter>
+    </CudaCompile>
     <CudaCompile Include="NeuralNet\Cuda\CudaMuon.cu">
       <Filter>Quelldateien</Filter>
     </CudaCompile>
@@ -201,6 +204,9 @@
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Cuda\CudaAdam.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Cuda\CudaSbao.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Cuda\CudaMuon.hpp">

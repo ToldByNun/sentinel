@@ -5,7 +5,7 @@
 #include "NeuralNet/Cuda/CudaRMSNorm.hpp"
 #include "NeuralNet/Cuda/CudaCausalSelfAttention.hpp"
 #include "NeuralNet/Cuda/CudaAdam.hpp"
-#include "NeuralNet/Cuda/CudaBao.hpp"
+#include "NeuralNet/Cuda/CudaSbao.hpp"
 #include "NeuralNet/Cuda/CudaMuon.hpp"
 #include "NeuralNet/Cuda/CudaAmp.hpp"
 #include "NeuralNet/Cuda/CudaTransformerBlock.hpp"
@@ -1593,11 +1593,11 @@ int main() {
 
     model.enableCuda();
     if (preferBao)
-        model.setCudaPreferBao(true);
+        model.setCudaPreferSbao(true);
     model.enableCudaTrain();
     model.enableActivationCheckpointing(useCheckpointing);
     model.setCudaPreferFlashAttention(true);
-    SmokeLog::result("model", "blocks=%zu  heads=%d  embed=%d  cuda=%s  train=%s  maxTok=%zu maxPackCols=%d flash=on stream=on batch=%d accum=%d bao=%s ckpt=%s",
+    SmokeLog::result("model", "blocks=%zu  heads=%d  embed=%d  cuda=%s  train=%s  maxTok=%zu maxPackCols=%d flash=on stream=on batch=%d accum=%d sbao=%s ckpt=%s",
         model.blocks.size(),
         model.blocks[0].attention.headCount,
         embeddingDim,
@@ -1607,7 +1607,7 @@ int main() {
         model.cudaMaxPackedColumns(),
         trainBatchSize,
         trainGradAccum,
-        CudaBao::enabled ? CudaBao::modeName(CudaBao::resolved) : "off",
+        CudaSbao::enabled ? CudaSbao::modeName(CudaSbao::resolved) : "off",
         CudaLanguageModel::activationCheckpointModeName(model.cudaActivationCheckpointMode()));
 
     if (model.cudaEnabled()) {

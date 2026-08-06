@@ -2,7 +2,7 @@
 
 #include "CudaAdam.hpp"
 #include "CudaAmp.hpp"
-#include "CudaBao.hpp"
+#include "CudaSbao.hpp"
 #include "CudaFlashAttention.hpp"
 #include "CudaOps.hpp"
 #include "../Utils/SmokeLog.hpp"
@@ -132,7 +132,7 @@ void CudaLanguageModel::setActivationCheckpointMode(ActivationCheckpointMode mod
     if (mode == ActivationCheckpointMode::Off)
         this->releaseActivationCheckpoints();
     if (this->tokenEmbeddingWeight.empty()) return;
-    // Host BAO pack is owned by enableCudaTrain / tuneOffload — do not collapse to minCols
+    // Host SBAO pack is owned by enableCudaTrain / tuneOffload — do not collapse to minCols
     // via applyVramPackBudget while free VRAM is still ~0 (pre-materialize / WDDM).
     if (!this->maxPackedColumnsManual && !CudaAdam::preferHostGradients && !CudaAdam::preferHostSgd)
         this->applyVramPackBudget();
@@ -195,9 +195,12 @@ void CudaLanguageModel::ensureHostGradCopyPipeline() {
 
 void CudaLanguageModel::waitPendingHostWeightH2d() {
     if (!this->hostWeightH2dPending || this->hostWeightH2dEvent == nullptr) return;
+    // GPU-side dependency on the active/default stream — do not stall the CPU with
+    // cudaEventSynchronize (that kills overlap of H2D with the next step's enqueue).
+    const cudaStream_t compute = CudaMatmul::activeStream(); // nullptr = default stream
     CudaMatmul::throwIfCudaFailed(
-        cudaEventSynchronize(this->hostWeightH2dEvent),
-        "CudaLanguageModel::waitPendingHostWeightH2d");
+        cudaStreamWaitEvent(compute, this->hostWeightH2dEvent, 0),
+        "CudaLanguageModel::waitPendingHostWeightH2d streamWait");
     this->hostWeightH2dPending = false;
 }
 
@@ -205,7 +208,7 @@ void CudaLanguageModel::uploadHostBlockFp16WeightsAsync(size_t blockIndex, cudaS
     if (stream == nullptr) throw std::invalid_argument("uploadHostBlockFp16WeightsAsync null stream");
     if (blockIndex >= this->blocks.size() || blockIndex >= this->hostBlockAdamStates.size())
         throw std::out_of_range("uploadHostBlockFp16WeightsAsync blockIndex");
-    if (!CudaAdam::preferFp16GpuWeights || !CudaBao::pipelineHostWeightUpdate()) return;
+    if (!CudaAdam::preferFp16GpuWeights || !CudaSbao::pipelineHostWeightUpdate()) return;
 
     CudaTransformerBlock& block = this->blocks[blockIndex];
     CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[blockIndex];
@@ -304,7 +307,7 @@ bool CudaLanguageModel::probePackedTrainMicrostep(int segmentLength, int example
 }
 
 void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLength, int exampleCount, CudaLanguageModelGradients& gradients) {
-    const bool pipelineHostUpdateEarly = CudaBao::pipelineHostWeightUpdate();
+    const bool pipelineHostUpdateEarly = CudaSbao::pipelineHostWeightUpdate();
     if (pipelineHostUpdateEarly)
         this->waitPendingHostWeightH2d();
 
@@ -323,8 +326,8 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
 
     const bool phaseTrace = this->preferTrainPhaseTrace;
     const bool hostLarge = CudaAdam::preferHostGradients;
-    const bool pipelineHostUpdate = hostLarge && CudaBao::pipelineHostWeightUpdate();
-    const bool pipelineHostAdam = pipelineHostUpdate && CudaBao::pipelineHostAdam();
+    const bool pipelineHostUpdate = hostLarge && CudaSbao::pipelineHostWeightUpdate();
+    const bool pipelineHostAdam = pipelineHostUpdate && CudaSbao::pipelineHostAdam();
     if (phaseTrace) {
         this->trainPhaseTimers.reset();
         // Pipeline times D2H wait in flushPendingHostUpdate; avoid double-count via download sink.
@@ -368,8 +371,8 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
     const auto bwdLoopStart = std::chrono::steady_clock::now();
 
     int pendingHostUpdateBlock = -1;
-    // Depth ≥3: fused-half host apply (~one layer) must trail several GPU bwds.
-    constexpr int kMaxAsyncHostUpdate = 3;
+    // Depth 4: host fused-half apply trails GPU bwd; freelist has 8 host/device slots.
+    constexpr int kMaxAsyncHostUpdate = 4;
     struct AsyncHostUpdateJob {
         int blockIndex = -1;
         std::future<void> future;
@@ -422,7 +425,7 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
             this->trainPhaseTimers.d2hSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - d2hWaitStart).count();
 
         // Copy-stream event covers all queued fused-half D2Hs; free device packs before expand/apply.
-        CudaOps::releaseCompletedFusedHalfDevices();
+        CudaSbao::releaseCompletedFusedHalfDevices();
 
         // Recycle device weight-grad buffers into the next layer instead of cudaFree.
         this->deferredWeightGradRecycle.stealDeferredWeightGradDeviceFrom(
@@ -447,14 +450,14 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
             asyncHostUpdateJobs.push_back(AsyncHostUpdateJob{
                 blockToUpdate,
                 std::async(std::launch::async, [lr, beta1, beta2, eps, timeStep, gradScale]() {
-                    CudaOps::applyFusedHalfHostAdam(lr, beta1, beta2, eps, timeStep, gradScale);
+                    CudaSbao::applyFusedHalfHostAdam(lr, beta1, beta2, eps, timeStep, gradScale);
                 })});
         } else {
             const float stepScale = hostSgdStepScale();
             asyncHostUpdateJobs.push_back(AsyncHostUpdateJob{
                 blockToUpdate,
                 std::async(std::launch::async, [stepScale]() {
-                    CudaOps::applyFusedHalfHostSgd(stepScale);
+                    CudaSbao::applyFusedHalfHostSgd(stepScale);
                 })});
         }
     };
@@ -582,7 +585,7 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
                 hostGrads,
                 this->hostGradCopyStream,
                 this->hostGradComputeEvent);
-            CudaOps::commitPinnedD2hBatch();
+            CudaSbao::commitPinnedD2hBatch();
             CudaMatmul::throwIfCudaFailed(
                 cudaEventRecord(this->hostGradD2hEvent, this->hostGradCopyStream),
                 "runPackedTrainDevice record hostGradD2hEvent");
@@ -843,7 +846,7 @@ void CudaLanguageModel::ensureTrainState() {
         if (this->hostBlockAdamStates.size() != this->blocks.size())
             this->hostBlockAdamStates.resize(this->blocks.size());
         // Host fused-half pipeline: allocate per-block during bwd only (masters hold state; no host grads).
-        if (!CudaBao::pipelineHostWeightUpdate()) {
+        if (!CudaSbao::pipelineHostWeightUpdate()) {
             for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex)
                 this->ensureHostWeightGradsForBlock(blockIndex);
         } else {
@@ -2555,7 +2558,7 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
     this->muon.learningRate = this->adam.learningRate;
 
     auto syncFusedMirrors = [this]() {
-        if (CudaAdam::preferFp16GpuWeights && CudaBao::pipelineHostWeightUpdate()) {
+        if (CudaAdam::preferFp16GpuWeights && CudaSbao::pipelineHostWeightUpdate()) {
             // Large block weights were pipelined H2D during bwd; only sync small FP32-resident params here.
             return;
         }
@@ -2672,7 +2675,7 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
             CudaTransformerBlockGradients& blockGradients = gradients.blocks[blockIndex];
             CudaTransformerBlockHostAdamStates& blockStates = this->hostBlockAdamStates[blockIndex];
             const bool hostLarge = CudaAdam::preferHostGradients;
-            const bool largeAlreadyApplied = CudaBao::pipelineHostWeightUpdate();
+            const bool largeAlreadyApplied = CudaSbao::pipelineHostWeightUpdate();
 
             if (!this->preferMuon && !largeAlreadyApplied) {
                 pushOffload(block.attention.queryWeight, blockStates.queryWeight, hostLarge ? nullptr : &blockGradients.queryWeight, &blockStates.queryWeightMaster, hostLarge ? &blockStates.queryWeightGrad : nullptr);
@@ -2701,8 +2704,10 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
         {
             const auto t0 = std::chrono::steady_clock::now();
             syncFusedMirrors();
-            this->waitPendingHostWeightH2d();
+            // Do not CPU-sync weight H2D here — next runPackedTrainDevice waits on the compute
+            // stream so H2D can overlap host Adam / Python / the following step's enqueue.
             if (this->preferTrainPhaseTrace) {
+                this->waitPendingHostWeightH2d();
                 syncComputeStreamForTrace("applyGradients syncFusedMirrors");
                 const double h2dApply = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
                 this->trainPhaseTimers.h2dSec += h2dApply;
