@@ -198,6 +198,17 @@ __device__ void CudaOps::runWriteHead(float* full, const float* head, int headIn
     (void)embeddingDim;
 }
 
+__device__ void CudaOps::runAddHeadInto(float* full, const float* head, int headIndex, int headDimension, int sequenceLength) {
+    const int elementCount = headDimension * sequenceLength;
+    const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    if (index >= elementCount) return;
+
+    const int row = index / sequenceLength;
+    const int column = index - row * sequenceLength;
+    const int fullRow = headIndex * headDimension + row;
+    full[fullRow * sequenceLength + column] += head[index];
+}
+
 __device__ void CudaOps::runWriteColumnsInto(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount) {
     const int elementCount = embeddingDim * sourceColumnCount;
     const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
@@ -694,6 +705,10 @@ __global__ void CudaOpsWriteHeadEntry(float* full, const float* head, int headIn
     CudaOps::runWriteHead(full, head, headIndex, headDimension, sequenceLength, embeddingDim);
 }
 
+__global__ void CudaOpsAddHeadEntry(float* full, const float* head, int headIndex, int headDimension, int sequenceLength) {
+    CudaOps::runAddHeadInto(full, head, headIndex, headDimension, sequenceLength);
+}
+
 __global__ void CudaOpsWriteColumnsEntry(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount) {
     CudaOps::runWriteColumnsInto(destination, source, embeddingDim, destinationStrideColumns, destinationStartColumn, sourceColumnCount);
 }
@@ -1173,6 +1188,18 @@ void CudaOps::writeHead(CudaMatrix& full, int headIndex, int headDimension, cons
     const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
     CudaOpsWriteHeadEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(full.buffer.deviceData, head.buffer.deviceData, headIndex, headDimension, sequenceLength, static_cast<int>(full.rows));
     CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsWriteHeadEntry launch");
+}
+
+void CudaOps::addHeadInto(CudaMatrix& full, int headIndex, int headDimension, const CudaMatrix& head) {
+    if (full.empty() || head.empty()) throw std::invalid_argument("CudaOps::addHeadInto empty input");
+    if (head.rows != static_cast<size_t>(headDimension) || head.cols != full.cols) throw std::invalid_argument("CudaOps::addHeadInto shape mismatch");
+    if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaOps::addHeadInto no CUDA device");
+
+    const int sequenceLength = static_cast<int>(full.cols);
+    const int elementCount = headDimension * sequenceLength;
+    const int blockCount = (elementCount + CudaOps::threadCount - 1) / CudaOps::threadCount;
+    CudaOpsAddHeadEntry<<<blockCount, CudaOps::threadCount, 0, CudaMatmul::activeStream()>>>(full.buffer.deviceData, head.buffer.deviceData, headIndex, headDimension, sequenceLength);
+    CudaMatmul::throwIfCudaFailed(cudaGetLastError(), "CudaOpsAddHeadEntry launch");
 }
 
 void CudaOps::writeColumnsInto(CudaMatrix& destination, int destinationStartColumn, const CudaMatrix& source) {

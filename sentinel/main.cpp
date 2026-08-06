@@ -98,6 +98,17 @@ int main() {
         return 0;
     }
     free(gqaSmokeEnv);
+    char* gqaCudaSmokeEnv = nullptr;
+    size_t gqaCudaSmokeLen = 0;
+    if (_dupenv_s(&gqaCudaSmokeEnv, &gqaCudaSmokeLen, "SENTINEL_GQA_CUDA_SMOKE") == 0
+        && gqaCudaSmokeEnv != nullptr
+        && gqaCudaSmokeEnv[0] == '1'
+        && gqaCudaSmokeEnv[1] == '\0') {
+        free(gqaCudaSmokeEnv);
+        CudaCausalSelfAttention::runGqaCudaSmokeDemo();
+        return 0;
+    }
+    free(gqaCudaSmokeEnv);
 #else
     if (const char* halfSmoke = std::getenv("SENTINEL_SAFETENSORS_HALF_SMOKE")) {
         if (halfSmoke[0] == '1' && halfSmoke[1] == '\0') {
@@ -126,6 +137,12 @@ int main() {
     if (const char* gqaSmoke = std::getenv("SENTINEL_GQA_HOST_SMOKE")) {
         if (gqaSmoke[0] == '1' && gqaSmoke[1] == '\0') {
             CausalSelfAttention::runGqaHostSmokeDemo();
+            return 0;
+        }
+    }
+    if (const char* gqaCudaSmoke = std::getenv("SENTINEL_GQA_CUDA_SMOKE")) {
+        if (gqaCudaSmoke[0] == '1' && gqaCudaSmoke[1] == '\0') {
+            CudaCausalSelfAttention::runGqaCudaSmokeDemo();
             return 0;
         }
     }
@@ -278,6 +295,7 @@ int main() {
             CudaCausalSelfAttention::runSmokeDemo(64, 4, 32, 64);
             CudaCausalSelfAttention::runBackwardSmokeDemo(32, 2, 16, 32);
             CudaCausalSelfAttention::runFlashParitySmokeDemo(64, 4, 48, 64);
+            CudaCausalSelfAttention::runGqaCudaSmokeDemo();
             CudaCausalSelfAttention::runKvCacheSmokeDemo(64, 4, 32, 64);
             CudaCausalSelfAttention::runSparseSmokeDemo(32, 2, 16, 32, 4, 2);
         });
@@ -1621,6 +1639,7 @@ int main() {
         CudaCausalSelfAttention::runSmokeDemo(64, 4, 32, 64);
         CudaCausalSelfAttention::runBackwardSmokeDemo(32, 2, 16, 32);
         CudaCausalSelfAttention::runFlashParitySmokeDemo(64, 4, 48, 64);
+        CudaCausalSelfAttention::runGqaCudaSmokeDemo();
         CudaCausalSelfAttention::runKvCacheSmokeDemo(64, 4, 32, 64);
         CudaCausalSelfAttention::runSparseSmokeDemo(32, 2, 16, 32, 4, 2);
 

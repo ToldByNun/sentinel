@@ -13,7 +13,35 @@
 #include <stdexcept>
 
 CudaCausalSelfAttention::CudaCausalSelfAttention()
-    : headCount(0), headDimension(0), pairCount(0), maximumPositionCount(0), windowSize(0), globalTokenCount(0), activeSegmentLength(0), activePackCount(0), preferFlashAttention(true), usedFlashAttention(false) {}
+    : headCount(0), kvHeadCount(0), headDimension(0), pairCount(0), maximumPositionCount(0), windowSize(0), globalTokenCount(0), activeSegmentLength(0), activePackCount(0), preferFlashAttention(true), usedFlashAttention(false) {}
+
+bool CudaCausalSelfAttention::usesFusedQkv() const {
+    return this->kvHeadCount > 0 && this->kvHeadCount == this->headCount;
+}
+
+int CudaCausalSelfAttention::kvHeadIndexForQueryHead(int queryHeadIndex) const {
+    const int groupSize = this->headCount / this->kvHeadCount;
+    return queryHeadIndex / groupSize;
+}
+
+void CudaCausalSelfAttention::expandKvHeadsInto(const CudaMatrix& compact, CudaMatrix& expanded) {
+    expanded.ensureSize(this->query.rows, compact.cols);
+    for (int queryHead = 0; queryHead < this->headCount; ++queryHead) {
+        const int kvHead = this->kvHeadIndexForQueryHead(queryHead);
+        CudaOps::extractHeadInto(compact, kvHead, this->headDimension, this->keyHead);
+        CudaOps::writeHead(expanded, queryHead, this->headDimension, this->keyHead);
+    }
+}
+
+void CudaCausalSelfAttention::reduceKvHeadGradsInto(const CudaMatrix& expandedGrad, CudaMatrix& compactGrad) {
+    compactGrad.ensureSize(this->key.rows, expandedGrad.cols);
+    CudaOps::zeroInPlace(compactGrad);
+    for (int queryHead = 0; queryHead < this->headCount; ++queryHead) {
+        const int kvHead = this->kvHeadIndexForQueryHead(queryHead);
+        CudaOps::extractHeadInto(expandedGrad, queryHead, this->headDimension, this->keyHead);
+        CudaOps::addHeadInto(compactGrad, kvHead, this->headDimension, this->keyHead);
+    }
+}
 
 bool CudaCausalSelfAttention::canUseFlashAttention(int segmentLength, int strideColumns) const {
     if (!this->preferFlashAttention) return false;
@@ -52,6 +80,10 @@ void CudaCausalSelfAttention::releaseDenseAttentionScratch() {
 void CudaCausalSelfAttention::releaseFlashAttentionScratch() {
     this->flashLogSumExp.releaseDeviceToPool();
     this->flashDelta.releaseDeviceToPool();
+    this->flashKeyExpanded.releaseDeviceToPool();
+    this->flashValueExpanded.releaseDeviceToPool();
+    this->flashKeyGradientExpanded.releaseDeviceToPool();
+    this->flashValueGradientExpanded.releaseDeviceToPool();
 }
 
 void CudaCausalSelfAttention::releaseActivationScratch() {
@@ -83,11 +115,18 @@ void CudaCausalSelfAttention::uploadFrom(const CausalSelfAttention& host) {
     this->valueWeight.upload(host.valueWeight);
     this->outputWeight.upload(host.outputWeight);
     this->headCount = host.headCount;
+    this->kvHeadCount = host.kvHeadCount > 0 ? host.kvHeadCount : host.headCount;
     this->headDimension = host.headDimension;
     this->pairCount = host.rotaryEmbedding.pairCount;
     this->maximumPositionCount = host.rotaryEmbedding.maximumPositionCount;
     this->windowSize = host.windowSize;
     this->globalTokenCount = host.globalTokenCount;
+
+    if (this->headCount <= 0 || this->kvHeadCount <= 0 || this->headCount % this->kvHeadCount != 0)
+        throw std::invalid_argument("CudaCausalSelfAttention::uploadFrom invalid head / kvHead geometry");
+    if (static_cast<int>(host.keyWeight.rows) != this->kvHeadCount * this->headDimension
+        || static_cast<int>(host.valueWeight.rows) != this->kvHeadCount * this->headDimension)
+        throw std::invalid_argument("CudaCausalSelfAttention::uploadFrom key/value rows mismatch kvHeadCount");
 
     Matrix hostCos(static_cast<size_t>(this->maximumPositionCount), static_cast<size_t>(this->pairCount), 0.0f);
     Matrix hostSin(static_cast<size_t>(this->maximumPositionCount), static_cast<size_t>(this->pairCount), 0.0f);
@@ -100,15 +139,23 @@ void CudaCausalSelfAttention::uploadFrom(const CausalSelfAttention& host) {
     }
     this->cosTable.upload(hostCos);
     this->sinTable.upload(hostSin);
-    this->syncFusedQkvWeight();
+    if (this->usesFusedQkv())
+        this->syncFusedQkvWeight();
+    else
+        this->qkvWeight.free();
     CudaAmp::registerMasterWeight(this->queryWeight.buffer.deviceData, this->queryWeight.elementCount());
     CudaAmp::registerMasterWeight(this->keyWeight.buffer.deviceData, this->keyWeight.elementCount());
     CudaAmp::registerMasterWeight(this->valueWeight.buffer.deviceData, this->valueWeight.elementCount());
     CudaAmp::registerMasterWeight(this->outputWeight.buffer.deviceData, this->outputWeight.elementCount());
-    CudaAmp::registerMasterWeight(this->qkvWeight.buffer.deviceData, this->qkvWeight.elementCount());
+    if (!this->qkvWeight.empty())
+        CudaAmp::registerMasterWeight(this->qkvWeight.buffer.deviceData, this->qkvWeight.elementCount());
 }
 
 void CudaCausalSelfAttention::syncFusedQkvWeight() {
+    if (!this->usesFusedQkv()) {
+        this->qkvWeight.free();
+        return;
+    }
     if (this->queryWeight.empty() || this->keyWeight.empty() || this->valueWeight.empty()) return;
     if (this->queryWeight.cols != this->keyWeight.cols || this->queryWeight.cols != this->valueWeight.cols)
         throw std::invalid_argument("CudaCausalSelfAttention::syncFusedQkvWeight embed mismatch");
@@ -133,23 +180,31 @@ CudaCausalSelfAttention CudaCausalSelfAttention::createFrom(const CausalSelfAtte
 
 void CudaCausalSelfAttention::projectAndRotate(const CudaMatrix& input, int positionOffset, int segmentLength) {
     CudaOps::copyInto(input, this->inputCache);
-    if (this->qkvWeight.empty())
-        this->syncFusedQkvWeight();
-
-    this->qkvProjected.ensureSize(this->qkvWeight.rows, input.cols);
-    CudaMatrix::multiplyInto(this->qkvWeight, input, this->qkvProjected);
 
     this->query.ensureSize(this->queryWeight.rows, input.cols);
     this->key.ensureSize(this->keyWeight.rows, input.cols);
     this->value.ensureSize(this->valueWeight.rows, input.cols);
-    const size_t sliceElements = this->queryWeight.rows * input.cols;
-    const size_t sliceBytes = sliceElements * sizeof(float);
-    CudaMatmul::memcpyDevice(this->query.buffer.deviceData, this->qkvProjected.buffer.deviceData, sliceBytes);
-    CudaMatmul::memcpyDevice(this->key.buffer.deviceData, this->qkvProjected.buffer.deviceData + sliceElements, sliceBytes);
-    CudaMatmul::memcpyDevice(this->value.buffer.deviceData, this->qkvProjected.buffer.deviceData + 2ull * sliceElements, sliceBytes);
+
+    if (this->usesFusedQkv()) {
+        if (this->qkvWeight.empty())
+            this->syncFusedQkvWeight();
+
+        this->qkvProjected.ensureSize(this->qkvWeight.rows, input.cols);
+        CudaMatrix::multiplyInto(this->qkvWeight, input, this->qkvProjected);
+
+        const size_t sliceElements = this->queryWeight.rows * input.cols;
+        const size_t sliceBytes = sliceElements * sizeof(float);
+        CudaMatmul::memcpyDevice(this->query.buffer.deviceData, this->qkvProjected.buffer.deviceData, sliceBytes);
+        CudaMatmul::memcpyDevice(this->key.buffer.deviceData, this->qkvProjected.buffer.deviceData + sliceElements, sliceBytes);
+        CudaMatmul::memcpyDevice(this->value.buffer.deviceData, this->qkvProjected.buffer.deviceData + 2ull * sliceElements, sliceBytes);
+    } else {
+        CudaMatrix::multiplyInto(this->queryWeight, input, this->query);
+        CudaMatrix::multiplyInto(this->keyWeight, input, this->key);
+        CudaMatrix::multiplyInto(this->valueWeight, input, this->value);
+    }
 
     CudaOps::rotaryRotateInPlace(this->query, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, positionOffset, segmentLength);
-    CudaOps::rotaryRotateInPlace(this->key, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, positionOffset, segmentLength);
+    CudaOps::rotaryRotateInPlace(this->key, this->kvHeadCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, positionOffset, segmentLength);
 }
 
 void CudaCausalSelfAttention::attendFullSequence(CudaMatrix& out, int segmentLength) {
@@ -170,10 +225,19 @@ void CudaCausalSelfAttention::attendFullSequence(CudaMatrix& out, int segmentLen
         this->flashLogSumExp.ensureSize(static_cast<size_t>(this->headCount), sequenceLength);
         this->attended.ensureSize(this->query.rows, sequenceLength);
 
+        const CudaMatrix* flashKey = &this->key;
+        const CudaMatrix* flashValue = &this->value;
+        if (!this->usesFusedQkv()) {
+            this->expandKvHeadsInto(this->key, this->flashKeyExpanded);
+            this->expandKvHeadsInto(this->value, this->flashValueExpanded);
+            flashKey = &this->flashKeyExpanded;
+            flashValue = &this->flashValueExpanded;
+        }
+
         CudaFlashAttention::forwardMultiHead(
             this->query,
-            this->key,
-            this->value,
+            *flashKey,
+            *flashValue,
             this->attended,
             this->flashLogSumExp,
             this->headCount,
@@ -198,9 +262,10 @@ void CudaCausalSelfAttention::attendFullSequence(CudaMatrix& out, int segmentLen
             this->cachedHeadProbabilities.resize(static_cast<size_t>(this->headCount));
 
         for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
+            const int kvHeadIndex = this->kvHeadIndexForQueryHead(headIndex);
             CudaOps::extractHeadInto(this->query, headIndex, this->headDimension, this->queryHead);
-            CudaOps::extractHeadInto(this->key, headIndex, this->headDimension, this->keyHead);
-            CudaOps::extractHeadInto(this->value, headIndex, this->headDimension, this->valueHead);
+            CudaOps::extractHeadInto(this->key, kvHeadIndex, this->headDimension, this->keyHead);
+            CudaOps::extractHeadInto(this->value, kvHeadIndex, this->headDimension, this->valueHead);
 
             CudaMatrix::multiplyInto(this->keyHead, this->queryHead, this->scores, true, false);
             CudaOps::scaleInPlace(this->scores, scale);
@@ -229,9 +294,10 @@ void CudaCausalSelfAttention::attendFullSequence(CudaMatrix& out, int segmentLen
         CudaOps::zeroInPlace(this->attendedSegment);
 
         for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
+            const int kvHeadIndex = this->kvHeadIndexForQueryHead(headIndex);
             CudaOps::extractHeadInto(this->querySegment, headIndex, this->headDimension, this->queryHead);
-            CudaOps::extractHeadInto(this->keySegment, headIndex, this->headDimension, this->keyHead);
-            CudaOps::extractHeadInto(this->valueSegment, headIndex, this->headDimension, this->valueHead);
+            CudaOps::extractHeadInto(this->keySegment, kvHeadIndex, this->headDimension, this->keyHead);
+            CudaOps::extractHeadInto(this->valueSegment, kvHeadIndex, this->headDimension, this->valueHead);
 
             CudaMatrix::multiplyInto(this->keyHead, this->queryHead, this->scores, true, false);
             CudaOps::scaleInPlace(this->scores, scale);
@@ -258,9 +324,10 @@ void CudaCausalSelfAttention::attendCachedQuery(const CudaKvCache& cache, CudaMa
     CudaOps::zeroInPlace(this->attended);
 
     for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
+        const int kvHeadIndex = this->kvHeadIndexForQueryHead(headIndex);
         CudaOps::extractHeadInto(this->query, headIndex, this->headDimension, this->queryHead);
-        CudaOps::extractHeadInto(cache.key, headIndex, this->headDimension, usedLength, this->keyHead);
-        CudaOps::extractHeadInto(cache.value, headIndex, this->headDimension, usedLength, this->valueHead);
+        CudaOps::extractHeadInto(cache.key, kvHeadIndex, this->headDimension, usedLength, this->keyHead);
+        CudaOps::extractHeadInto(cache.value, kvHeadIndex, this->headDimension, usedLength, this->valueHead);
 
         CudaMatrix::multiplyInto(this->keyHead, this->queryHead, this->scores, true, false);
         CudaOps::scaleInPlace(this->scores, scale);
@@ -334,16 +401,33 @@ void CudaCausalSelfAttention::backward(
     const float scale = 1.0f / std::sqrt(static_cast<float>(this->headDimension));
 
     if (this->usedFlashAttention) {
+        const CudaMatrix* flashKey = &this->key;
+        const CudaMatrix* flashValue = &this->value;
+        CudaMatrix* flashKeyGrad = &this->keyGradient;
+        CudaMatrix* flashValueGrad = &this->valueGradient;
+        if (!this->usesFusedQkv()) {
+            this->expandKvHeadsInto(this->key, this->flashKeyExpanded);
+            this->expandKvHeadsInto(this->value, this->flashValueExpanded);
+            flashKey = &this->flashKeyExpanded;
+            flashValue = &this->flashValueExpanded;
+            this->flashKeyGradientExpanded.ensureSize(this->query.rows, this->query.cols);
+            this->flashValueGradientExpanded.ensureSize(this->query.rows, this->query.cols);
+            CudaOps::zeroInPlace(this->flashKeyGradientExpanded);
+            CudaOps::zeroInPlace(this->flashValueGradientExpanded);
+            flashKeyGrad = &this->flashKeyGradientExpanded;
+            flashValueGrad = &this->flashValueGradientExpanded;
+        }
+
         CudaFlashAttention::backwardMultiHead(
             this->query,
-            this->key,
-            this->value,
+            *flashKey,
+            *flashValue,
             this->attended,
             this->flashLogSumExp,
             this->attendedGradient,
             this->queryGradient,
-            this->keyGradient,
-            this->valueGradient,
+            *flashKeyGrad,
+            *flashValueGrad,
             this->flashDelta,
             this->headCount,
             this->headDimension,
@@ -352,12 +436,18 @@ void CudaCausalSelfAttention::backward(
             0,
             segmentLength,
             packCount);
+
+        if (!this->usesFusedQkv()) {
+            this->reduceKvHeadGradsInto(this->flashKeyGradientExpanded, this->keyGradient);
+            this->reduceKvHeadGradsInto(this->flashValueGradientExpanded, this->valueGradient);
+        }
     } else if (packCount <= 1) {
         for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
+            const int kvHeadIndex = this->kvHeadIndexForQueryHead(headIndex);
             CudaOps::extractHeadInto(this->attendedGradient, headIndex, this->headDimension, this->attendedHead);
             CudaOps::extractHeadInto(this->query, headIndex, this->headDimension, this->queryHead);
-            CudaOps::extractHeadInto(this->key, headIndex, this->headDimension, this->keyHead);
-            CudaOps::extractHeadInto(this->value, headIndex, this->headDimension, this->valueHead);
+            CudaOps::extractHeadInto(this->key, kvHeadIndex, this->headDimension, this->keyHead);
+            CudaOps::extractHeadInto(this->value, kvHeadIndex, this->headDimension, this->valueHead);
             const CudaMatrix& headProbabilities = this->cachedHeadProbabilities[static_cast<size_t>(headIndex)];
 
             CudaMatrix::multiplyInto(this->attendedHead, headProbabilities, this->valueHeadGradient, false, true);
@@ -369,8 +459,8 @@ void CudaCausalSelfAttention::backward(
             CudaMatrix::multiplyInto(this->queryHead, this->scoreGradient, this->keyHeadGradient, false, true);
 
             CudaOps::writeHead(this->queryGradient, headIndex, this->headDimension, this->queryHeadGradient);
-            CudaOps::writeHead(this->keyGradient, headIndex, this->headDimension, this->keyHeadGradient);
-            CudaOps::writeHead(this->valueGradient, headIndex, this->headDimension, this->valueHeadGradient);
+            CudaOps::addHeadInto(this->keyGradient, kvHeadIndex, this->headDimension, this->keyHeadGradient);
+            CudaOps::addHeadInto(this->valueGradient, kvHeadIndex, this->headDimension, this->valueHeadGradient);
         }
     } else {
         for (int segmentIndex = 0; segmentIndex < packCount; ++segmentIndex) {
@@ -388,10 +478,11 @@ void CudaCausalSelfAttention::backward(
             CudaOps::zeroInPlace(this->valueGradientSegment);
 
             for (int headIndex = 0; headIndex < this->headCount; ++headIndex) {
+                const int kvHeadIndex = this->kvHeadIndexForQueryHead(headIndex);
                 CudaOps::extractHeadInto(this->attendedGradientSegment, headIndex, this->headDimension, this->attendedHead);
                 CudaOps::extractHeadInto(this->querySegment, headIndex, this->headDimension, this->queryHead);
-                CudaOps::extractHeadInto(this->keySegment, headIndex, this->headDimension, this->keyHead);
-                CudaOps::extractHeadInto(this->valueSegment, headIndex, this->headDimension, this->valueHead);
+                CudaOps::extractHeadInto(this->keySegment, kvHeadIndex, this->headDimension, this->keyHead);
+                CudaOps::extractHeadInto(this->valueSegment, kvHeadIndex, this->headDimension, this->valueHead);
                 const size_t cacheIndex = static_cast<size_t>(headIndex) * static_cast<size_t>(packCount) + static_cast<size_t>(segmentIndex);
                 const CudaMatrix& headProbabilities = this->cachedHeadProbabilities[cacheIndex];
 
@@ -404,8 +495,8 @@ void CudaCausalSelfAttention::backward(
                 CudaMatrix::multiplyInto(this->queryHead, this->scoreGradient, this->keyHeadGradient, false, true);
 
                 CudaOps::writeHead(this->queryGradientSegment, headIndex, this->headDimension, this->queryHeadGradient);
-                CudaOps::writeHead(this->keyGradientSegment, headIndex, this->headDimension, this->keyHeadGradient);
-                CudaOps::writeHead(this->valueGradientSegment, headIndex, this->headDimension, this->valueHeadGradient);
+                CudaOps::addHeadInto(this->keyGradientSegment, kvHeadIndex, this->headDimension, this->keyHeadGradient);
+                CudaOps::addHeadInto(this->valueGradientSegment, kvHeadIndex, this->headDimension, this->valueHeadGradient);
             }
 
             CudaOps::addColumnsInPlace(this->queryGradient, columnStart, this->queryGradientSegment);
@@ -415,31 +506,44 @@ void CudaCausalSelfAttention::backward(
     }
 
     CudaOps::rotaryRotateInverseInPlace(this->queryGradient, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, 0, this->activeSegmentLength);
-    CudaOps::rotaryRotateInverseInPlace(this->keyGradient, this->headCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, 0, this->activeSegmentLength);
+    CudaOps::rotaryRotateInverseInPlace(this->keyGradient, this->kvHeadCount, this->headDimension, this->pairCount, this->cosTable, this->sinTable, 0, this->activeSegmentLength);
 
-    if (this->qkvWeight.empty())
-        this->syncFusedQkvWeight();
+    if (this->usesFusedQkv()) {
+        if (this->qkvWeight.empty())
+            this->syncFusedQkvWeight();
 
-    // Reuse qkvProjected as stacked [dQ; dK; dV] for one dW GEMM and one dX GEMM.
-    this->qkvProjected.ensureSize(this->query.rows * 3ull, this->query.cols);
-    const size_t sliceElements = this->query.elementCount();
-    const size_t sliceBytes = sliceElements * sizeof(float);
-    CudaMatmul::memcpyDevice(this->qkvProjected.buffer.deviceData, this->queryGradient.buffer.deviceData, sliceBytes);
-    CudaMatmul::memcpyDevice(this->qkvProjected.buffer.deviceData + sliceElements, this->keyGradient.buffer.deviceData, sliceBytes);
-    CudaMatmul::memcpyDevice(this->qkvProjected.buffer.deviceData + 2ull * sliceElements, this->valueGradient.buffer.deviceData, sliceBytes);
+        // Reuse qkvProjected as stacked [dQ; dK; dV] for one dW GEMM and one dX GEMM.
+        this->qkvProjected.ensureSize(this->query.rows * 3ull, this->query.cols);
+        const size_t sliceElements = this->query.elementCount();
+        const size_t sliceBytes = sliceElements * sizeof(float);
+        CudaMatmul::memcpyDevice(this->qkvProjected.buffer.deviceData, this->queryGradient.buffer.deviceData, sliceBytes);
+        CudaMatmul::memcpyDevice(this->qkvProjected.buffer.deviceData + sliceElements, this->keyGradient.buffer.deviceData, sliceBytes);
+        CudaMatmul::memcpyDevice(this->qkvProjected.buffer.deviceData + 2ull * sliceElements, this->valueGradient.buffer.deviceData, sliceBytes);
 
-    CudaMatrix::multiplyInto(this->qkvProjected, this->inputCache, this->qkvWeightGradient, false, true);
-    if (materializeSplitWeightGrads) {
-        queryWeightGradient.ensureSize(this->queryWeight.rows, this->queryWeight.cols);
-        keyWeightGradient.ensureSize(this->keyWeight.rows, this->keyWeight.cols);
-        valueWeightGradient.ensureSize(this->valueWeight.rows, this->valueWeight.cols);
-        const size_t weightSliceBytes = this->queryWeight.byteCount();
-        CudaMatmul::memcpyDevice(queryWeightGradient.buffer.deviceData, this->qkvWeightGradient.buffer.deviceData, weightSliceBytes);
-        CudaMatmul::memcpyDevice(keyWeightGradient.buffer.deviceData, this->qkvWeightGradient.buffer.deviceData + this->queryWeight.elementCount(), weightSliceBytes);
-        CudaMatmul::memcpyDevice(valueWeightGradient.buffer.deviceData, this->qkvWeightGradient.buffer.deviceData + 2ull * this->queryWeight.elementCount(), weightSliceBytes);
+        CudaMatrix::multiplyInto(this->qkvProjected, this->inputCache, this->qkvWeightGradient, false, true);
+        if (materializeSplitWeightGrads) {
+            queryWeightGradient.ensureSize(this->queryWeight.rows, this->queryWeight.cols);
+            keyWeightGradient.ensureSize(this->keyWeight.rows, this->keyWeight.cols);
+            valueWeightGradient.ensureSize(this->valueWeight.rows, this->valueWeight.cols);
+            const size_t weightSliceBytes = this->queryWeight.byteCount();
+            CudaMatmul::memcpyDevice(queryWeightGradient.buffer.deviceData, this->qkvWeightGradient.buffer.deviceData, weightSliceBytes);
+            CudaMatmul::memcpyDevice(keyWeightGradient.buffer.deviceData, this->qkvWeightGradient.buffer.deviceData + this->queryWeight.elementCount(), weightSliceBytes);
+            CudaMatmul::memcpyDevice(valueWeightGradient.buffer.deviceData, this->qkvWeightGradient.buffer.deviceData + 2ull * this->queryWeight.elementCount(), weightSliceBytes);
+        }
+
+        CudaMatrix::multiplyInto(this->qkvWeight, this->qkvProjected, inputGradient, true, false);
+    } else {
+        if (materializeSplitWeightGrads) {
+            CudaMatrix::multiplyInto(this->queryGradient, this->inputCache, queryWeightGradient, false, true);
+            CudaMatrix::multiplyInto(this->keyGradient, this->inputCache, keyWeightGradient, false, true);
+            CudaMatrix::multiplyInto(this->valueGradient, this->inputCache, valueWeightGradient, false, true);
+        }
+        CudaMatrix::multiplyInto(this->queryWeight, this->queryGradient, inputGradient, true, false);
+        CudaMatrix::multiplyInto(this->keyWeight, this->keyGradient, this->temp, true, false);
+        CudaOps::addInPlace(inputGradient, this->temp);
+        CudaMatrix::multiplyInto(this->valueWeight, this->valueGradient, this->temp, true, false);
+        CudaOps::addInPlace(inputGradient, this->temp);
     }
-
-    CudaMatrix::multiplyInto(this->qkvWeight, this->qkvProjected, inputGradient, true, false);
 }
 
 void CudaCausalSelfAttention::prefill(const CudaMatrix& input, CudaKvCache& cache, CudaMatrix& out) {
@@ -449,7 +553,7 @@ void CudaCausalSelfAttention::prefill(const CudaMatrix& input, CudaKvCache& cach
     if (static_cast<int>(input.cols) > this->maximumPositionCount) throw std::invalid_argument("CudaCausalSelfAttention::prefill sequence longer than maximumPositionCount");
     if (!CudaMatmul::isAvailable()) throw std::runtime_error("CudaCausalSelfAttention::prefill no CUDA device");
 
-    cache.ensureCapacity(static_cast<int>(input.rows), this->maximumPositionCount);
+    cache.ensureCapacity(static_cast<int>(this->keyWeight.rows), this->maximumPositionCount);
     this->projectAndRotate(input, 0);
     cache.append(this->key, this->value);
     this->attendFullSequence(out, 0);
@@ -787,4 +891,107 @@ void CudaCausalSelfAttention::runFlashParitySmokeDemo(int embeddingDim, int head
 
     SmokeLog::result("Attention flash", "embed=%d heads=%d seq=%d  fwdDiff=%.2e  bwdDiff=%.2e",
         embeddingDim, headCount, sequenceLength, forwardDifference, backwardDifference);
+}
+
+void CudaCausalSelfAttention::runGqaCudaSmokeDemo() {
+    if (!CudaMatmul::isAvailable()) {
+        SmokeLog::skip("Attention GQA cuda");
+        return;
+    }
+
+    const int embed = 64;
+    const int heads = 8;
+    const int kvHeads = 2;
+    const int seq = 16; // multiple of 4 → flash-eligible
+    const int maxPos = 32;
+    const unsigned seed = 53u;
+
+    auto maxAbsDiff = [](const Matrix& a, const Matrix& b) -> float {
+        if (a.data.size() != b.data.size())
+            throw std::runtime_error("CudaCausalSelfAttention GQA smoke size mismatch");
+        float diff = 0.0f;
+        for (size_t i = 0; i < a.data.size(); ++i)
+            diff = (std::max)(diff, std::fabs(a.data[i] - b.data[i]));
+        return diff;
+    };
+
+    CausalSelfAttention host = CausalSelfAttention::create(
+        embed, heads, maxPos, seed, maxPos, 0, RotaryEmbedding::DefaultBase, kvHeads);
+    Matrix hostInput(static_cast<size_t>(embed), static_cast<size_t>(seq), 0.0f);
+    unsigned state = 91u;
+    for (size_t i = 0; i < hostInput.data.size(); ++i) {
+        state = state * 1664525u + 1013904223u;
+        hostInput.data[i] = (static_cast<float>(state >> 8) / 16777216.0f) * 2.0f - 1.0f;
+    }
+    Matrix outputGradient(static_cast<size_t>(embed), static_cast<size_t>(seq), 0.01f);
+
+    CausalSelfAttentionCache hostCache;
+    Matrix hostOut = host.forward(hostInput, hostCache);
+    Matrix hostQ, hostK, hostV, hostO;
+    Matrix hostInGrad = host.backward(outputGradient, hostCache, hostQ, hostK, hostV, hostO);
+
+    CudaMatrix deviceInput;
+    deviceInput.upload(hostInput);
+    CudaMatrix deviceOutGrad;
+    deviceOutGrad.upload(outputGradient);
+
+    auto runDevice = [&](bool preferFlash, Matrix& outHost, Matrix& inGradHost, Matrix& qg, Matrix& kg, Matrix& vg, Matrix& og) {
+        CudaCausalSelfAttention device = CudaCausalSelfAttention::createFrom(host);
+        device.preferFlashAttention = preferFlash;
+        CudaMatrix out;
+        device.forward(deviceInput, out);
+        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "GQA smoke forward sync");
+        if (preferFlash && !device.usedFlashAttention)
+            throw std::logic_error("CudaCausalSelfAttention GQA smoke expected flash path");
+        if (!preferFlash && device.usedFlashAttention)
+            throw std::logic_error("CudaCausalSelfAttention GQA smoke dense path used flash");
+
+        CudaMatrix inGrad, dq, dk, dv, dOutW;
+        device.backward(deviceOutGrad, inGrad, dq, dk, dv, dOutW);
+        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "GQA smoke backward sync");
+        outHost = out.download();
+        inGradHost = inGrad.download();
+        qg = dq.download();
+        kg = dk.download();
+        vg = dv.download();
+        og = dOutW.download();
+    };
+
+    Matrix denseOut, denseIn, denseQ, denseK, denseV, denseO;
+    runDevice(false, denseOut, denseIn, denseQ, denseK, denseV, denseO);
+    const float hostDenseFwd = maxAbsDiff(hostOut, denseOut);
+    const float hostDenseBwd = (std::max)(
+        maxAbsDiff(hostInGrad, denseIn),
+        (std::max)(
+            maxAbsDiff(hostQ, denseQ),
+            (std::max)(
+                maxAbsDiff(hostK, denseK),
+                (std::max)(maxAbsDiff(hostV, denseV), maxAbsDiff(hostO, denseO)))));
+    if (hostDenseFwd > 2.0e-4f || hostDenseBwd > 2.0e-3f)
+        throw std::runtime_error("CudaCausalSelfAttention GQA smoke host↔dense parity failed");
+
+    Matrix flashOut, flashIn, flashQ, flashK, flashV, flashO;
+    runDevice(true, flashOut, flashIn, flashQ, flashK, flashV, flashO);
+    const float flashDenseFwd = maxAbsDiff(flashOut, denseOut);
+    const float flashDenseBwd = (std::max)(
+        maxAbsDiff(flashIn, denseIn),
+        (std::max)(
+            maxAbsDiff(flashQ, denseQ),
+            (std::max)(
+                maxAbsDiff(flashK, denseK),
+                (std::max)(maxAbsDiff(flashV, denseV), maxAbsDiff(flashO, denseO)))));
+    // Flash uses expanded KV copies; fwd stays tight, bwd allows flash↔dense numeric gap (same as MHA flash parity style).
+    if (flashDenseFwd > 1.0e-3f || flashDenseBwd > 1.0e-1f)
+        throw std::runtime_error("CudaCausalSelfAttention GQA smoke flash↔dense parity failed");
+
+    SmokeLog::result(
+        "Attention GQA cuda",
+        "q=%d kv=%d seq=%d  hostDenseFwd=%.2e  hostDenseBwd=%.2e  flashDenseFwd=%.2e  flashDenseBwd=%.2e",
+        heads,
+        kvHeads,
+        seq,
+        hostDenseFwd,
+        hostDenseBwd,
+        flashDenseFwd,
+        flashDenseBwd);
 }

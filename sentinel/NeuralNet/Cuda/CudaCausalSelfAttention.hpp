@@ -24,6 +24,8 @@ public:
     CudaMatrix cosTable;
     CudaMatrix sinTable;
     int headCount;
+    /// <summary>K/V heads; equals headCount for MHA</summary>
+    int kvHeadCount;
     int headDimension;
     int pairCount;
     int maximumPositionCount;
@@ -37,6 +39,11 @@ public:
     CudaMatrix query;
     CudaMatrix key;
     CudaMatrix value;
+    /// <summary>flash path: K/V repeated to Q heads when GQA</summary>
+    CudaMatrix flashKeyExpanded;
+    CudaMatrix flashValueExpanded;
+    CudaMatrix flashKeyGradientExpanded;
+    CudaMatrix flashValueGradientExpanded;
     CudaMatrix queryHead;
     CudaMatrix keyHead;
     CudaMatrix valueHead;
@@ -125,11 +132,18 @@ public:
     /// <summary>compare flash vs materialize dense causal forward and backward</summary>
     static void runFlashParitySmokeDemo(int embeddingDim = 64, int headCount = 4, int sequenceLength = 48, int maximumPositionCount = 64);
 
+    /// <summary>host vs CUDA GQA (+ flash↔dense when flash eligible)</summary>
+    static void runGqaCudaSmokeDemo();
+
 private:
     void projectAndRotate(const CudaMatrix& input, int positionOffset, int segmentLength = 0);
     void attendFullSequence(CudaMatrix& out, int segmentLength = -1);
     void attendCachedQuery(const CudaKvCache& cache, CudaMatrix& out);
     bool canUseFlashAttention(int segmentLength, int strideColumns) const;
+    bool usesFusedQkv() const;
+    int kvHeadIndexForQueryHead(int queryHeadIndex) const;
+    void expandKvHeadsInto(const CudaMatrix& compact, CudaMatrix& expanded);
+    void reduceKvHeadGradsInto(const CudaMatrix& expandedGrad, CudaMatrix& compactGrad);
 };
 
 #endif // CUDACAUSALSELFATTENTION_HPP

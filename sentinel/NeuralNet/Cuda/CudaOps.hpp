@@ -125,6 +125,9 @@ public:
     /// <summary>write one head block of rows into full</summary>
     static void writeHead(CudaMatrix& full, int headIndex, int headDimension, const CudaMatrix& head);
 
+    /// <summary>add one head block into full (GQA K/V grad accumulate)</summary>
+    static void addHeadInto(CudaMatrix& full, int headIndex, int headDimension, const CudaMatrix& head);
+
     /// <summary>write packed source columns into dest starting at destStartColumn</summary>
     static void writeColumnsInto(CudaMatrix& destination, int destinationStartColumn, const CudaMatrix& source);
 
@@ -241,6 +244,7 @@ private:
     __device__ static void runZeroInPlace(float* matrix, int elementCount);
     __device__ static void runExtractHeadInto(const float* full, float* head, int headIndex, int headDimension, int sourceStrideColumns, int usedColumnCount);
     __device__ static void runWriteHead(float* full, const float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim);
+    __device__ static void runAddHeadInto(float* full, const float* head, int headIndex, int headDimension, int sequenceLength);
     __device__ static void runWriteColumnsInto(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount);
     __device__ static void runExtractColumnsInto(const float* source, float* out, int embeddingDim, int sourceStrideColumns, int sourceStartColumn, int columnCount);
     __device__ static void runAddColumnsInPlace(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount);
@@ -273,6 +277,7 @@ private:
     friend __global__ void CudaOpsZeroEntry(float* matrix, int elementCount);
     friend __global__ void CudaOpsExtractHeadEntry(const float* full, float* head, int headIndex, int headDimension, int sourceStrideColumns, int usedColumnCount);
     friend __global__ void CudaOpsWriteHeadEntry(float* full, const float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim);
+    friend __global__ void CudaOpsAddHeadEntry(float* full, const float* head, int headIndex, int headDimension, int sequenceLength);
     friend __global__ void CudaOpsWriteColumnsEntry(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount);
     friend __global__ void CudaOpsExtractColumnsEntry(const float* source, float* out, int embeddingDim, int sourceStrideColumns, int sourceStartColumn, int columnCount);
     friend __global__ void CudaOpsAddColumnsEntry(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount);
@@ -310,6 +315,7 @@ __global__ void CudaOpsScaleEntry(float* matrix, float scalar, int elementCount)
 __global__ void CudaOpsZeroEntry(float* matrix, int elementCount);
 __global__ void CudaOpsExtractHeadEntry(const float* full, float* head, int headIndex, int headDimension, int sourceStrideColumns, int usedColumnCount);
 __global__ void CudaOpsWriteHeadEntry(float* full, const float* head, int headIndex, int headDimension, int sequenceLength, int embeddingDim);
+__global__ void CudaOpsAddHeadEntry(float* full, const float* head, int headIndex, int headDimension, int sequenceLength);
 __global__ void CudaOpsWriteColumnsEntry(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount);
 __global__ void CudaOpsExtractColumnsEntry(const float* source, float* out, int embeddingDim, int sourceStrideColumns, int sourceStartColumn, int columnCount);
 __global__ void CudaOpsAddColumnsEntry(float* destination, const float* source, int embeddingDim, int destinationStrideColumns, int destinationStartColumn, int sourceColumnCount);
