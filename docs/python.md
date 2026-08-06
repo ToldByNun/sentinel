@@ -119,10 +119,11 @@ model = S.LanguageModel(
     intermediate_size=0,  # 0 = legacy expand-4 SwiGLU width; set for HF-style MLP width
     rope_theta=10000.0,   # HF rope_theta
     use_bias=True,        # False when HF config has no FFN/lm_head bias
+    kv_head_count=-1,     # <=0 → MHA (= head_count); else GQA (HF num_key_value_heads)
 )
 ```
 
-`embedding_dim` must be divisible by `head_count`. `intermediate_size` is the SwiGLU gate/up row count (HF `intermediate_size`).
+`embedding_dim` must be divisible by `head_count`. `intermediate_size` is the SwiGLU gate/up row count (HF `intermediate_size`). For GQA, `head_count` must be divisible by `kv_head_count`.
 
 ### Device setup
 
@@ -160,6 +161,7 @@ if S.cuda_available():
 | `intermediate_size` | `int` (ro) | FFN gate/up width (`0` only if no blocks) |
 | `rope_theta` | `float` (ro) | RoPE base (HF `rope_theta`) |
 | `use_bias` | `bool` (ro) | `False` → fixed-zero FFN/`lm_head` biases (common HF causal LMs) |
+| `kv_head_count` | `int` (ro) | K/V heads (HF `num_key_value_heads`); equals `head_count` for MHA |
 
 Prefer setting host-SGD / SBAO **before** `enable_cuda_train` so pack/ckpt resolve correctly.
 

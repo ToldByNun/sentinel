@@ -14,6 +14,7 @@ All notable changes to this project are documented here.
 - Optional FFN / `lm_head` bias via `use_bias` (default `true`); `false` keeps zero-shaped biases for CUDA, omits bias tensors on safetensors save, and skips Adam updates (HF arches without those biases)
 - Host `CausalSelfAttention` **GQA** (`kvHeadCount`); MHA when `kvHeadCount == headCount`
 - CUDA / flash attention GQA (dense Repeat-KV; flash via expanded K/V heads) + host/flash parity smoke
+- `kv_head_count` on `TransformerBlock` / `LanguageModel` / Python (+ safetensors metadata); `<=0` → MHA
 
 ## [0.1.0] — 2026-08-06
 
@@ -41,3 +42,4 @@ First library-oriented release surface.
 - Bias-policy smoke: `SENTINEL_BIAS_POLICY_SMOKE=1`.
 - Host GQA smoke: `SENTINEL_GQA_HOST_SMOKE=1`.
 - CUDA GQA smoke: `SENTINEL_GQA_CUDA_SMOKE=1`.
+- LM `kv_head_count` smoke: `SENTINEL_KV_HEAD_COUNT_SMOKE=1`.

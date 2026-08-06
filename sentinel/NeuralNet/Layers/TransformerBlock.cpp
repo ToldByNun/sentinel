@@ -71,10 +71,11 @@ TransformerBlock::TransformerBlock(
     unsigned seed,
     int intermediateSize,
     float ropeTheta,
-    bool useBias)
+    bool useBias,
+    int kvHeadCount)
     : attentionNorm(embeddingDim),
       attention(CausalSelfAttention::create(
-          embeddingDim, headCount, maximumPositionCount, seed, -1, 0, ropeTheta)),
+          embeddingDim, headCount, maximumPositionCount, seed, -1, 0, ropeTheta, kvHeadCount)),
       feedForwardNorm(embeddingDim),
       feedForward(
           intermediateSize > 0

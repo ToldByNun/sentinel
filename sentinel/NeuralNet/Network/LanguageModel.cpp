@@ -85,7 +85,8 @@ LanguageModel::LanguageModel(
     int headCount,
     int intermediateSize,
     float ropeTheta,
-    bool useBias)
+    bool useBias,
+    int kvHeadCount)
     : tokenEmbedding(vocabularySize, embeddingDim),
       finalNorm(embeddingDim),
       outputProjection(
@@ -103,6 +104,10 @@ LanguageModel::LanguageModel(
     if (headCount <= 0) throw std::invalid_argument("LanguageModel headCount must be > 0");
     if (intermediateSize < 0) throw std::invalid_argument("LanguageModel intermediateSize must be >= 0");
     if (ropeTheta <= 0.0f) throw std::invalid_argument("LanguageModel ropeTheta must be > 0");
+    const int resolvedKvHeadCount = (kvHeadCount <= 0) ? headCount : kvHeadCount;
+    if (resolvedKvHeadCount <= 0) throw std::invalid_argument("LanguageModel kvHeadCount must be > 0");
+    if (headCount % resolvedKvHeadCount != 0)
+        throw std::invalid_argument("LanguageModel headCount must be divisible by kvHeadCount");
 
     this->blocks.reserve(static_cast<size_t>(blockCount));
     for (int blockIndex = 0; blockIndex < blockCount; ++blockIndex)
@@ -113,7 +118,8 @@ LanguageModel::LanguageModel(
             21u + static_cast<unsigned>(blockIndex) * 100u,
             intermediateSize,
             ropeTheta,
-            useBias));
+            useBias,
+            resolvedKvHeadCount));
 
     // weight tying: LM head shares tokenEmbedding; drop untied projection weight + Adam
     this->outputProjection.weight = Matrix();
@@ -137,6 +143,11 @@ float LanguageModel::ropeTheta() const {
 bool LanguageModel::useBias() const {
     if (this->blocks.empty()) return true;
     return this->blocks[0].feedForward.useBias;
+}
+
+int LanguageModel::kvHeadCount() const {
+    if (this->blocks.empty()) return 0;
+    return this->blocks[0].attention.kvHeadCount;
 }
 
 Matrix& LanguageModel::lmHeadWeight() {
@@ -1593,6 +1604,7 @@ void LanguageModel::saveSafeTensors(const std::string& path) {
     file.metadata["max_position"] = std::to_string(this->maximumPositionCount);
     file.metadata["block_count"] = std::to_string(this->blocks.size());
     file.metadata["head_count"] = std::to_string(this->blocks[0].attention.headCount);
+    file.metadata["kv_head_count"] = std::to_string(this->kvHeadCount());
     file.metadata["intermediate_size"] = std::to_string(this->intermediateSize());
     file.metadata["rope_theta"] = std::to_string(this->ropeTheta());
     file.metadata["use_bias"] = this->useBias() ? "1" : "0";
@@ -1643,6 +1655,7 @@ void LanguageModel::loadSafeTensors(const std::string& path) {
     const int maximumPositionCount = metaInt("max_position", this->maximumPositionCount);
     const int blockCount = metaInt("block_count", static_cast<int>(this->blocks.size()));
     const int headCount = metaInt("head_count", this->blocks[0].attention.headCount);
+    const int kvHeadCount = metaInt("kv_head_count", this->kvHeadCount());
     const int intermediateSize = metaInt("intermediate_size", this->intermediateSize());
     const auto metaFloat = [&](const char* key, float fallback) -> float {
         const auto it = file.metadata.find(key);
@@ -1661,6 +1674,7 @@ void LanguageModel::loadSafeTensors(const std::string& path) {
         || maximumPositionCount != this->maximumPositionCount
         || blockCount != static_cast<int>(this->blocks.size())
         || headCount != this->blocks[0].attention.headCount
+        || kvHeadCount != this->kvHeadCount()
         || intermediateSize != this->intermediateSize()
         || std::fabs(ropeTheta - this->ropeTheta()) > 1.0e-3f * (std::max)(1.0f, std::fabs(this->ropeTheta()))
         || useBias != this->useBias())
@@ -1946,6 +1960,69 @@ void LanguageModel::runBiasPolicySmokeDemo() {
         "LanguageModel bias_policy",
         "use_bias=0  omit_tensors=ok  train_keeps_zero=ok  restoreDiff=%.2e",
         restoreDiff);
+}
+
+void LanguageModel::runKvHeadCountSmokeDemo() {
+    const int embed = 64;
+    const int heads = 8;
+    const int kvHeads = 2;
+    const int maxPos = 32;
+
+    LanguageModel mhaDefault(32, embed, maxPos, Adam(1e-3f), 1, heads);
+    LanguageModel mhaExplicit(
+        32, embed, maxPos, Adam(1e-3f), 1, heads, 0, RotaryEmbedding::DefaultBase, true, heads);
+    LanguageModel gqa(
+        32, embed, maxPos, Adam(1e-3f), 1, heads, 0, RotaryEmbedding::DefaultBase, true, kvHeads);
+
+    if (mhaDefault.kvHeadCount() != heads || mhaExplicit.kvHeadCount() != heads)
+        throw std::runtime_error("LanguageModel MHA kvHeadCount mismatch");
+    if (gqa.kvHeadCount() != kvHeads)
+        throw std::runtime_error("LanguageModel GQA kvHeadCount mismatch");
+
+    const int expectedKvRows = kvHeads * (embed / heads);
+    if (static_cast<int>(gqa.blocks[0].attention.keyWeight.rows) != expectedKvRows
+        || static_cast<int>(gqa.blocks[0].attention.valueWeight.rows) != expectedKvRows)
+        throw std::runtime_error("LanguageModel GQA key/value rows mismatch");
+
+    bool rejectedCtor = false;
+    try {
+        LanguageModel bad(
+            32, embed, maxPos, Adam(1e-3f), 1, heads, 0, RotaryEmbedding::DefaultBase, true, 3);
+        (void)bad;
+    } catch (const std::exception&) {
+        rejectedCtor = true;
+    }
+    if (!rejectedCtor)
+        throw std::runtime_error("LanguageModel should reject headCount not divisible by kvHeadCount");
+
+    const std::string path = "kv_head_count_smoke.safetensors";
+    gqa.saveSafeTensors(path);
+    const SafeTensors::File saved = SafeTensors::load(path);
+    if (saved.metadata.at("kv_head_count") != std::to_string(kvHeads))
+        throw std::runtime_error("safetensors kv_head_count metadata mismatch");
+
+    LanguageModel restored(
+        32, embed, maxPos, Adam(1e-3f), 1, heads, 0, RotaryEmbedding::DefaultBase, true, kvHeads);
+    restored.loadSafeTensors(path);
+    if (restored.kvHeadCount() != kvHeads)
+        throw std::runtime_error("LanguageModel safetensors kv_head_count roundtrip failed");
+
+    bool rejectedLoad = false;
+    try {
+        mhaDefault.loadSafeTensors(path);
+    } catch (const std::exception&) {
+        rejectedLoad = true;
+    }
+    if (!rejectedLoad)
+        throw std::runtime_error("loadSafeTensors should reject kv_head_count mismatch");
+
+    std::remove(path.c_str());
+    SmokeLog::result(
+        "LanguageModel kv_head_count",
+        "mha=%d  gqa=%d  kvRows=%d  safetensors=ok",
+        heads,
+        kvHeads,
+        expectedKvRows);
 }
 
 void LanguageModel::runStreamingSmokeDemo() {

@@ -84,7 +84,8 @@ public:
     /// <summary>
     /// build LM; intermediateSize &lt;= 0 → legacy expand-4 SwiGLU width per block;
     /// ropeTheta is HF rope_theta (default 10000; some models use much larger bases);
-    /// useBias=false → zero FFN + lm_head biases (HF models without those biases; tensors kept for CUDA)
+    /// useBias=false → zero FFN + lm_head biases (HF models without those biases; tensors kept for CUDA);
+    /// kvHeadCount&lt;=0 → MHA (same as headCount); else GQA with headCount % kvHeadCount == 0
     /// </summary>
     LanguageModel(
         int vocabularySize,
@@ -95,7 +96,8 @@ public:
         int headCount = 4,
         int intermediateSize = 0,
         float ropeTheta = RotaryEmbedding::DefaultBase,
-        bool useBias = true);
+        bool useBias = true,
+        int kvHeadCount = -1);
     ~LanguageModel();
 
     LanguageModel(const LanguageModel&) = delete;
@@ -111,6 +113,9 @@ public:
 
     /// <summary>false → FFN/lm_head biases are fixed zeros; true → trainable biases</summary>
     bool useBias() const;
+
+    /// <summary>K/V head count (HF num_key_value_heads); equals query heads for MHA</summary>
+    int kvHeadCount() const;
 
     /// <summary>upload host weights to optional CUDA device mirror for forward and generate</summary>
     void enableCuda();
@@ -243,6 +248,9 @@ public:
 
     /// <summary>useBias=false zeros + omit bias tensors on save; missing bias → zeros on load</summary>
     static void runBiasPolicySmokeDemo();
+
+    /// <summary>kv_head_count ctor + safetensors metadata mismatch gate</summary>
+    static void runKvHeadCountSmokeDemo();
 
     /// <summary>JSONL chunk source smoke: tiny file, one streamed epoch</summary>
     static void runStreamingSmokeDemo();

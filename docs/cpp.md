@@ -143,10 +143,11 @@ Header: `Network/LanguageModel.hpp`
 
 | Method | Notes |
 | ------ | ----- |
-| ctor `(vocab, embed, maxPos, Adam, blocks=2, heads=4, intermediateSize=0, ropeTheta=10000, useBias=true)` | `intermediateSize<=0` → legacy `(2*embed*4)/3` SwiGLU width; `useBias=false` → fixed-zero FFN/`lm_head` biases |
+| ctor `(vocab, embed, maxPos, Adam, blocks=2, heads=4, intermediateSize=0, ropeTheta=10000, useBias=true, kvHeadCount=-1)` | `intermediateSize<=0` → legacy `(2*embed*4)/3` SwiGLU width; `useBias=false` → fixed-zero FFN/`lm_head` biases; `kvHeadCount<=0` → MHA |
 | `intermediateSize()` | gate/up rows |
 | `ropeTheta()` | RoPE base (HF `rope_theta`) |
 | `useBias()` | trainable FFN/`lm_head` biases |
+| `kvHeadCount()` | K/V heads (HF `num_key_value_heads`) |
 
 ### Lifecycle / device
 
