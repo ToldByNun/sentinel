@@ -222,6 +222,7 @@ Unset env `SENTINEL_PHASE_TRACE` when quoting throughput.
 | `IO/SafeTensors.hpp` | Weight file format — **load** F32/BF16/F16 → host F32; **save** F32 |
 | `IO/HuggingFaceConfig.hpp` | Minimal `config.json` parse; allowlist `llama`/`mistral`/`qwen2`; rejects MoE / sliding-window / quantized |
 | `IO/HuggingFaceWeights.hpp` | HF→Sentinel tensor remap + shard index (`loadMappedWeights`); first family: Llama/Mistral-like names |
+| `Tokenizer/HfTokenizer.hpp` | HF `tokenizer.json` ByteLevel BPE (`HuggingFace::Tokenizer`); `.sbpe` stays on `BPETokenizer` |
 | `Data/TextRowReader.hpp` / `JsonlLoader.hpp` / `ArrowChunkReader.hpp` | Corpus I/O |
 | `Cuda/CudaMatmul.hpp` | `CudaMatmul::isAvailable()` |
 | `Cuda/CudaSbao.hpp` | SBAO policy + fused-half offload helpers |

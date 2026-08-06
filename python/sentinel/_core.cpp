@@ -7,6 +7,7 @@
 #include "NeuralNet/Network/LanguageModel.hpp"
 #include "NeuralNet/Optimizers/Adam.hpp"
 #include "NeuralNet/Tokenizer/BPETokenizer.hpp"
+#include "NeuralNet/Tokenizer/HfTokenizer.hpp"
 
 namespace nb = nanobind;
 
@@ -74,6 +75,31 @@ NB_MODULE(_core, m) {
         .def_prop_ro("vocab_size", &BPETokenizer::vocabSize)
         .def_prop_ro("unknown_token_id", &BPETokenizer::unknownTokenId)
         .def_prop_ro("is_trained", &BPETokenizer::isTrained);
+
+    nb::class_<HuggingFace::Tokenizer>(m, "HfTokenizer")
+        .def(nb::init<>())
+        .def_static(
+            "load",
+            &HuggingFace::Tokenizer::load,
+            nb::arg("path"),
+            "Load HuggingFace tokenizer.json from a file or model directory")
+        .def(
+            "encode",
+            &HuggingFace::Tokenizer::encode,
+            nb::arg("text"),
+            nb::arg("add_special_tokens") = true)
+        .def(
+            "decode",
+            &HuggingFace::Tokenizer::decode,
+            nb::arg("token_ids"),
+            nb::arg("skip_special_tokens") = true)
+        .def_prop_ro("vocab_size", &HuggingFace::Tokenizer::vocabSize)
+        .def_prop_ro("bos_token_id", &HuggingFace::Tokenizer::bosTokenId)
+        .def_prop_ro("eos_token_id", &HuggingFace::Tokenizer::eosTokenId)
+        .def_prop_ro("pad_token_id", &HuggingFace::Tokenizer::padTokenId)
+        .def_prop_ro("unk_token_id", &HuggingFace::Tokenizer::unkTokenId)
+        .def_prop_ro("is_loaded", &HuggingFace::Tokenizer::isLoaded)
+        .def_prop_ro("ignore_merges", &HuggingFace::Tokenizer::ignoreMerges);
 
     nb::class_<LanguageModelDataset>(m, "LanguageModelDataset")
         .def(nb::init<>())

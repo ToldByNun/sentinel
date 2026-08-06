@@ -11,6 +11,7 @@
 #include "NeuralNet/Cuda/CudaTransformerBlock.hpp"
 #include "NeuralNet/Layers/CausalSelfAttention.hpp"
 #include "NeuralNet/Tokenizer/BPETokenizer.hpp"
+#include "NeuralNet/Tokenizer/HfTokenizer.hpp"
 #include "NeuralNet/Data/LanguageModelChunkSource.hpp"
 #include "NeuralNet/Data/LanguageModelDataset.hpp"
 #include "NeuralNet/Data/ArrowChunkReader.hpp"
@@ -133,6 +134,17 @@ int main() {
         return 0;
     }
     free(hfImportSmokeEnv);
+    char* hfTokSmokeEnv = nullptr;
+    size_t hfTokSmokeLen = 0;
+    if (_dupenv_s(&hfTokSmokeEnv, &hfTokSmokeLen, "SENTINEL_HF_TOKENIZER_SMOKE") == 0
+        && hfTokSmokeEnv != nullptr
+        && hfTokSmokeEnv[0] == '1'
+        && hfTokSmokeEnv[1] == '\0') {
+        free(hfTokSmokeEnv);
+        HuggingFace::Tokenizer::runTokenizerSmokeDemo();
+        return 0;
+    }
+    free(hfTokSmokeEnv);
     char* gqaSmokeEnv = nullptr;
     size_t gqaSmokeLen = 0;
     if (_dupenv_s(&gqaSmokeEnv, &gqaSmokeLen, "SENTINEL_GQA_HOST_SMOKE") == 0
@@ -201,6 +213,12 @@ int main() {
     if (const char* hfImportSmoke = std::getenv("SENTINEL_HF_IMPORT_SMOKE")) {
         if (hfImportSmoke[0] == '1' && hfImportSmoke[1] == '\0') {
             LanguageModel::runHuggingFaceImportSmokeDemo();
+            return 0;
+        }
+    }
+    if (const char* hfTokSmoke = std::getenv("SENTINEL_HF_TOKENIZER_SMOKE")) {
+        if (hfTokSmoke[0] == '1' && hfTokSmoke[1] == '\0') {
+            HuggingFace::Tokenizer::runTokenizerSmokeDemo();
             return 0;
         }
     }
@@ -381,6 +399,7 @@ int main() {
             HuggingFace::runConfigParseSmokeDemo();
             HuggingFace::runWeightMapSmokeDemo();
             LanguageModel::runHuggingFaceImportSmokeDemo();
+            HuggingFace::Tokenizer::runTokenizerSmokeDemo();
             LanguageModel::runStreamingSmokeDemo();
             SafeTensors::runHalfLoadSmokeDemo();
             CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);

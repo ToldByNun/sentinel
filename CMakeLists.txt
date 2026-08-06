@@ -77,6 +77,7 @@ set(SENTINEL_CXX_SOURCES
     "${SENTINEL_ROOT}/NeuralNet/Optimizers/Adam.cpp"
     "${SENTINEL_ROOT}/NeuralNet/Optimizers/SGD.cpp"
     "${SENTINEL_ROOT}/NeuralNet/Tokenizer/BPETokenizer.cpp"
+    "${SENTINEL_ROOT}/NeuralNet/Tokenizer/HfTokenizer.cpp"
 )
 
 set(SENTINEL_CUDA_SOURCES

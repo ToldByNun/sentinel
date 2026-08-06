@@ -65,6 +65,7 @@
     <ClCompile Include="NeuralNet\Optimizers\Adam.cpp" />
     <ClCompile Include="NeuralNet\Optimizers\SGD.cpp" />
     <ClCompile Include="NeuralNet\Tokenizer\BPETokenizer.cpp" />
+    <ClCompile Include="NeuralNet\Tokenizer\HfTokenizer.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="NeuralNet\Activations\ReLU.hpp" />

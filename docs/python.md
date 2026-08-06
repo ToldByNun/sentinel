@@ -76,6 +76,27 @@ Convention: keep the tokenizer next to weights as `{stem}.sbpe` (e.g. `run.safet
 
 ---
 
+## `HfTokenizer`
+
+Load a HuggingFace `tokenizer.json` (ByteLevel BPE; Llama-3/Qwen2-style `ignore_merges` supported). Native `.sbpe` training stays on `BPETokenizer`.
+
+```python
+tok = S.HfTokenizer.load("/path/to/hf_model")  # or .../tokenizer.json
+ids = tok.encode("hello", add_special_tokens=True)
+text = tok.decode(ids, skip_special_tokens=True)
+```
+
+| Method / property | Notes |
+| ----------------- | ----- |
+| `load` (static) | file or HF model directory |
+| `encode` / `decode` | optional BOS / skip specials |
+| `vocab_size`, `bos_token_id`, `eos_token_id`, `pad_token_id`, `unk_token_id` | `-1` when absent |
+| `ignore_merges` | Llama-3-style whole-piece vocab hits |
+
+Unsupported: WordPiece / Unigram / Metaspace (Llama-2 SentencePiece).
+
+---
+
 ## `LanguageModelDataset`
 
 In-memory next-token examples. Streaming JSONL/Arrow epochs are **C++-only** (`LanguageModelChunkSource`) — see [C++ API](cpp.md).
