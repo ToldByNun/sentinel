@@ -201,6 +201,8 @@ Set offload / SBAO preferences **before** `enableCudaTrain()` when pack and chec
 | `saveSafeTensors` / `loadSafeTensors` | Weights + metadata (`IO/SafeTensors.hpp`); overload accepts in-memory `SafeTensors::File` |
 | `loadHuggingFace(dir, lr=3e-4)` | Static: parse HF `config.json`, size model, remap/load safetensors shards |
 
+Focused smoke: `SENTINEL_HF_ROUNDTRIP_SMOKE=1` — stub HF dir → import + `HfTokenizer` encode + 1 host train step + generate (finite gate).
+
 Safetensors names follow HF-style keys (`token_embedding.weight`, `blocks.{i}.attn.*`, `ffn.*`, `final_norm.weight`, `lm_head.*`).
 
 ### Probes

@@ -265,6 +265,9 @@ public:
     /// <summary>HF dir → loadHuggingFace sizes + weights + forward sanity</summary>
     static void runHuggingFaceImportSmokeDemo();
 
+    /// <summary>HF stub dir: import + HfTokenizer encode + host microtrain; shapes/finite gate</summary>
+    static void runHuggingFaceRoundtripSmokeDemo();
+
     /// <summary>JSONL chunk source smoke: tiny file, one streamed epoch</summary>
     static void runStreamingSmokeDemo();
 

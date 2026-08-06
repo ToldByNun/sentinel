@@ -26,6 +26,7 @@
 #include "../IO/HuggingFaceWeights.hpp"
 #include "../Losses/CrossEntropy.hpp"
 #include "../Tokenizer/BPETokenizer.hpp"
+#include "../Tokenizer/HfTokenizer.hpp"
 #include "../Utils/SmokeLog.hpp"
 
 #include <cuda_runtime.h>
@@ -2154,6 +2155,172 @@ void LanguageModel::runHuggingFaceImportSmokeDemo() {
     SmokeLog::result(
         "LanguageModel loadHuggingFace",
         "arch=ok  GQA=2  tie=1  forward=ok  reject=model_type");
+}
+
+void LanguageModel::runHuggingFaceRoundtripSmokeDemo() {
+    namespace fs = std::filesystem;
+
+    const fs::path dir = fs::path("hf_roundtrip_smoke_dir");
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+
+    {
+        std::ofstream out(dir / "config.json", std::ios::binary);
+        if (!out) throw std::runtime_error("HF roundtrip smoke: cannot write config.json");
+        out << R"json({
+  "architectures": ["LlamaForCausalLM"],
+  "model_type": "llama",
+  "vocab_size": 32,
+  "hidden_size": 16,
+  "intermediate_size": 32,
+  "num_hidden_layers": 2,
+  "num_attention_heads": 4,
+  "num_key_value_heads": 2,
+  "max_position_embeddings": 64,
+  "rms_norm_eps": 1e-5,
+  "rope_theta": 10000.0,
+  "tie_word_embeddings": true,
+  "attention_bias": false,
+  "mlp_bias": false
+})json";
+    }
+
+    {
+        std::ofstream out(dir / "tokenizer.json", std::ios::binary);
+        if (!out) throw std::runtime_error("HF roundtrip smoke: cannot write tokenizer.json");
+        // ByteLevel raw BPE; ids stay within model vocab_size=32
+        // (ASCII space is not identity under GPT-2 bytes_to_unicode — avoid spaces in the fixture.)
+        out << R"json({
+  "version": "1.0",
+  "added_tokens": [
+    {"id": 30, "content": "<bos>", "special": true},
+    {"id": 31, "content": "<eos>", "special": true}
+  ],
+  "pre_tokenizer": {
+    "type": "ByteLevel",
+    "add_prefix_space": false,
+    "trim_offsets": true,
+    "use_regex": false
+  },
+  "decoder": {
+    "type": "ByteLevel",
+    "add_prefix_space": false,
+    "trim_offsets": true,
+    "use_regex": false
+  },
+  "model": {
+    "type": "BPE",
+    "unk_token": null,
+    "ignore_merges": false,
+    "vocab": {
+      "h": 0,
+      "i": 1,
+      "a": 2,
+      "b": 3,
+      "hi": 4,
+      "ab": 5,
+      "hiab": 6,
+      "<bos>": 30,
+      "<eos>": 31
+    },
+    "merges": [
+      "h i",
+      "a b",
+      "hi ab"
+    ]
+  }
+})json";
+    }
+
+    auto filled = [](size_t rows, size_t cols, float value) {
+        return Matrix(rows, cols, value);
+    };
+    // Mild magnitudes so one host Adam step stays finite.
+    SafeTensors::File weights;
+    SafeTensors::putMatrix(weights, "model.embed_tokens.weight", filled(32, 16, 0.02f));
+    SafeTensors::putMatrix(weights, "model.layers.0.input_layernorm.weight", filled(16, 1, 1.0f));
+    SafeTensors::putMatrix(weights, "model.layers.0.self_attn.q_proj.weight", filled(16, 16, 0.01f));
+    SafeTensors::putMatrix(weights, "model.layers.0.self_attn.k_proj.weight", filled(8, 16, 0.01f));
+    SafeTensors::putMatrix(weights, "model.layers.0.self_attn.v_proj.weight", filled(8, 16, 0.01f));
+    SafeTensors::putMatrix(weights, "model.layers.0.self_attn.o_proj.weight", filled(16, 16, 0.01f));
+    SafeTensors::putMatrix(weights, "model.layers.0.post_attention_layernorm.weight", filled(16, 1, 1.0f));
+    SafeTensors::putMatrix(weights, "model.layers.0.mlp.gate_proj.weight", filled(32, 16, 0.01f));
+    SafeTensors::putMatrix(weights, "model.layers.0.mlp.up_proj.weight", filled(32, 16, 0.01f));
+    SafeTensors::putMatrix(weights, "model.layers.0.mlp.down_proj.weight", filled(16, 32, 0.01f));
+    SafeTensors::putMatrix(weights, "model.layers.1.input_layernorm.weight", filled(16, 1, 1.0f));
+    SafeTensors::putMatrix(weights, "model.layers.1.self_attn.q_proj.weight", filled(16, 16, 0.01f));
+    SafeTensors::putMatrix(weights, "model.layers.1.self_attn.k_proj.weight", filled(8, 16, 0.01f));
+    SafeTensors::putMatrix(weights, "model.layers.1.self_attn.v_proj.weight", filled(8, 16, 0.01f));
+    SafeTensors::putMatrix(weights, "model.layers.1.self_attn.o_proj.weight", filled(16, 16, 0.01f));
+    SafeTensors::putMatrix(weights, "model.layers.1.post_attention_layernorm.weight", filled(16, 1, 1.0f));
+    SafeTensors::putMatrix(weights, "model.layers.1.mlp.gate_proj.weight", filled(32, 16, 0.01f));
+    SafeTensors::putMatrix(weights, "model.layers.1.mlp.up_proj.weight", filled(32, 16, 0.01f));
+    SafeTensors::putMatrix(weights, "model.layers.1.mlp.down_proj.weight", filled(16, 32, 0.01f));
+    SafeTensors::putMatrix(weights, "model.norm.weight", filled(16, 1, 1.0f));
+    SafeTensors::save((dir / "model.safetensors").string(), weights);
+
+    LanguageModel model = LanguageModel::loadHuggingFace(dir.string(), 1e-3f);
+    HuggingFace::Tokenizer tokenizer = HuggingFace::Tokenizer::load(dir.string());
+    if (!tokenizer.isLoaded() || tokenizer.bosTokenId() != 30)
+        throw std::runtime_error("HF roundtrip smoke: tokenizer load failed");
+
+    const std::vector<int> encoded = tokenizer.encode("hiab", true);
+    if (encoded.size() < 2)
+        throw std::runtime_error("HF roundtrip smoke: encode too short");
+    for (int id : encoded) {
+        if (id < 0 || id >= model.tokenEmbedding.vocabSize())
+            throw std::runtime_error("HF roundtrip smoke: token id out of model vocab");
+    }
+
+    const std::string decoded = tokenizer.decode(encoded, true);
+    if (decoded != "hiab")
+        throw std::runtime_error("HF roundtrip smoke: decode mismatch got '" + decoded + "'");
+
+    Matrix before = model.forward(encoded);
+    if (before.rows != static_cast<size_t>(model.tokenEmbedding.vocabSize())
+        || before.cols != encoded.size())
+        throw std::runtime_error("HF roundtrip smoke: forward shape mismatch");
+    for (float v : before.data) {
+        if (!std::isfinite(v))
+            throw std::runtime_error("HF roundtrip smoke: non-finite logits before train");
+    }
+
+    LanguageModelDataset dataset;
+    dataset.vocabularySize = model.tokenEmbedding.vocabSize();
+    dataset.examples.push_back(
+        LanguageModelDataset::fromTokenIds(encoded, dataset.vocabularySize, /*buildOneHot=*/false));
+
+    const float lossBefore = model.averageLoss(dataset);
+    if (!std::isfinite(lossBefore))
+        throw std::runtime_error("HF roundtrip smoke: non-finite loss before train");
+
+    model.train(dataset, /*epochs=*/1, /*logEveryEpochs=*/0);
+
+    const float lossAfter = model.averageLoss(dataset);
+    if (!std::isfinite(lossAfter))
+        throw std::runtime_error("HF roundtrip smoke: non-finite loss after train");
+
+    Matrix after = model.forward(encoded);
+    for (float v : after.data) {
+        if (!std::isfinite(v))
+            throw std::runtime_error("HF roundtrip smoke: non-finite logits after train");
+    }
+
+    const std::vector<int> generated = model.generate(encoded, /*newTokenCount=*/2, /*temperature=*/0.0f);
+    if (generated.size() != encoded.size() + 2)
+        throw std::runtime_error("HF roundtrip smoke: generate length mismatch");
+    for (size_t i = encoded.size(); i < generated.size(); ++i) {
+        const int id = generated[i];
+        if (id < 0 || id >= model.tokenEmbedding.vocabSize())
+            throw std::runtime_error("HF roundtrip smoke: generated id out of range");
+    }
+
+    fs::remove_all(dir);
+    SmokeLog::result(
+        "LanguageModel HF roundtrip",
+        "import+encode+train=ok  loss=%.3f→%.3f  generate=2  finite=ok",
+        lossBefore,
+        lossAfter);
 }
 
 void LanguageModel::runStreamingSmokeDemo() {

@@ -19,6 +19,7 @@ All notable changes to this project are documented here.
 - HF→Sentinel weight map + sharded safetensors (`HuggingFace::loadMappedWeights`, Llama/Mistral-like layout family); respects `tie_word_embeddings` / `use_bias`
 - `LanguageModel::loadHuggingFace` / Python `LanguageModel.load_huggingface` — config-driven arch + remapped weights from an HF model directory
 - `HuggingFace::Tokenizer` / Python `HfTokenizer` — load HF `tokenizer.json` (ByteLevel BPE, Llama-3 `ignore_merges`); encode/decode + specials
+- HF roundtrip smoke gate: import + encode + host microtrain + generate (finite logits/loss)
 
 ## [0.1.0] — 2026-08-06
 
@@ -51,3 +52,4 @@ First library-oriented release surface.
 - HF weight-map smoke: `SENTINEL_HF_WEIGHT_MAP_SMOKE=1`.
 - HF import smoke: `SENTINEL_HF_IMPORT_SMOKE=1`.
 - HF tokenizer smoke: `SENTINEL_HF_TOKENIZER_SMOKE=1`.
+- HF roundtrip smoke: `SENTINEL_HF_ROUNDTRIP_SMOKE=1`.

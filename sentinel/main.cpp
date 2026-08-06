@@ -145,6 +145,17 @@ int main() {
         return 0;
     }
     free(hfTokSmokeEnv);
+    char* hfRoundSmokeEnv = nullptr;
+    size_t hfRoundSmokeLen = 0;
+    if (_dupenv_s(&hfRoundSmokeEnv, &hfRoundSmokeLen, "SENTINEL_HF_ROUNDTRIP_SMOKE") == 0
+        && hfRoundSmokeEnv != nullptr
+        && hfRoundSmokeEnv[0] == '1'
+        && hfRoundSmokeEnv[1] == '\0') {
+        free(hfRoundSmokeEnv);
+        LanguageModel::runHuggingFaceRoundtripSmokeDemo();
+        return 0;
+    }
+    free(hfRoundSmokeEnv);
     char* gqaSmokeEnv = nullptr;
     size_t gqaSmokeLen = 0;
     if (_dupenv_s(&gqaSmokeEnv, &gqaSmokeLen, "SENTINEL_GQA_HOST_SMOKE") == 0
@@ -219,6 +230,12 @@ int main() {
     if (const char* hfTokSmoke = std::getenv("SENTINEL_HF_TOKENIZER_SMOKE")) {
         if (hfTokSmoke[0] == '1' && hfTokSmoke[1] == '\0') {
             HuggingFace::Tokenizer::runTokenizerSmokeDemo();
+            return 0;
+        }
+    }
+    if (const char* hfRoundSmoke = std::getenv("SENTINEL_HF_ROUNDTRIP_SMOKE")) {
+        if (hfRoundSmoke[0] == '1' && hfRoundSmoke[1] == '\0') {
+            LanguageModel::runHuggingFaceRoundtripSmokeDemo();
             return 0;
         }
     }
@@ -400,6 +417,7 @@ int main() {
             HuggingFace::runWeightMapSmokeDemo();
             LanguageModel::runHuggingFaceImportSmokeDemo();
             HuggingFace::Tokenizer::runTokenizerSmokeDemo();
+            LanguageModel::runHuggingFaceRoundtripSmokeDemo();
             LanguageModel::runStreamingSmokeDemo();
             SafeTensors::runHalfLoadSmokeDemo();
             CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);
