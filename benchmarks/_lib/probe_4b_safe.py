@@ -21,8 +21,8 @@ HEADS = 48
 POS = 2048
 SEQ = 512
 LR = 3e-4
-WARMUP = 1
-TIMED = 2
+WARMUP = 3
+TIMED = 4
 
 
 def main() -> int:
@@ -37,14 +37,15 @@ def main() -> int:
     model.enable_cuda()
     model.set_prefer_flash_attention(True)
     model.set_prefer_muon(False)
-    model.set_prefer_cpu_adam_offload(True)
-    # enable_cuda_train still budgets with ckpt=off briefly — keep pack tiny until host-SGD.
-    model.enable_cuda_train()
+    # Host-SGD before enable_cuda_train — avoids HostAdam pack-budget thrash (free≈0 → minCols).
     progress("host-SGD (Full ckpt + alloc-only pack, no microstep sweep)")
     model.set_prefer_host_sgd(True)
+    model.enable_cuda_train()
     model.set_prefer_train_graph(False)
     print(f"max_packed_columns={model.max_packed_columns}", flush=True)
-    print(f"VRAM used~{gpu_used_mib():.0f} MiB before probe", flush=True)
+    print(f"bao={model.bao_mode_resolved} VRAM used~{gpu_used_mib():.0f} MiB before probe", flush=True)
+    # Discard pass: pin freelist + boost clocks before timed window (cold WDDM first-pass is noisy).
+    _ = float(model.probe_cuda_packed_train_tokens_per_second(SEQ, 1, 1))
     t0 = time.perf_counter()
     tok_s = float(model.probe_cuda_packed_train_tokens_per_second(SEQ, WARMUP, TIMED))
     wall = time.perf_counter() - t0

@@ -7,6 +7,8 @@
 #include <cuda_fp16.h>
 #endif
 
+class AdamState;
+
 /// <summary>elementwise broadcast attention and residual ops on CudaMatrix</summary>
 class CudaOps {
 public:
@@ -120,7 +122,8 @@ public:
         Matrix& hostOut,
         const float* deviceFloat,
         size_t rows,
-        size_t cols);
+        size_t cols,
+        AdamState* hostAdamState = nullptr);
     static void commitFusedHalfGradOffload(cudaStream_t stream);
 
     /// <summary>
@@ -139,6 +142,18 @@ public:
     /// master -= stepScale * half2float(grad). Skips float materialization (half PCIe + half CPU traffic).
     /// </summary>
     static void applyFusedHalfHostSgd(float stepScale);
+
+    /// <summary>
+    /// BAO HostFusedHalfAdam: Adam update on piece masters from fused half grads (piece.adamState required).
+    /// gradScale multiplies the half→float grad (include 1/lossScale); Adam lr/betas from arguments.
+    /// </summary>
+    static void applyFusedHalfHostAdam(
+        float learningRate,
+        float beta1,
+        float beta2,
+        float epsilon,
+        int timeStep,
+        float gradScale);
 
     /// <summary>
     /// after D2H event sync: free fused-half device packs still held in the ready queue

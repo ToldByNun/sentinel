@@ -2,9 +2,12 @@
 
 #include "CudaAmp.hpp"
 #include "CudaAdam.hpp"
+#include "../Optimizers/Adam.hpp"
+#include "../Math/Matrix.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -1108,6 +1111,7 @@ __global__ void CudaOpsCastFloatToHalfEntry(const float* source, __half* destina
 
 struct FusedHalfGradPiece {
     Matrix* host = nullptr;
+    AdamState* adamState = nullptr;
     const float* deviceFloat = nullptr;
     size_t halfOffset = 0;
     size_t elementCount = 0;
@@ -1201,13 +1205,20 @@ void CudaOps::beginFusedHalfGradOffload() {
     g_fusedHalfOpenElements = 0;
 }
 
-void CudaOps::appendFusedHalfGradOffload(Matrix& hostOut, const float* deviceFloat, size_t rows, size_t cols) {
+void CudaOps::appendFusedHalfGradOffload(
+    Matrix& hostOut,
+    const float* deviceFloat,
+    size_t rows,
+    size_t cols,
+    AdamState* hostAdamState
+) {
     if (deviceFloat == nullptr) throw std::invalid_argument("appendFusedHalfGradOffload null deviceFloat");
     if (rows == 0 || cols == 0) throw std::invalid_argument("appendFusedHalfGradOffload empty shape");
     const size_t elementCount = rows * cols;
     hostOut.ensureSize(rows, cols);
     FusedHalfGradPiece piece;
     piece.host = &hostOut;
+    piece.adamState = hostAdamState;
     piece.deviceFloat = deviceFloat;
     piece.halfOffset = g_fusedHalfOpenElements;
     piece.elementCount = elementCount;
@@ -1313,6 +1324,68 @@ void CudaOps::applyFusedHalfHostSgd(float stepScale) {
         const __half* grad = reinterpret_cast<const __half*>(batch.hostHalf + piece.halfOffset);
         for (size_t i = 0; i < piece.elementCount; ++i)
             master[i] -= stepScale * __half2float(grad[i]);
+    }
+    releaseFusedHalfHost(batch.hostHalf);
+}
+
+void CudaOps::applyFusedHalfHostAdam(
+    float learningRate,
+    float beta1,
+    float beta2,
+    float epsilon,
+    int timeStep,
+    float gradScale
+) {
+    if (timeStep <= 0)
+        throw std::invalid_argument("CudaOps::applyFusedHalfHostAdam requires timeStep > 0");
+    FusedHalfGradBatch batch;
+    {
+        std::lock_guard<std::mutex> lock(g_fusedHalfReadyMutex);
+        if (g_fusedHalfReadyBatches.empty()) return;
+        batch = std::move(g_fusedHalfReadyBatches.front());
+        g_fusedHalfReadyBatches.erase(g_fusedHalfReadyBatches.begin());
+    }
+
+    if (batch.deviceSlot != nullptr) {
+        releaseFusedHalfDevice(batch.deviceSlot);
+        batch.deviceSlot = nullptr;
+    }
+
+    for (FusedHalfGradPiece& piece : batch.pieces) {
+        if (piece.host == nullptr || piece.adamState == nullptr) continue;
+        if (piece.adamState->firstMoment.empty()) {
+            piece.adamState->firstMoment.ensureSize(piece.rows, piece.cols);
+            piece.adamState->firstMoment.fill(0.0f);
+            piece.adamState->secondMoment.ensureSize(piece.rows, piece.cols);
+            piece.adamState->secondMoment.fill(0.0f);
+        }
+    }
+
+    const float firstMomentCorrection = 1.0f - std::pow(beta1, static_cast<float>(timeStep));
+    const float secondMomentCorrection = 1.0f - std::pow(beta2, static_cast<float>(timeStep));
+    const float inverseFirstCorrection = 1.0f / firstMomentCorrection;
+    const float inverseSecondCorrection = 1.0f / secondMomentCorrection;
+
+#if defined(_OPENMP)
+    #pragma omp parallel for schedule(dynamic)
+#endif
+    for (int pieceIndex = 0; pieceIndex < static_cast<int>(batch.pieces.size()); ++pieceIndex) {
+        const FusedHalfGradPiece& piece = batch.pieces[static_cast<size_t>(pieceIndex)];
+        if (piece.host == nullptr || piece.adamState == nullptr || batch.hostHalf == nullptr) continue;
+        if (piece.host->data.size() != piece.elementCount)
+            throw std::runtime_error("CudaOps::applyFusedHalfHostAdam master size mismatch");
+        float* master = piece.host->data.data();
+        float* firstMoment = piece.adamState->firstMoment.data.data();
+        float* secondMoment = piece.adamState->secondMoment.data.data();
+        const __half* grad = reinterpret_cast<const __half*>(batch.hostHalf + piece.halfOffset);
+        for (size_t i = 0; i < piece.elementCount; ++i) {
+            const float g = gradScale * __half2float(grad[i]);
+            firstMoment[i] = beta1 * firstMoment[i] + (1.0f - beta1) * g;
+            secondMoment[i] = beta2 * secondMoment[i] + (1.0f - beta2) * g * g;
+            const float correctedFirst = firstMoment[i] * inverseFirstCorrection;
+            const float correctedSecond = secondMoment[i] * inverseSecondCorrection;
+            master[i] -= learningRate * correctedFirst / (std::sqrt(correctedSecond) + epsilon);
+        }
     }
     releaseFusedHalfHost(batch.hostHalf);
 }

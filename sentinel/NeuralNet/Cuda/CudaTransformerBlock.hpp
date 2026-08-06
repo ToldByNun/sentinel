@@ -14,6 +14,7 @@
 
 #include "CudaRMSNorm.hpp"
 
+class AdamState;
 class CudaTransformerBlock;
 
 /// <summary>device resident gradients for one transformer block</summary>
@@ -81,6 +82,14 @@ struct CudaTransformerBlockHostWeightGrads {
     Matrix* feedForwardGateWeight = nullptr;
     Matrix* feedForwardUpWeight = nullptr;
     Matrix* feedForwardDownWeight = nullptr;
+    /// <summary>optional host Adam moments for BAO HostFusedHalfAdam (nullptr → SGD / expand-only)</summary>
+    AdamState* queryWeightState = nullptr;
+    AdamState* keyWeightState = nullptr;
+    AdamState* valueWeightState = nullptr;
+    AdamState* attentionOutputWeightState = nullptr;
+    AdamState* feedForwardGateWeightState = nullptr;
+    AdamState* feedForwardUpWeightState = nullptr;
+    AdamState* feedForwardDownWeightState = nullptr;
 };
 
 

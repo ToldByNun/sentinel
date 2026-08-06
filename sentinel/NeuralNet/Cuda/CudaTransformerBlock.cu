@@ -444,7 +444,8 @@ void CudaTransformerBlock::enqueueDeferredHostWeightGradDownloads(
         *hostWeightGrads.feedForwardDownWeight,
         this->feedForwardDownWeightGradient.buffer.deviceData,
         this->feedForwardDownWeightGradient.rows,
-        this->feedForwardDownWeightGradient.cols);
+        this->feedForwardDownWeightGradient.cols,
+        hostWeightGrads.feedForwardDownWeightState);
 
     if (!this->feedForward.gateUpWeightGradient.empty()) {
         const size_t gRows = this->feedForward.gateWeight.rows;
@@ -456,30 +457,35 @@ void CudaTransformerBlock::enqueueDeferredHostWeightGradDownloads(
             *hostWeightGrads.feedForwardGateWeight,
             this->feedForward.gateUpWeightGradient.buffer.deviceData,
             gRows,
-            gCols);
+            gCols,
+            hostWeightGrads.feedForwardGateWeightState);
         CudaOps::appendFusedHalfGradOffload(
             *hostWeightGrads.feedForwardUpWeight,
             this->feedForward.gateUpWeightGradient.buffer.deviceData + gElems,
             uRows,
-            uCols);
+            uCols,
+            hostWeightGrads.feedForwardUpWeightState);
     } else {
         CudaOps::appendFusedHalfGradOffload(
             *hostWeightGrads.feedForwardGateWeight,
             this->feedForwardGateWeightGradient.buffer.deviceData,
             this->feedForwardGateWeightGradient.rows,
-            this->feedForwardGateWeightGradient.cols);
+            this->feedForwardGateWeightGradient.cols,
+            hostWeightGrads.feedForwardGateWeightState);
         CudaOps::appendFusedHalfGradOffload(
             *hostWeightGrads.feedForwardUpWeight,
             this->feedForwardUpWeightGradient.buffer.deviceData,
             this->feedForwardUpWeightGradient.rows,
-            this->feedForwardUpWeightGradient.cols);
+            this->feedForwardUpWeightGradient.cols,
+            hostWeightGrads.feedForwardUpWeightState);
     }
 
     CudaOps::appendFusedHalfGradOffload(
         *hostWeightGrads.attentionOutputWeight,
         this->attentionOutputWeightGradient.buffer.deviceData,
         this->attentionOutputWeightGradient.rows,
-        this->attentionOutputWeightGradient.cols);
+        this->attentionOutputWeightGradient.cols,
+        hostWeightGrads.attentionOutputWeightState);
 
     if (!this->attention.qkvWeightGradient.empty()) {
         const size_t qRows = this->attention.queryWeight.rows;
@@ -489,33 +495,39 @@ void CudaTransformerBlock::enqueueDeferredHostWeightGradDownloads(
             *hostWeightGrads.queryWeight,
             this->attention.qkvWeightGradient.buffer.deviceData,
             qRows,
-            qCols);
+            qCols,
+            hostWeightGrads.queryWeightState);
         CudaOps::appendFusedHalfGradOffload(
             *hostWeightGrads.keyWeight,
             this->attention.qkvWeightGradient.buffer.deviceData + qElems,
             qRows,
-            qCols);
+            qCols,
+            hostWeightGrads.keyWeightState);
         CudaOps::appendFusedHalfGradOffload(
             *hostWeightGrads.valueWeight,
             this->attention.qkvWeightGradient.buffer.deviceData + 2ull * qElems,
             qRows,
-            qCols);
+            qCols,
+            hostWeightGrads.valueWeightState);
     } else {
         CudaOps::appendFusedHalfGradOffload(
             *hostWeightGrads.queryWeight,
             this->queryWeightGradient.buffer.deviceData,
             this->queryWeightGradient.rows,
-            this->queryWeightGradient.cols);
+            this->queryWeightGradient.cols,
+            hostWeightGrads.queryWeightState);
         CudaOps::appendFusedHalfGradOffload(
             *hostWeightGrads.keyWeight,
             this->keyWeightGradient.buffer.deviceData,
             this->keyWeightGradient.rows,
-            this->keyWeightGradient.cols);
+            this->keyWeightGradient.cols,
+            hostWeightGrads.keyWeightState);
         CudaOps::appendFusedHalfGradOffload(
             *hostWeightGrads.valueWeight,
             this->valueWeightGradient.buffer.deviceData,
             this->valueWeightGradient.rows,
-            this->valueWeightGradient.cols);
+            this->valueWeightGradient.cols,
+            hostWeightGrads.valueWeightState);
     }
 
     CudaOps::commitFusedHalfGradOffload(copyStream);

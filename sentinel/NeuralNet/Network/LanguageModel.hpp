@@ -8,6 +8,7 @@
 #include "../Layers/RMSNorm.hpp"
 #include "../Layers/TransformerBlock.hpp"
 #include "../Math/Matrix.hpp"
+#include "../Cuda/CudaBao.hpp"
 #include "../Optimizers/Adam.hpp"
 
 #include <memory>
@@ -129,6 +130,17 @@ public:
 
     /// <summary>4B PoC path: SGD on host masters (requires cpu-adam / FP16 GPU weights offload)</summary>
     void setCudaPreferHostSgd(bool enabled);
+
+    /// <summary>
+    /// Bandwidth-Aware Optimizer: enable unified residency policy (Auto resolves GpuInt8 / HostAdam / HostSgd).
+    /// </summary>
+    void setCudaPreferBao(bool enabled);
+
+    /// <summary>BAO mode override; Auto = selectBaoMode from free VRAM + param footprint</summary>
+    void setCudaBaoMode(BaoMode mode);
+
+    /// <summary>last resolved BAO mode (GpuInt8Adam if BAO unused)</summary>
+    BaoMode cudaBaoModeResolved() const;
 
     /// <summary>toggle flash attention on device blocks</summary>
     void setCudaPreferFlashAttention(bool enabled);

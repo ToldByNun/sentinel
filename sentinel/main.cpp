@@ -5,6 +5,7 @@
 #include "NeuralNet/Cuda/CudaRMSNorm.hpp"
 #include "NeuralNet/Cuda/CudaCausalSelfAttention.hpp"
 #include "NeuralNet/Cuda/CudaAdam.hpp"
+#include "NeuralNet/Cuda/CudaBao.hpp"
 #include "NeuralNet/Cuda/CudaMuon.hpp"
 #include "NeuralNet/Cuda/CudaAmp.hpp"
 #include "NeuralNet/Cuda/CudaTransformerBlock.hpp"
@@ -122,7 +123,7 @@ int main() {
     const int tokenizerVocabSize = 4000;
     const int tokenizerSampleRows = 2000;
     const int testReservoirCap = 512;
-    const bool preferCpuAdamOffload = true;
+    const bool preferBao = true;
     const bool useCheckpointing = false;
 
     if (runSmallSuite) {
@@ -1591,11 +1592,12 @@ int main() {
     Matrix cpuLogits = model.forward(parityTokenIds);
 
     model.enableCuda();
-    model.setCudaPreferCpuAdamOffload(preferCpuAdamOffload);
+    if (preferBao)
+        model.setCudaPreferBao(true);
     model.enableCudaTrain();
     model.enableActivationCheckpointing(useCheckpointing);
     model.setCudaPreferFlashAttention(true);
-    SmokeLog::result("model", "blocks=%zu  heads=%d  embed=%d  cuda=%s  train=%s  maxTok=%zu maxPackCols=%d flash=on stream=on batch=%d accum=%d cpuAdam=%s ckpt=%s",
+    SmokeLog::result("model", "blocks=%zu  heads=%d  embed=%d  cuda=%s  train=%s  maxTok=%zu maxPackCols=%d flash=on stream=on batch=%d accum=%d bao=%s ckpt=%s",
         model.blocks.size(),
         model.blocks[0].attention.headCount,
         embeddingDim,
@@ -1605,7 +1607,7 @@ int main() {
         model.cudaMaxPackedColumns(),
         trainBatchSize,
         trainGradAccum,
-        preferCpuAdamOffload ? "on" : "off",
+        CudaBao::enabled ? CudaBao::modeName(CudaBao::resolved) : "off",
         CudaLanguageModel::activationCheckpointModeName(model.cudaActivationCheckpointMode()));
 
     if (model.cudaEnabled()) {

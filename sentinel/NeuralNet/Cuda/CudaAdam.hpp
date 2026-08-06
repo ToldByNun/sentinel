@@ -3,6 +3,8 @@
 
 #include "CudaMatmul.hpp"
 
+#include <cstddef>
+
 class AdamState;
 
 /// <summary>device resident first and second moment buffers FP32 or int8</summary>
