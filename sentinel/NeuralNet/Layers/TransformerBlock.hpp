@@ -83,9 +83,16 @@ public:
     MuonState feedForwardDownWeightMuon;
 
     /// <summary>
-    /// create pre-norm block; intermediateSize &lt;= 0 uses FeedForward::defaultIntermediateSize(embed, 4)
+    /// create pre-norm block; intermediateSize &lt;= 0 uses FeedForward::defaultIntermediateSize(embed, 4);
+    /// ropeTheta is HF rope_theta (RoPE base), default 10000
     /// </summary>
-    TransformerBlock(int embeddingDim, int headCount, int maximumPositionCount, unsigned seed, int intermediateSize = 0);
+    TransformerBlock(
+        int embeddingDim,
+        int headCount,
+        int maximumPositionCount,
+        unsigned seed,
+        int intermediateSize = 0,
+        float ropeTheta = RotaryEmbedding::DefaultBase);
 
     /// <summary>forward through one block writes cache</summary>
     Matrix forward(const Matrix& input, TransformerBlockCache& cache) const;

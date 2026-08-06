@@ -143,8 +143,9 @@ Header: `Network/LanguageModel.hpp`
 
 | Method | Notes |
 | ------ | ----- |
-| ctor `(vocab, embed, maxPos, Adam, blocks=2, heads=4, intermediateSize=0)` | `intermediateSize<=0` → legacy `(2*embed*4)/3` SwiGLU width |
+| ctor `(vocab, embed, maxPos, Adam, blocks=2, heads=4, intermediateSize=0, ropeTheta=10000)` | `intermediateSize<=0` → legacy `(2*embed*4)/3` SwiGLU width |
 | `intermediateSize()` | gate/up rows |
+| `ropeTheta()` | RoPE base (HF `rope_theta`) |
 
 ### Lifecycle / device
 

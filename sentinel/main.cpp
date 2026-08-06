@@ -65,6 +65,17 @@ int main() {
         return 0;
     }
     free(interSmokeEnv);
+    char* ropeSmokeEnv = nullptr;
+    size_t ropeSmokeLen = 0;
+    if (_dupenv_s(&ropeSmokeEnv, &ropeSmokeLen, "SENTINEL_ROPE_THETA_SMOKE") == 0
+        && ropeSmokeEnv != nullptr
+        && ropeSmokeEnv[0] == '1'
+        && ropeSmokeEnv[1] == '\0') {
+        free(ropeSmokeEnv);
+        LanguageModel::runRopeThetaSmokeDemo();
+        return 0;
+    }
+    free(ropeSmokeEnv);
 #else
     if (const char* halfSmoke = std::getenv("SENTINEL_SAFETENSORS_HALF_SMOKE")) {
         if (halfSmoke[0] == '1' && halfSmoke[1] == '\0') {
@@ -75,6 +86,12 @@ int main() {
     if (const char* interSmoke = std::getenv("SENTINEL_INTERMEDIATE_SIZE_SMOKE")) {
         if (interSmoke[0] == '1' && interSmoke[1] == '\0') {
             LanguageModel::runIntermediateSizeSmokeDemo();
+            return 0;
+        }
+    }
+    if (const char* ropeSmoke = std::getenv("SENTINEL_ROPE_THETA_SMOKE")) {
+        if (ropeSmoke[0] == '1' && ropeSmoke[1] == '\0') {
+            LanguageModel::runRopeThetaSmokeDemo();
             return 0;
         }
     }
@@ -235,6 +252,7 @@ int main() {
             CudaLanguageModel::runKvCacheSmokeDemo(128, 64, 32, 2, 4);
             LanguageModel::runCheckpointSmokeDemo();
             LanguageModel::runIntermediateSizeSmokeDemo();
+            LanguageModel::runRopeThetaSmokeDemo();
             LanguageModel::runStreamingSmokeDemo();
             SafeTensors::runHalfLoadSmokeDemo();
             CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);

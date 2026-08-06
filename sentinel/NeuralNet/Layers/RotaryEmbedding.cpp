@@ -3,10 +3,10 @@
 #include <cmath>
 #include <stdexcept>
 
-RotaryEmbedding::RotaryEmbedding() : headDimension(0), maximumPositionCount(0), pairCount(0) {}
+RotaryEmbedding::RotaryEmbedding() : headDimension(0), maximumPositionCount(0), pairCount(0), base(0.0f) {}
 
 RotaryEmbedding::RotaryEmbedding(int headDimension, int maximumPositionCount, float base)
-    : headDimension(headDimension), maximumPositionCount(maximumPositionCount), pairCount(0) {
+    : headDimension(headDimension), maximumPositionCount(maximumPositionCount), pairCount(0), base(base) {
     if (headDimension <= 0) throw std::invalid_argument("RotaryEmbedding headDimension must be > 0");
     if (headDimension % 2 != 0) throw std::invalid_argument("RotaryEmbedding headDimension must be even");
     if (maximumPositionCount <= 0) throw std::invalid_argument("RotaryEmbedding maximumPositionCount must be > 0");

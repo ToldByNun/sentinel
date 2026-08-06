@@ -21,17 +21,33 @@ CausalSelfAttention::CausalSelfAttention(Matrix queryWeight, Matrix keyWeight, M
     if (this->headDimension % 2 != 0) throw std::invalid_argument("CausalSelfAttention headDimension must be even for RoPE");
 }
 
-CausalSelfAttention CausalSelfAttention::create(int embeddingDim, int headCount, int maximumPositionCount, unsigned seed, int windowSize, int globalTokenCount) {
+CausalSelfAttention CausalSelfAttention::create(
+    int embeddingDim,
+    int headCount,
+    int maximumPositionCount,
+    unsigned seed,
+    int windowSize,
+    int globalTokenCount,
+    float ropeBase) {
     if (embeddingDim <= 0) throw std::invalid_argument("CausalSelfAttention::create embeddingDim must be > 0");
     if (headCount <= 0) throw std::invalid_argument("CausalSelfAttention::create headCount must be > 0");
     if (maximumPositionCount <= 0) throw std::invalid_argument("CausalSelfAttention::create maximumPositionCount must be > 0");
     if (embeddingDim % headCount != 0) throw std::invalid_argument("CausalSelfAttention::create embeddingDim must be divisible by headCount");
     if ((embeddingDim / headCount) % 2 != 0) throw std::invalid_argument("CausalSelfAttention::create headDimension must be even for RoPE");
     if (globalTokenCount < 0) throw std::invalid_argument("CausalSelfAttention::create globalTokenCount must be >= 0");
+    if (ropeBase <= 0.0f) throw std::invalid_argument("CausalSelfAttention::create ropeBase must be > 0");
 
     const int resolvedWindowSize = (windowSize <= 0) ? maximumPositionCount : windowSize;
-    RotaryEmbedding rotaryEmbedding(embeddingDim / headCount, maximumPositionCount);
-    return CausalSelfAttention(UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed), UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 1u), UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 2u), UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 3u), std::move(rotaryEmbedding), headCount, resolvedWindowSize, globalTokenCount);
+    RotaryEmbedding rotaryEmbedding(embeddingDim / headCount, maximumPositionCount, ropeBase);
+    return CausalSelfAttention(
+        UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed),
+        UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 1u),
+        UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 2u),
+        UniformInit::matrix(embeddingDim, embeddingDim, 0.1f, seed + 3u),
+        std::move(rotaryEmbedding),
+        headCount,
+        resolvedWindowSize,
+        globalTokenCount);
 }
 
 bool CausalSelfAttention::allowsKey(int queryIndex, int keyIndex, int windowSize, int globalTokenCount) {

@@ -64,9 +64,16 @@ void TransformerBlockGradients::scaleInPlace(float scalar) {
     Matrix::scaleInPlace(this->feedForwardDownBias, scalar);
 }
 
-TransformerBlock::TransformerBlock(int embeddingDim, int headCount, int maximumPositionCount, unsigned seed, int intermediateSize)
+TransformerBlock::TransformerBlock(
+    int embeddingDim,
+    int headCount,
+    int maximumPositionCount,
+    unsigned seed,
+    int intermediateSize,
+    float ropeTheta)
     : attentionNorm(embeddingDim),
-      attention(CausalSelfAttention::create(embeddingDim, headCount, maximumPositionCount, seed)),
+      attention(CausalSelfAttention::create(
+          embeddingDim, headCount, maximumPositionCount, seed, -1, 0, ropeTheta)),
       feedForwardNorm(embeddingDim),
       feedForward(
           intermediateSize > 0
@@ -74,6 +81,7 @@ TransformerBlock::TransformerBlock(int embeddingDim, int headCount, int maximumP
               : FeedForward::create(embeddingDim, 4, seed + 20u)) {
     if (embeddingDim <= 0) throw std::invalid_argument("TransformerBlock embeddingDim must be > 0");
     if (intermediateSize < 0) throw std::invalid_argument("TransformerBlock intermediateSize must be >= 0");
+    if (ropeTheta <= 0.0f) throw std::invalid_argument("TransformerBlock ropeTheta must be > 0");
     // Adam moments stay empty until first Adam::update (avoids 2x param host RAM at ctor for large models).
 }
 

@@ -56,8 +56,15 @@ public:
 
     CausalSelfAttention(Matrix queryWeight, Matrix keyWeight, Matrix valueWeight, Matrix outputWeight, RotaryEmbedding rotaryEmbedding, int headCount, int windowSize, int globalTokenCount);
 
-    /// <summary>create dim x dim weights headCount must divide embeddingDim windowSize&lt;=0 means full causal</summary>
-    static CausalSelfAttention create(int embeddingDim, int headCount, int maximumPositionCount, unsigned seed = 11u, int windowSize = -1, int globalTokenCount = 0);
+    /// <summary>create dim x dim weights; windowSize&lt;=0 means full causal; ropeBase is HF rope_theta</summary>
+    static CausalSelfAttention create(
+        int embeddingDim,
+        int headCount,
+        int maximumPositionCount,
+        unsigned seed = 11u,
+        int windowSize = -1,
+        int globalTokenCount = 0,
+        float ropeBase = RotaryEmbedding::DefaultBase);
 
     /// <summary>causal multi head attention writes intermediates into cache</summary>
     Matrix forward(const Matrix& input, CausalSelfAttentionCache& cache) const;

@@ -11,14 +11,17 @@
 /// </summary>
 class RotaryEmbedding {
 public:
+    static constexpr float DefaultBase = 10000.0f;
+
     int headDimension;
     int maximumPositionCount;
     int pairCount;
+    float base = 0.0f;
     std::vector<float> cosTable;
     std::vector<float> sinTable;
 
-    /// <summary>build cos/sin tables for positions 0 .. maximumPositionCount-1</summary>
-    RotaryEmbedding(int headDimension, int maximumPositionCount, float base = 10000.0f);
+    /// <summary>build cos/sin tables for positions 0 .. maximumPositionCount-1 (HF rope_theta → base)</summary>
+    RotaryEmbedding(int headDimension, int maximumPositionCount, float base = DefaultBase);
 
     /// <summary>default empty rope</summary>
     RotaryEmbedding();

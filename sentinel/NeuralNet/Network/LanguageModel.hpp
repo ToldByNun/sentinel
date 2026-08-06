@@ -82,9 +82,18 @@ public:
     bool tieEmbeddingProjection;
 
     /// <summary>
-    /// build LM; intermediateSize &lt;= 0 → legacy expand-4 SwiGLU width per block
+    /// build LM; intermediateSize &lt;= 0 → legacy expand-4 SwiGLU width per block;
+    /// ropeTheta is HF rope_theta (default 10000; Llama-3.x often 500000)
     /// </summary>
-    LanguageModel(int vocabularySize, int embeddingDim, int maximumPositionCount, Adam optimizer, int blockCount = 2, int headCount = 4, int intermediateSize = 0);
+    LanguageModel(
+        int vocabularySize,
+        int embeddingDim,
+        int maximumPositionCount,
+        Adam optimizer,
+        int blockCount = 2,
+        int headCount = 4,
+        int intermediateSize = 0,
+        float ropeTheta = RotaryEmbedding::DefaultBase);
     ~LanguageModel();
 
     LanguageModel(const LanguageModel&) = delete;
@@ -94,6 +103,9 @@ public:
 
     /// <summary>FFN intermediate width (gate/up rows); 0 if no blocks</summary>
     int intermediateSize() const;
+
+    /// <summary>RoPE base (HF rope_theta); DefaultBase if no blocks</summary>
+    float ropeTheta() const;
 
     /// <summary>upload host weights to optional CUDA device mirror for forward and generate</summary>
     void enableCuda();
@@ -220,6 +232,9 @@ public:
 
     /// <summary>explicit FFN intermediate_size ctor + safetensors metadata mismatch gate</summary>
     static void runIntermediateSizeSmokeDemo();
+
+    /// <summary>configurable rope_theta tables + safetensors metadata gate</summary>
+    static void runRopeThetaSmokeDemo();
 
     /// <summary>JSONL chunk source smoke: tiny file, one streamed epoch</summary>
     static void runStreamingSmokeDemo();

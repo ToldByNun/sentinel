@@ -10,6 +10,7 @@ All notable changes to this project are documented here.
 - Examples write/load sibling `{stem}.sbpe` next to checkpoints
 - SafeTensors load accepts **BF16** / **F16** (converts to host F32); save remains F32
 - Explicit FFN `intermediate_size` on `FeedForward` / `TransformerBlock` / `LanguageModel` (+ safetensors metadata); `<=0` keeps legacy expand-4 width
+- Configurable RoPE `rope_theta` (base) through Attention / Block / LM (+ safetensors metadata); default `10000`
 
 ## [0.1.0] — 2026-08-06
 
@@ -33,3 +34,4 @@ First library-oriented release surface.
 - Throughput numbers in the README are indicative (RTX 5070 Ti 16 GB); re-measure on your machine.
 - SafeTensors half-load smoke: `SENTINEL_SAFETENSORS_HALF_SMOKE=1` when running the `sentinel` harness.
 - Intermediate-size smoke: `SENTINEL_INTERMEDIATE_SIZE_SMOKE=1`.
+- RoPE-theta smoke: `SENTINEL_ROPE_THETA_SMOKE=1`.
