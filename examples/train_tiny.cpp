@@ -11,6 +11,7 @@
 #include "NeuralNet/Tokenizer/BPETokenizer.hpp"
 
 #include <cstdio>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -60,6 +61,8 @@ int main(int argc, char** argv) {
     model.saveCheckpoint(checkpointPath, /*includeOptimizer=*/false);
     const std::string safePath = checkpointPath + ".safetensors";
     model.saveSafeTensors(safePath);
+    const std::string tokPath = std::filesystem::path(checkpointPath).replace_extension(".sbpe").string();
+    tokenizer.save(tokPath);
 
     LanguageModel roundtrip(tokenizer.vocabSize(), embed, maxPos, Adam(3e-3f), blocks, heads);
     if (CudaMatmul::isAvailable())
@@ -67,12 +70,20 @@ int main(int argc, char** argv) {
     roundtrip.loadCheckpoint(safePath);
     const float safeLoss = roundtrip.averageLoss(train);
 
+    BPETokenizer tokRoundtrip = BPETokenizer::loadFrom(tokPath);
+    const std::string probe = "the cat";
+    if (tokRoundtrip.encode(probe) != tokenizer.encode(probe)
+        || tokRoundtrip.decode(tokenizer.encode(probe)) != tokenizer.decode(tokenizer.encode(probe))) {
+        std::cerr << "train_tiny: tokenizer roundtrip mismatch\n";
+        return 1;
+    }
+
     const float loss = model.averageLoss(train);
     std::cout << "train_tiny: examples=" << train.size()
               << " vocab=" << tokenizer.vocabSize()
               << " params≈" << (model.parameterElementCount() / 1.0e6) << "M"
               << " avgLoss=" << loss
               << " safeLoss=" << safeLoss
-              << " wrote " << checkpointPath << " + " << safePath << "\n";
+              << " wrote " << checkpointPath << " + " << safePath << " + " << tokPath << "\n";
     return 0;
 }

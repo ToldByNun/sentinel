@@ -80,8 +80,11 @@ Header: `Tokenizer/BPETokenizer.hpp`
 | `train(const std::vector<std::string>&, int vocabSize)` | Corpus |
 | `encode` / `decode` | |
 | `vocabSize` / `unknownTokenId` / `tokenToId` / `idToToken` | |
+| `isTrained()` | True after `train` / `load` |
+| `save(path)` / `load(path)` | Binary **`.sbpe`** (magic `SBPE`, vocab + merges) |
+| `loadFrom(path)` | static constructor |
 
-Unknown pieces map to `<unk>`. No file I/O in v0.1.
+Unknown pieces map to `<unk>`. Prefer a sibling `{stem}.sbpe` next to `.snlm` / `.safetensors`.
 
 ---
 
@@ -231,4 +234,4 @@ Useful options: `SENTINEL_BUILD_SHARED`, `SENTINEL_CUDA_ARCHITECTURES`, `SENTINE
 
 ## Python parity
 
-Most train/generate/checkpoint knobs are also on the [Python API](python.md). Gaps in v0.1: no `ChunkSource`, no `forward` logits, fewer fine-grained CUDA setters.
+Most train/generate/checkpoint knobs are also on the [Python API](python.md). Gaps may include streaming `ChunkSource`, `forward` logits, and some fine-grained CUDA setters. Tokenizer **`.sbpe`** I/O is available on both sides.

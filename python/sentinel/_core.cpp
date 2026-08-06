@@ -50,8 +50,16 @@ NB_MODULE(_core, m) {
             "Learn BPE merges from a list of strings")
         .def("encode", &BPETokenizer::encode, nb::arg("text"))
         .def("decode", &BPETokenizer::decode, nb::arg("token_ids"))
+        .def("save", &BPETokenizer::save, nb::arg("path"), "Write binary Sentinel BPE (.sbpe)")
+        .def("load", &BPETokenizer::load, nb::arg("path"), "Load binary Sentinel BPE (.sbpe)")
+        .def_static(
+            "load_from",
+            &BPETokenizer::loadFrom,
+            nb::arg("path"),
+            "Construct a tokenizer from a .sbpe file")
         .def_prop_ro("vocab_size", &BPETokenizer::vocabSize)
-        .def_prop_ro("unknown_token_id", &BPETokenizer::unknownTokenId);
+        .def_prop_ro("unknown_token_id", &BPETokenizer::unknownTokenId)
+        .def_prop_ro("is_trained", &BPETokenizer::isTrained);
 
     nb::class_<LanguageModelDataset>(m, "LanguageModelDataset")
         .def(nb::init<>())

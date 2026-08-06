@@ -30,6 +30,18 @@ public:
     int tokenToId(const std::string& token) const;
     const std::string& idToToken(int tokenId) const;
 
+    /// <summary>true after train() or a successful load()</summary>
+    bool isTrained() const;
+
+    /// <summary>write binary Sentinel BPE (`.sbpe`) — vocab + merge rules</summary>
+    void save(const std::string& path) const;
+
+    /// <summary>replace state from a `.sbpe` file written by save()</summary>
+    void load(const std::string& path);
+
+    /// <summary>construct and load from path</summary>
+    static BPETokenizer loadFrom(const std::string& path);
+
 private:
     struct IntPair {
         int left = 0;
@@ -58,6 +70,7 @@ private:
     int unknownTokenId_ = 0;
 
     void addUnknownToken();
+    void clear();
     void buildBaseVocabulary(const std::vector<std::string>& corpus);
     void learnMerges(const std::vector<std::string>& corpus, int vocabSize);
     void rebuildMergeRank();

@@ -1,8 +1,9 @@
-/// Load a checkpoint (or train a tiny model) and generate text.
+/// Load a checkpoint + tokenizer (or train a tiny model) and generate text.
 ///
 ///   ./sentinel_generate [checkpoint.snlm] [prompt]
 ///
-/// If the checkpoint is missing, trains the same toy setup as train_tiny first.
+/// Expects sibling `{stem}.sbpe` when loading a checkpoint. If the checkpoint is
+/// missing, trains the same toy setup as train_tiny and writes both files.
 
 #include "NeuralNet/Cuda/CudaMatmul.hpp"
 #include "NeuralNet/Data/LanguageModelDataset.hpp"
@@ -27,12 +28,6 @@ const std::vector<std::string> kCorpus = {
     "tiny models learn short patterns",
 };
 
-BPETokenizer makeTokenizer() {
-    BPETokenizer tokenizer;
-    tokenizer.train(kCorpus, 256);
-    return tokenizer;
-}
-
 LanguageModel makeTinyModel(int vocabSize) {
     return LanguageModel(vocabSize, 64, 64, Adam(3e-3f), 2, 4);
 }
@@ -45,6 +40,10 @@ void maybeEnableCuda(LanguageModel& model, bool train) {
         model.enableCudaTrain();
 }
 
+std::string siblingSbpe(const std::string& checkpointPath) {
+    return std::filesystem::path(checkpointPath).replace_extension(".sbpe").string();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -52,21 +51,32 @@ int main(int argc, char** argv) {
 
     const std::string checkpointPath = argc > 1 ? argv[1] : "tiny_demo.snlm";
     const std::string promptText = argc > 2 ? argv[2] : "the cat";
+    const std::string tokPath = siblingSbpe(checkpointPath);
 
-    BPETokenizer tokenizer = makeTokenizer();
-    LanguageModel model = makeTinyModel(tokenizer.vocabSize());
+    BPETokenizer tokenizer;
+    LanguageModel model = makeTinyModel(/*vocabSize=*/256);
 
     if (std::filesystem::exists(checkpointPath)) {
+        if (!std::filesystem::exists(tokPath)) {
+            std::cerr << "generate: missing tokenizer at " << tokPath
+                      << " (expected sibling .sbpe of the checkpoint)\n";
+            return 1;
+        }
+        tokenizer.load(tokPath);
+        model = makeTinyModel(tokenizer.vocabSize());
         maybeEnableCuda(model, /*train=*/false);
         model.loadCheckpoint(checkpointPath);
-        std::cout << "generate: loaded " << checkpointPath << "\n";
+        std::cout << "generate: loaded " << checkpointPath << " + " << tokPath << "\n";
     } else {
         std::cout << "generate: no checkpoint at " << checkpointPath << " — training toy model first\n";
+        tokenizer.train(kCorpus, 256);
+        model = makeTinyModel(tokenizer.vocabSize());
         LanguageModelDataset train = LanguageModelDataset::build(kCorpus, tokenizer, 48, false);
         maybeEnableCuda(model, /*train=*/true);
         LanguageModelDataset emptyTest;
         model.train(train, emptyTest, 8, 4, 4, 1);
         model.saveCheckpoint(checkpointPath, false);
+        tokenizer.save(tokPath);
     }
 
     const std::vector<int> promptIds = tokenizer.encode(promptText);

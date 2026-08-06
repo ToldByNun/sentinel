@@ -53,10 +53,11 @@ Sentinel Backend Adaptive Optimization residency policy.
 ```python
 tok = S.BPETokenizer()
 tok.train(["hello world", "cuda packs"], vocab_size=256)
-ids = tok.encode("hello")
-text = tok.decode(ids)
-n = tok.vocab_size
-unk = tok.unknown_token_id
+tok.save("run.sbpe")
+
+tok2 = S.BPETokenizer.load_from("run.sbpe")
+ids = tok2.encode("hello")
+text = tok2.decode(ids)
 ```
 
 | Method / property | Signature | Notes |
@@ -64,10 +65,14 @@ unk = tok.unknown_token_id
 | `train` | `(corpus: list[str], vocab_size: int) -> None` | Learn merges; `vocab_size` must exceed unique chars + unk |
 | `encode` | `(text: str) -> list[int]` | Unknown pieces → unk |
 | `decode` | `(token_ids: list[int]) -> str` | Concat; leading spaces restored |
+| `save` | `(path: str) -> None` | Binary Sentinel BPE (`.sbpe`) |
+| `load` | `(path: str) -> None` | Replace state from `.sbpe` |
+| `load_from` | `(path: str) -> BPETokenizer` | static constructor |
 | `vocab_size` | `int` (ro) | |
 | `unknown_token_id` | `int` (ro) | |
+| `is_trained` | `bool` (ro) | True after `train` / `load` |
 
-There is **no** tokenizer save/load in v0.1 — retrain from the same corpus or keep the corpus + `vocab_size` fixed for generate scripts.
+Convention: keep the tokenizer next to weights as `{stem}.sbpe` (e.g. `run.safetensors` → `run.sbpe`). Examples write/load that sibling automatically.
 
 ---
 
@@ -216,10 +221,9 @@ model.set_activation_checkpoint_mode(S.ActivationCheckpointMode.Full)
 
 | C++ | Status |
 | --- | ------ |
-| `LanguageModelChunkSource` / streaming train | C++ only |
+| `LanguageModelChunkSource` / streaming train | C++ only (unless you added bindings) |
 | `forward` → logits `Matrix` | C++ only |
 | `setCudaPreferMixedPrecision`, `setCudaLogitChunkRows`, `setCudaMuonNsSteps`, `setTieEmbeddingProjection` | C++ only |
 | `probeCudaTrainStepProfile` | C++ only |
-| Tokenizer serialize | Neither |
 
-See [C++ API](cpp.md) for the full surface.
+Tokenizer I/O (`.sbpe`) is exposed — see `BPETokenizer` above.

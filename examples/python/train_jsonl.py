@@ -102,6 +102,8 @@ def main() -> int:
         model.save_safetensors(str(out))
     else:
         model.save_checkpoint(str(out), include_optimizer=False)
+    tok_path = out.with_suffix(".sbpe")
+    tok.save(str(tok_path))
 
     prompt = texts[0][:40]
     ids = tok.encode(prompt)
@@ -111,7 +113,8 @@ def main() -> int:
 
     print(
         f"train_jsonl: rows={len(texts)} examples={train.size} vocab={tok.vocab_size} "
-        f"params~{model.parameter_count / 1e6:.3f}M avgLoss={model.average_loss(train):.4f} wrote {out}"
+        f"params~{model.parameter_count / 1e6:.3f}M avgLoss={model.average_loss(train):.4f} "
+        f"wrote {out} + {tok_path}"
     )
     return 0
 

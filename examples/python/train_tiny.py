@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 
+from pathlib import Path
+
 import sentinel as S
 
 
@@ -48,18 +50,24 @@ def main() -> None:
     model.save_checkpoint(args.checkpoint, include_optimizer=False)
     safe_path = args.checkpoint + ".safetensors"
     model.save_safetensors(safe_path)
+    tok_path = str(Path(args.checkpoint).with_suffix(".sbpe"))
+    tok.save(tok_path)
 
     roundtrip = S.LanguageModel(tok.vocab_size, 64, 64, 3e-3, 2, 4)
     if S.cuda_available():
         roundtrip.enable_cuda()
     roundtrip.load_checkpoint(safe_path)
 
+    loaded = S.BPETokenizer.load_from(tok_path)
+    if loaded.encode("the cat") != tok.encode("the cat"):
+        raise SystemExit("tokenizer roundtrip mismatch")
+
     print(
         f"train_tiny: examples={train.size} vocab={tok.vocab_size} "
         f"params~{model.parameter_count / 1e6:.4f}M "
         f"avgLoss={model.average_loss(train):.5f} "
         f"safeLoss={roundtrip.average_loss(train):.5f} "
-        f"wrote {args.checkpoint} + {safe_path}"
+        f"wrote {args.checkpoint} + {safe_path} + {tok_path}"
     )
 
 

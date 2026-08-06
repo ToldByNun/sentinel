@@ -7,6 +7,7 @@
 #include <climits>
 #include <cstdint>
 #include <cstdio>
+#include <fstream>
 #include <iterator>
 #include <stdexcept>
 #include <utility>
@@ -15,10 +16,166 @@
 #include <omp.h>
 #endif
 
+namespace {
+
+constexpr char kSbpeMagic[4] = { 'S', 'B', 'P', 'E' };
+constexpr std::uint32_t kSbpeVersion = 1u;
+constexpr std::uint32_t kSbpeMaxVocab = 4u * 1024u * 1024u;
+constexpr std::uint32_t kSbpeMaxTokenBytes = 1024u * 1024u;
+
+void writeExact(std::ostream& out, const void* data, size_t bytes) {
+    out.write(static_cast<const char*>(data), static_cast<std::streamsize>(bytes));
+    if (!out) throw std::runtime_error("BPETokenizer::save write failed");
+}
+
+void readExact(std::istream& in, void* data, size_t bytes) {
+    in.read(static_cast<char*>(data), static_cast<std::streamsize>(bytes));
+    if (!in || static_cast<size_t>(in.gcount()) != bytes)
+        throw std::runtime_error("BPETokenizer::load unexpected EOF");
+}
+
+void writeU32(std::ostream& out, std::uint32_t value) {
+    writeExact(out, &value, sizeof(value));
+}
+
+void writeI32(std::ostream& out, std::int32_t value) {
+    writeExact(out, &value, sizeof(value));
+}
+
+std::uint32_t readU32(std::istream& in) {
+    std::uint32_t value = 0;
+    readExact(in, &value, sizeof(value));
+    return value;
+}
+
+std::int32_t readI32(std::istream& in) {
+    std::int32_t value = 0;
+    readExact(in, &value, sizeof(value));
+    return value;
+}
+
+} // namespace
+
 size_t BPETokenizer::IntPairHash::operator()(const IntPair& pair) const {
     const std::uint64_t packed = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(pair.left)) << 32)
         | static_cast<std::uint32_t>(pair.right);
     return std::hash<std::uint64_t>{}(packed);
+}
+
+void BPETokenizer::clear() {
+    this->tokenToId_.clear();
+    this->idToToken_.clear();
+    this->mergeRules_.clear();
+    this->mergeRank_.clear();
+    this->unknownTokenId_ = 0;
+    for (int index = 0; index < 256; ++index)
+        this->byteToId_[index] = 0;
+}
+
+bool BPETokenizer::isTrained() const {
+    return !this->idToToken_.empty();
+}
+
+void BPETokenizer::save(const std::string& path) const {
+    if (path.empty()) throw std::invalid_argument("BPETokenizer::save empty path");
+    if (!this->isTrained()) throw std::logic_error("BPETokenizer::save tokenizer not trained");
+
+    const std::uint32_t vocabCount = static_cast<std::uint32_t>(this->idToToken_.size());
+    const std::uint32_t mergeCount = static_cast<std::uint32_t>(this->mergeRules_.size());
+    if (this->unknownTokenId_ < 0 || this->unknownTokenId_ >= static_cast<int>(vocabCount))
+        throw std::logic_error("BPETokenizer::save invalid unknownTokenId");
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) throw std::runtime_error("BPETokenizer::save cannot open " + path);
+
+    writeExact(out, kSbpeMagic, sizeof(kSbpeMagic));
+    writeU32(out, kSbpeVersion);
+    writeI32(out, this->unknownTokenId_);
+    writeU32(out, vocabCount);
+    for (const std::string& token : this->idToToken_) {
+        if (token.size() > kSbpeMaxTokenBytes)
+            throw std::runtime_error("BPETokenizer::save token too large");
+        writeU32(out, static_cast<std::uint32_t>(token.size()));
+        if (!token.empty())
+            writeExact(out, token.data(), token.size());
+    }
+    writeU32(out, mergeCount);
+    for (const MergeRule& rule : this->mergeRules_) {
+        writeI32(out, rule.leftId);
+        writeI32(out, rule.rightId);
+        writeI32(out, rule.resultId);
+    }
+}
+
+void BPETokenizer::load(const std::string& path) {
+    if (path.empty()) throw std::invalid_argument("BPETokenizer::load empty path");
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error("BPETokenizer::load cannot open " + path);
+
+    char magic[4] = {};
+    readExact(in, magic, sizeof(magic));
+    if (magic[0] != kSbpeMagic[0] || magic[1] != kSbpeMagic[1]
+        || magic[2] != kSbpeMagic[2] || magic[3] != kSbpeMagic[3])
+        throw std::runtime_error("BPETokenizer::load bad magic (expected SBPE)");
+
+    const std::uint32_t version = readU32(in);
+    if (version != kSbpeVersion)
+        throw std::runtime_error("BPETokenizer::load unsupported version");
+
+    const std::int32_t unknownId = readI32(in);
+    const std::uint32_t vocabCount = readU32(in);
+    if (vocabCount == 0 || vocabCount > kSbpeMaxVocab)
+        throw std::runtime_error("BPETokenizer::load invalid vocabCount");
+    if (unknownId < 0 || static_cast<std::uint32_t>(unknownId) >= vocabCount)
+        throw std::runtime_error("BPETokenizer::load invalid unknownTokenId");
+
+    this->clear();
+    this->unknownTokenId_ = unknownId;
+    this->idToToken_.reserve(vocabCount);
+    this->tokenToId_.reserve(vocabCount * 2);
+
+    for (std::uint32_t index = 0; index < vocabCount; ++index) {
+        const std::uint32_t tokenBytes = readU32(in);
+        if (tokenBytes > kSbpeMaxTokenBytes)
+            throw std::runtime_error("BPETokenizer::load token too large");
+        std::string token(tokenBytes, '\0');
+        if (tokenBytes > 0)
+            readExact(in, token.data(), tokenBytes);
+        if (this->tokenToId_.find(token) != this->tokenToId_.end())
+            throw std::runtime_error("BPETokenizer::load duplicate token");
+        this->tokenToId_[token] = static_cast<int>(this->idToToken_.size());
+        this->idToToken_.push_back(std::move(token));
+    }
+
+    if (this->idToToken_[static_cast<size_t>(this->unknownTokenId_)] != BPETokenizer::UnknownToken)
+        throw std::runtime_error("BPETokenizer::load unknown token slot is not <unk>");
+
+    const std::uint32_t mergeCount = readU32(in);
+    if (mergeCount > vocabCount)
+        throw std::runtime_error("BPETokenizer::load invalid mergeCount");
+    this->mergeRules_.reserve(mergeCount);
+    for (std::uint32_t index = 0; index < mergeCount; ++index) {
+        MergeRule rule;
+        rule.leftId = readI32(in);
+        rule.rightId = readI32(in);
+        rule.resultId = readI32(in);
+        if (rule.leftId < 0 || rule.rightId < 0 || rule.resultId < 0
+            || rule.leftId >= static_cast<int>(vocabCount)
+            || rule.rightId >= static_cast<int>(vocabCount)
+            || rule.resultId >= static_cast<int>(vocabCount))
+            throw std::runtime_error("BPETokenizer::load merge id out of range");
+        this->mergeRules_.push_back(rule);
+    }
+
+    this->rebuildByteToId();
+    this->rebuildMergeRank();
+}
+
+BPETokenizer BPETokenizer::loadFrom(const std::string& path) {
+    BPETokenizer tokenizer;
+    tokenizer.load(path);
+    return tokenizer;
 }
 
 void BPETokenizer::train(const std::string& text, int vocabSize) {

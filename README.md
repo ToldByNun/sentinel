@@ -160,11 +160,14 @@ model.set_activation_checkpoint_mode(S.ActivationCheckpointMode.Full)
 | ------ | -------- |
 | `.snlm` | Native weights + optional optimizer (Adam/Muon) |
 | `.safetensors` | Weights only, HF-compatible names + arch metadata |
+| `.sbpe` | BPE tokenizer (`BPETokenizer::save` / `load`) — keep as `{stem}.sbpe` next to weights |
 
 ```python
 model.save_checkpoint("run.snlm", include_optimizer=True)
 model.save_safetensors("run.safetensors")
+tok.save("run.sbpe")
 model.load_checkpoint("run.safetensors")  # also accepts .safetensors
+tok.load("run.sbpe")
 ```
 
 ## Performance (indicative)

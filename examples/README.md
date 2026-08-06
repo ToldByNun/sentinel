@@ -28,7 +28,7 @@ Each non-empty line is either:
 
 The C++ streaming path (`LanguageModelChunkSource` + `JsonlLoader`) currently expects **`problem_statement`** (SERA-style). The Python example accepts the common aliases above so small demos are less awkward.
 
-Streaming / chunked epoch loops over large corpora are **C++-only** in v0.1 (`LanguageModel::train(LanguageModelChunkSource&)`).
+Streaming / chunked epoch loops over large corpora use the C++ `LanguageModelChunkSource` API (and Python bindings if you exposed them). Keep `{stem}.sbpe` next to checkpoints for generate.
 
 ## C++
 
