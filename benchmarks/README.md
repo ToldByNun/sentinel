@@ -14,9 +14,9 @@ Workload ([`_lib/paper_config.py`](_lib/paper_config.py)): vocab 32k · **256×1
 | Lib | fair | feat |
 | --- | ---- | ---- |
 | Sentinel | resident Adam | FP16w + host grads + host SGD |
-| PyTorch | vanilla CUDA module | FSDP **2-rank** FULL_SHARD + CPUOffload |
+| PyTorch | vanilla CUDA module | **Linux:** FSDP 2-rank FULL_SHARD + CPUOffload; **Windows:** host Adam offload (FSDP AVs on WDDM/Blackwell) |
 | DeepSpeed | `deepspeed.initialize` ZeRO-2 | ZeRO-3 + CPU offload |
-| FSDP | FULL_SHARD via **2 ranks / 1 GPU** (rejects NO_SHARD) | + CPUOffload |
+| FSDP | FULL_SHARD via **2 ranks / 1 GPU** (Linux; Windows unsupported) | + CPUOffload |
 
 ## Run
 

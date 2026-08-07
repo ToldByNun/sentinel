@@ -51,6 +51,7 @@ def run(model_id: str, profile: ProfileName = "fair") -> int:
         gradient_checkpointing=train.gradient_checkpointing,
         memory_efficient=train.memory_efficient,
         master_port="29533",
+        require_full_shard=True,
     )
     if result.error and result.status != "success":
         print(f"error: {result.error}", flush=True)
