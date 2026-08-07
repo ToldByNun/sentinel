@@ -170,6 +170,9 @@ public:
     void setCudaSpulseSlowBeta(float beta);
     void setCudaSpulseScaleClip(float scaleMin, float scaleMax);
 
+    /// <summary>device <c>u</c> storage: Fp32 (default), Fp16, or Int8 (VRAM experiments)</summary>
+    void setCudaSpulseMomentumStorage(SpulseMomentumStorage storage);
+
     /// <summary>ZeRO-Offload Stage-1: keep Adam m/v on host RAM (disables int8 device moments)</summary>
     void setCudaPreferCpuAdamOffload(bool enabled);
 

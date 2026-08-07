@@ -76,6 +76,7 @@ set(SENTINEL_CXX_SOURCES
     "${SENTINEL_ROOT}/NeuralNet/Network/Sequential.cpp"
     "${SENTINEL_ROOT}/NeuralNet/Optimizers/Adam.cpp"
     "${SENTINEL_ROOT}/NeuralNet/Optimizers/SGD.cpp"
+    "${SENTINEL_ROOT}/NeuralNet/Optimizers/Spulse.cpp"
     "${SENTINEL_ROOT}/NeuralNet/Tokenizer/BPETokenizer.cpp"
     "${SENTINEL_ROOT}/NeuralNet/Tokenizer/HfTokenizer.cpp"
 )
@@ -91,6 +92,7 @@ set(SENTINEL_CUDA_SOURCES
     "${SENTINEL_ROOT}/NeuralNet/Cuda/CudaAdam.cu"
     "${SENTINEL_ROOT}/NeuralNet/Cuda/CudaSbao.cu"
     "${SENTINEL_ROOT}/NeuralNet/Cuda/CudaMuon.cu"
+    "${SENTINEL_ROOT}/NeuralNet/Cuda/CudaSPULSE.cu"
     "${SENTINEL_ROOT}/NeuralNet/Cuda/CudaKvCache.cu"
     "${SENTINEL_ROOT}/NeuralNet/Cuda/CudaTransformerBlock.cu"
     "${SENTINEL_ROOT}/NeuralNet/Cuda/CudaLanguageModel.cu"

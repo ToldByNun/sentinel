@@ -59,6 +59,11 @@ NB_MODULE(_core, m) {
         .value("Hybrid", SpulseCoverage::Hybrid)
         .value("Full", SpulseCoverage::Full);
 
+    nb::enum_<SpulseMomentumStorage>(m, "SpulseMomentumStorage")
+        .value("Fp32", SpulseMomentumStorage::Fp32)
+        .value("Fp16", SpulseMomentumStorage::Fp16)
+        .value("Int8", SpulseMomentumStorage::Int8);
+
     nb::class_<BPETokenizer>(m, "BPETokenizer")
         .def(nb::init<>())
         .def(
@@ -195,6 +200,11 @@ NB_MODULE(_core, m) {
             &LanguageModel::setCudaSpulseScaleClip,
             nb::arg("scale_min"),
             nb::arg("scale_max"))
+        .def(
+            "set_spulse_momentum_storage",
+            &LanguageModel::setCudaSpulseMomentumStorage,
+            nb::arg("storage"),
+            "Device u storage: Fp32 (default), Fp16, or Int8")
         .def(
             "set_prefer_int8_adam_moments",
             &LanguageModel::setCudaPreferInt8AdamMoments,

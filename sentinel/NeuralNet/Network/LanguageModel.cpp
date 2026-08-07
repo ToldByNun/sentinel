@@ -552,7 +552,11 @@ void LanguageModel::enableCudaTrain() {
     }
     std::cout << "LanguageModel::enableCudaTrain: device training enabled (packed batches, ckpt="
               << CudaLanguageModel::activationCheckpointModeName(this->device->activationCheckpointMode)
-              << ", opt=" << (this->device->preferSpulse ? "spulse+adam" : (this->device->preferMuon ? "muon+adam" : "adam"))
+              << ", opt=" << (this->device->preferSpulse
+                    ? (CudaSbao::pipelineHostWeightUpdate() ? "spulse-host+adam" : "spulse+adam")
+                    : (this->device->preferMuon ? "muon+adam"
+                        : (CudaAdam::preferHostSgd ? "host-sgd"
+                            : (CudaSbao::pipelineHostAdam() ? "host-adam" : "adam"))))
               << ", sbao=" << (CudaSbao::enabled ? CudaSbao::modeName(CudaSbao::resolved) : "off")
               << ", FP16 amp "
               << (CudaAmp::preferMixedPrecision ? "on" : "off")
@@ -884,6 +888,18 @@ void LanguageModel::setCudaSpulseScaleClip(float scaleMin, float scaleMax) {
     if (this->device == nullptr) return;
     this->device->spulse.scaleMin = scaleMin;
     this->device->spulse.scaleMax = scaleMax;
+}
+
+void LanguageModel::setCudaSpulseMomentumStorage(SpulseMomentumStorage storage) {
+    if (this->device == nullptr) this->enableCuda();
+    if (this->device == nullptr) return;
+    if (this->device->spulse.momentumStorage == storage) return;
+    this->device->spulse.momentumStorage = storage;
+    this->device->trainStateReady = false;
+    if (this->deviceTrainEnabled)
+        this->device->ensureTrainState();
+    std::cout << "LanguageModel::setCudaSpulseMomentumStorage: "
+              << CudaSpulse::momentumStorageName(storage) << '\n';
 }
 
 void LanguageModel::setCudaPreferFlashAttention(bool enabled) {
