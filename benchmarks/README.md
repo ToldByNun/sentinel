@@ -58,6 +58,8 @@ Desktop WDDM / pack budget matter — re-measure after train-path changes. Headl
 python benchmarks/_lib/probe_4b_safe.py
 ```
 
+Optimization plan toward ~1,300 tok/s at 4B: [`perf_4b_plan.md`](perf_4b_plan.md).
+
 ### Adam vs Muon (12×768)
 
 | Optimizer | ckpt | ~tok/s |
