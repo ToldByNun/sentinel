@@ -688,6 +688,9 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
                 this->hostGradCopyStream,
                 this->hostGradComputeEvent);
             CudaSbao::commitPinnedD2hBatch();
+            // Energy commit after the event: overlaps fused-half D2H on the copy stream.
+            if (pipelineHostSpulse && !this->spulse.hostLightweight)
+                this->spulse.commitPendingHybridHostEnergies();
             CudaMatmul::throwIfCudaFailed(
                 cudaEventRecord(this->hostGradD2hEvent, this->hostGradCopyStream),
                 "runPackedTrainDevice record hostGradD2hEvent");
