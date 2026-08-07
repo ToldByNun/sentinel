@@ -34,8 +34,15 @@ float clipScale(float scale, float scaleMin, float scaleMax) {
     return scale;
 }
 
-float computeScale(float energyFast, float energySlow, float epsilon, float scaleMin, float scaleMax) {
-    return clipScale(std::sqrt(energySlow / (energyFast + epsilon)), scaleMin, scaleMax);
+float computeScale(
+    float energyFast,
+    float energySlow,
+    float energyCorrection,
+    float epsilon,
+    float scaleMin,
+    float scaleMax
+) {
+    return clipScale(energyCorrection * std::sqrt(energySlow / (energyFast + epsilon)), scaleMin, scaleMax);
 }
 
 __device__ __forceinline__ void spulseCommitEnergyDevice(
@@ -45,6 +52,7 @@ __device__ __forceinline__ void spulseCommitEnergyDevice(
     float slowBeta,
     float oneMinusFast,
     float oneMinusSlow,
+    float energyCorrection,
     float epsilon,
     float scaleMin,
     float scaleMax
@@ -55,7 +63,7 @@ __device__ __forceinline__ void spulseCommitEnergyDevice(
     eSlow = slowBeta * eSlow + oneMinusSlow * g2;
     energy[0] = eFast;
     energy[1] = eSlow;
-    float scale = sqrtf(eSlow / (eFast + epsilon));
+    float scale = energyCorrection * sqrtf(eSlow / (eFast + epsilon));
     if (scale < scaleMin) scale = scaleMin;
     if (scale > scaleMax) scale = scaleMax;
     energy[2] = scale;
@@ -71,6 +79,7 @@ __device__ __forceinline__ void spulseFinishEnergy(
     float slowBeta,
     float oneMinusFast,
     float oneMinusSlow,
+    float energyCorrection,
     float epsilon,
     float scaleMin,
     float scaleMax
@@ -93,6 +102,7 @@ __device__ __forceinline__ void spulseFinishEnergy(
                 slowBeta,
                 oneMinusFast,
                 oneMinusSlow,
+                energyCorrection,
                 epsilon,
                 scaleMin,
                 scaleMax);
@@ -118,6 +128,7 @@ __global__ void spulseFusedStep(
     float slowBeta,
     float oneMinusFast,
     float oneMinusSlow,
+    float energyCorrection,
     float epsilon,
     float scaleMin,
     float scaleMax
@@ -187,7 +198,7 @@ __global__ void spulseFusedStep(
     shared[threadIdx.x] = local;
     spulseFinishEnergy(
         shared, sumSquares, blocksDone, energy,
-        fastBeta, slowBeta, oneMinusFast, oneMinusSlow, epsilon, scaleMin, scaleMax);
+        fastBeta, slowBeta, oneMinusFast, oneMinusSlow, energyCorrection, epsilon, scaleMin, scaleMax);
 }
 
 __global__ void spulsePrepareHostDelta(
@@ -206,6 +217,7 @@ __global__ void spulsePrepareHostDelta(
     float slowBeta,
     float oneMinusFast,
     float oneMinusSlow,
+    float energyCorrection,
     float epsilon,
     float scaleMin,
     float scaleMax
@@ -266,7 +278,7 @@ __global__ void spulsePrepareHostDelta(
     shared[threadIdx.x] = local;
     spulseFinishEnergy(
         shared, sumSquares, blocksDone, energy,
-        fastBeta, slowBeta, oneMinusFast, oneMinusSlow, epsilon, scaleMin, scaleMax);
+        fastBeta, slowBeta, oneMinusFast, oneMinusSlow, energyCorrection, epsilon, scaleMin, scaleMax);
 }
 
 /// <summary>one Hybrid weight for batched host-delta prepare (FP32 u)</summary>
@@ -386,6 +398,7 @@ __global__ void spulseCommitEnergyMany(
     float slowBeta,
     float oneMinusFast,
     float oneMinusSlow,
+    float energyCorrection,
     float epsilon,
     float scaleMin,
     float scaleMax
@@ -401,6 +414,7 @@ __global__ void spulseCommitEnergyMany(
         slowBeta,
         oneMinusFast,
         oneMinusSlow,
+        energyCorrection,
         epsilon,
         scaleMin,
         scaleMax);
@@ -424,6 +438,7 @@ __global__ void spulseFusedStepHalf(
     float slowBeta,
     float oneMinusFast,
     float oneMinusSlow,
+    float energyCorrection,
     float epsilon,
     float scaleMin,
     float scaleMax
@@ -502,7 +517,7 @@ __global__ void spulseFusedStepHalf(
     shared[threadIdx.x] = local;
     spulseFinishEnergy(
         shared, sumSquares, blocksDone, energy,
-        fastBeta, slowBeta, oneMinusFast, oneMinusSlow, epsilon, scaleMin, scaleMax);
+        fastBeta, slowBeta, oneMinusFast, oneMinusSlow, energyCorrection, epsilon, scaleMin, scaleMax);
 }
 
 __global__ void spulsePrepareHostDeltaHalf(
@@ -521,6 +536,7 @@ __global__ void spulsePrepareHostDeltaHalf(
     float slowBeta,
     float oneMinusFast,
     float oneMinusSlow,
+    float energyCorrection,
     float epsilon,
     float scaleMin,
     float scaleMax
@@ -590,7 +606,7 @@ __global__ void spulsePrepareHostDeltaHalf(
     shared[threadIdx.x] = local;
     spulseFinishEnergy(
         shared, sumSquares, blocksDone, energy,
-        fastBeta, slowBeta, oneMinusFast, oneMinusSlow, epsilon, scaleMin, scaleMax);
+        fastBeta, slowBeta, oneMinusFast, oneMinusSlow, energyCorrection, epsilon, scaleMin, scaleMax);
 }
 
 /// <summary>One CUDA block = one absmax quant block. writeDelta=true → host-delta path (no θ update).</summary>
@@ -615,6 +631,7 @@ __global__ void spulseStepInt8(
     float slowBeta,
     float oneMinusFast,
     float oneMinusSlow,
+    float energyCorrection,
     float epsilon,
     float scaleMin,
     float scaleMax
@@ -684,6 +701,7 @@ __global__ void spulseStepInt8(
                 slowBeta,
                 oneMinusFast,
                 oneMinusSlow,
+                energyCorrection,
                 epsilon,
                 scaleMin,
                 scaleMax);
@@ -717,7 +735,8 @@ void hostUpdateCore(
     float scaleMax,
     float weightDecay,
     float gradientScale,
-    float momCorrection
+    float momCorrection,
+    float energyCorrection
 ) {
     const float oneMinusMom = 1.0f - momentumBeta;
     const float oneMinusFast = 1.0f - fastBeta;
@@ -737,7 +756,7 @@ void hostUpdateCore(
     }
     energyFast = fastBeta * energyFast + oneMinusFast * sumSquares;
     energySlow = slowBeta * energySlow + oneMinusSlow * sumSquares;
-    scale = computeScale(energyFast, energySlow, epsilon, scaleMin, scaleMax);
+    scale = computeScale(energyFast, energySlow, energyCorrection, epsilon, scaleMin, scaleMax);
 }
 
 void hostUpdateFromHalfCore(
@@ -757,7 +776,8 @@ void hostUpdateFromHalfCore(
     float scaleMax,
     float weightDecay,
     float gradientScale,
-    float momCorrection
+    float momCorrection,
+    float energyCorrection
 ) {
     const float oneMinusMom = 1.0f - momentumBeta;
     const float oneMinusFast = 1.0f - fastBeta;
@@ -777,7 +797,7 @@ void hostUpdateFromHalfCore(
     }
     energyFast = fastBeta * energyFast + oneMinusFast * sumSquares;
     energySlow = slowBeta * energySlow + oneMinusSlow * sumSquares;
-    scale = computeScale(energyFast, energySlow, epsilon, scaleMin, scaleMax);
+    scale = computeScale(energyFast, energySlow, energyCorrection, epsilon, scaleMin, scaleMax);
 }
 
 /// <summary>
@@ -798,7 +818,8 @@ void hostUpdateFromHalfLite(
     float scaleMin,
     float scaleMax,
     float weightDecay,
-    float gradientScale
+    float gradientScale,
+    float energyCorrection
 ) {
     const float oneMinusFast = 1.0f - fastBeta;
     const float oneMinusSlow = 1.0f - slowBeta;
@@ -815,7 +836,7 @@ void hostUpdateFromHalfLite(
     }
     energyFast = fastBeta * energyFast + oneMinusFast * sumSquares;
     energySlow = slowBeta * energySlow + oneMinusSlow * sumSquares;
-    scale = computeScale(energyFast, energySlow, epsilon, scaleMin, scaleMax);
+    scale = computeScale(energyFast, energySlow, energyCorrection, epsilon, scaleMin, scaleMax);
 }
 
 } // namespace
@@ -1068,6 +1089,15 @@ float CudaSpulse::momentumBiasCorrection() const {
     return 1.0f / oneMinusPow;
 }
 
+float CudaSpulse::energyBiasCorrection() const {
+    if (this->timeStep <= 0) return 1.0f;
+    const float t = static_cast<float>(this->timeStep);
+    const float fastWarm = 1.0f - std::pow(this->fastBeta, t);
+    const float slowWarm = 1.0f - std::pow(this->slowBeta, t);
+    if (!(fastWarm > 0.0f) || !(slowWarm > 0.0f)) return 1.0f;
+    return std::sqrt(fastWarm / slowWarm);
+}
+
 const char* CudaSpulse::coverageName(SpulseCoverage coverage) {
     switch (coverage) {
     case SpulseCoverage::Hybrid: return "Hybrid";
@@ -1103,6 +1133,7 @@ void CudaSpulse::update(CudaMatrix& parameter, CudaSpulseState& state, const Cud
     const float oneMinusMom = 1.0f - this->momentumBeta;
     const float keep = 1.0f - this->learningRate * this->weightDecay;
     const float momCorrection = this->momentumBiasCorrection();
+    const float energyCorrection = this->energyBiasCorrection();
     const float oneMinusFast = 1.0f - this->fastBeta;
     const float oneMinusSlow = 1.0f - this->slowBeta;
     cudaStream_t stream = CudaMatmul::activeStream();
@@ -1134,6 +1165,7 @@ void CudaSpulse::update(CudaMatrix& parameter, CudaSpulseState& state, const Cud
             this->slowBeta,
             oneMinusFast,
             oneMinusSlow,
+            energyCorrection,
             this->epsilon,
             this->scaleMin,
             this->scaleMax);
@@ -1159,6 +1191,7 @@ void CudaSpulse::update(CudaMatrix& parameter, CudaSpulseState& state, const Cud
             this->slowBeta,
             oneMinusFast,
             oneMinusSlow,
+            energyCorrection,
             this->epsilon,
             this->scaleMin,
             this->scaleMax);
@@ -1189,6 +1222,7 @@ void CudaSpulse::update(CudaMatrix& parameter, CudaSpulseState& state, const Cud
             this->slowBeta,
             oneMinusFast,
             oneMinusSlow,
+            energyCorrection,
             this->epsilon,
             this->scaleMin,
             this->scaleMax);
@@ -1210,6 +1244,7 @@ void CudaSpulse::prepareHostDeltaInPlace(
     const int elementCount = static_cast<int>(rows * cols);
     const float oneMinusMom = 1.0f - this->momentumBeta;
     const float momCorrection = this->momentumBiasCorrection();
+    const float energyCorrection = this->energyBiasCorrection();
     const float oneMinusFast = 1.0f - this->fastBeta;
     const float oneMinusSlow = 1.0f - this->slowBeta;
     cudaStream_t stream = CudaMatmul::activeStream();
@@ -1238,6 +1273,7 @@ void CudaSpulse::prepareHostDeltaInPlace(
             this->slowBeta,
             oneMinusFast,
             oneMinusSlow,
+            energyCorrection,
             this->epsilon,
             this->scaleMin,
             this->scaleMax);
@@ -1261,6 +1297,7 @@ void CudaSpulse::prepareHostDeltaInPlace(
             this->slowBeta,
             oneMinusFast,
             oneMinusSlow,
+            energyCorrection,
             this->epsilon,
             this->scaleMin,
             this->scaleMax);
@@ -1291,6 +1328,7 @@ void CudaSpulse::prepareHostDeltaInPlace(
             this->slowBeta,
             oneMinusFast,
             oneMinusSlow,
+            energyCorrection,
             this->epsilon,
             this->scaleMin,
             this->scaleMax);
@@ -1516,6 +1554,7 @@ void CudaSpulse::commitPendingHybridHostEnergies() {
         this->slowBeta,
         1.0f - this->fastBeta,
         1.0f - this->slowBeta,
+        this->energyBiasCorrection(),
         this->epsilon,
         this->scaleMin,
         this->scaleMax);
@@ -1544,7 +1583,8 @@ void CudaSpulse::updateHost(Matrix& parameter, SpulseState& state, const Matrix&
         this->scaleMax,
         this->weightDecay,
         gradientScale,
-        this->momentumBiasCorrection());
+        this->momentumBiasCorrection(),
+        this->energyBiasCorrection());
 }
 
 void CudaSpulse::updateHostFromHalf(
@@ -1577,7 +1617,8 @@ void CudaSpulse::updateHostFromHalf(
             this->scaleMin,
             this->scaleMax,
             this->weightDecay,
-            gradientScale);
+            gradientScale,
+            this->energyBiasCorrection());
         return;
     }
 
@@ -1599,7 +1640,8 @@ void CudaSpulse::updateHostFromHalf(
         this->scaleMax,
         this->weightDecay,
         gradientScale,
-        this->momentumBiasCorrection());
+        this->momentumBiasCorrection(),
+        this->energyBiasCorrection());
 }
 
 void CudaSpulse::applyFusedHalfHostPieces(const std::vector<SpulseFusedHalfHostPiece>& pieces, float gradientScale) const {

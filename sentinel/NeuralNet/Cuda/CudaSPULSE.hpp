@@ -150,6 +150,14 @@ public:
     /// <summary>1 / (1 - β^t); 1 when timeStep==0</summary>
     float momentumBiasCorrection() const;
 
+    /// <summary>
+    /// Cold-start correction for the dual-horizon ratio: <c>sqrt((1-βfast^t)/(1-βslow^t))</c>.
+    /// Both energies start at 0, but the slow horizon warms up ~1000x slower, so the raw ratio
+    /// reads far below 1 for thousands of steps and pins the step scale at <c>scaleMin</c>.
+    /// Multiplying by this is the same bias removal Adam applies to its moments.
+    /// </summary>
+    float energyBiasCorrection() const;
+
     /// <summary>true when this tensor class is owned by SPULSE under current coverage</summary>
     bool ownsHybridBlockWeights() const;
     bool ownsFullModelWeights() const;

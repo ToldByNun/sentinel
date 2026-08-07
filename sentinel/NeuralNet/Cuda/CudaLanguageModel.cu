@@ -469,6 +469,10 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
             this->spulse.learningRate = this->adam.learningRate;
             if (this->spulse.hostLightweight) {
                 // VRAM fallback: dual-horizon × grad on host (no momentum buffer).
+                if (!hostSpulseSteppedThisMicrobatch) {
+                    this->spulse.step();
+                    hostSpulseSteppedThisMicrobatch = true;
+                }
                 const float gradScale = hostAdamGradScale();
                 const float lr = this->spulse.learningRate;
                 const float mom = this->spulse.momentumBeta;
@@ -479,10 +483,13 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
                 const float sMax = this->spulse.scaleMax;
                 const float wd = this->spulse.weightDecay;
                 const SpulseCoverage coverage = this->spulse.coverage;
+                // Worker runs its own CudaSpulse; carry t so energy bias correction matches.
+                const int spulseTimeStep = this->spulse.timeStep;
                 asyncHostUpdateJobs.push_back(AsyncHostUpdateJob{
                     blockToUpdate,
-                    std::async(std::launch::async, [lr, mom, fast, slow, eps, sMin, sMax, wd, coverage, gradScale]() {
+                    std::async(std::launch::async, [lr, mom, fast, slow, eps, sMin, sMax, wd, coverage, gradScale, spulseTimeStep]() {
                         CudaSpulse local(lr, mom, fast, slow, eps, sMin, sMax, wd, coverage, true);
+                        local.timeStep = spulseTimeStep;
                         std::vector<SbaoFusedHalfHostPiece> views;
                         std::uint16_t* hostPin = nullptr;
                         if (!CudaSbao::takeReadyFusedHalfHostBatch(views, hostPin))
