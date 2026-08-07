@@ -20,6 +20,8 @@ public:
     Matrix momentum;
     float energyFast = 0.0f;
     float energySlow = 0.0f;
+    /// <summary>lagged step scale (init 1); updated after each step from dual-horizon energy</summary>
+    float scale = 1.0f;
 
     static SpulseState zerosLike(const Matrix& parameter);
     void ensure(const Matrix& parameter);

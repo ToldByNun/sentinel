@@ -926,8 +926,6 @@ void CudaLanguageModel::ensureTrainState() {
             this->hostBlockSpulseStates.clear();
             this->blockSpulseStates.resize(this->blocks.size());
             for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
-                this->blocks[blockIndex].attention.syncFusedQkvWeight();
-                this->blocks[blockIndex].feedForward.syncFusedGateUpWeight();
                 this->blockSpulseStates[blockIndex].ensureFrom(this->blocks[blockIndex]);
                 if (blockIndex < this->blockAdamStates.size())
                     this->blockAdamStates[blockIndex].freeMuonManagedWeights();
