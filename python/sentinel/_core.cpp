@@ -271,8 +271,7 @@ NB_MODULE(_core, m) {
             nb::arg("path"))
         .def(
             "load_safetensors",
-            static_cast<void (LanguageModel::*)(const std::string&)>(
-                &LanguageModel::loadSafeTensors),
+            static_cast<void (LanguageModel::*)(const std::string&)>(&LanguageModel::loadSafeTensors),
             nb::arg("path"))
         .def_static(
             "load_huggingface",

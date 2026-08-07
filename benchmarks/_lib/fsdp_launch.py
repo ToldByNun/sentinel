@@ -1,19 +1,24 @@
-"""Shared multi-process FSDP launcher.
+"""Shared FSDP launcher.
 
-PyTorch silently downgrades FULL_SHARD → NO_SHARD when world_size==1.
-Paper benches therefore always run with world_size>=2 (2 ranks on one GPU).
+- Linux: 2 ranks / 1 GPU → real FULL_SHARD (paper path).
+- Windows: FSDP forward Access-Violates on current PyTorch+WDDM+Blackwell stacks
+  (even single-process NO_SHARD). Dedicated ``benchmarks/fsdp`` fails fast;
+  ``benchmarks/pytorch`` feat uses host-Adam offload instead (see run_pytorch).
 """
 
 from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from paper_config import LEARNING_RATE, PACK_EXAMPLES, SEQ, TIMED_STEPS, WARMUP_STEPS
 
+# Default paper size (overridden per call on Windows feat).
 FSDP_WORLD_SIZE = 2
 
 
@@ -35,6 +40,28 @@ def _rank0(msg: str) -> None:
         print(f"[progress] {msg}", flush=True)
 
 
+def _force_localhost_env(master_port: str) -> None:
+    """Prefer loopback; drop elastic leftovers that advertise the machine hostname."""
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(master_port)
+    for key in (
+        "TORCHELASTIC_RUN_ID",
+        "TORCHELASTIC_USE_AGENT_STORE",
+        "PET_MASTER_ADDR",
+        "PET_MASTER_PORT",
+    ):
+        os.environ.pop(key, None)
+
+
+def _init_method(master_port: str) -> str:
+    """Windows gloo+hostname → WSAEADDRNOTAVAIL; use a local file store instead of tcp://hostname."""
+    if sys.platform.startswith("win"):
+        store = Path(tempfile.mkdtemp(prefix="torch_fsdp_")) / "pg_store"
+        # File must not exist yet; torch creates it.
+        return store.resolve().as_uri()
+    return f"tcp://127.0.0.1:{master_port}"
+
+
 def fsdp_worker(
     rank: int,
     world_size: int,
@@ -47,6 +74,8 @@ def fsdp_worker(
     memory_efficient: bool,
     master_port: str,
     result_list: Any,
+    require_full_shard: bool,
+    init_method: str,
 ) -> None:
     import torch
     import torch.distributed as dist
@@ -57,8 +86,7 @@ def fsdp_worker(
     from common import gpu_used_mib, host_rss_mib, is_oom
     from torch_model import Block, PaperLM, make_batch, param_count
 
-    os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = master_port
+    _force_localhost_env(master_port)
     os.environ["RANK"] = str(rank)
     os.environ["LOCAL_RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
@@ -67,9 +95,14 @@ def fsdp_worker(
     if torch.cuda.is_available():
         torch.cuda.set_device(0)
 
-    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
-    if dist.get_world_size() < 2:
-        raise RuntimeError("FSDP paper bench requires world_size>=2 for FULL_SHARD")
+    dist.init_process_group(
+        backend=backend,
+        init_method=init_method,
+        rank=rank,
+        world_size=world_size,
+    )
+    if require_full_shard and dist.get_world_size() < 2:
+        raise RuntimeError("FSDP FULL_SHARD paper bench requires world_size>=2")
 
     per_rank_batch = max(1, PACK_EXAMPLES // world_size)
     status = "fail"
@@ -106,9 +139,12 @@ def fsdp_worker(
         except Exception:
             auto_wrap = None
 
+        strategy = (
+            ShardingStrategy.FULL_SHARD if world_size > 1 else ShardingStrategy.NO_SHARD
+        )
         model = FSDP(
             model,
-            sharding_strategy=ShardingStrategy.FULL_SHARD,
+            sharding_strategy=strategy,
             mixed_precision=mp,
             cpu_offload=cpu_offload,
             auto_wrap_policy=auto_wrap,
@@ -116,7 +152,7 @@ def fsdp_worker(
             use_orig_params=True,
         )
         sharding_name = str(getattr(model, "sharding_strategy", "unknown"))
-        if "NO_SHARD" in sharding_name.upper():
+        if require_full_shard and "NO_SHARD" in sharding_name.upper():
             raise RuntimeError(
                 f"FSDP fell back to {sharding_name} (world_size={dist.get_world_size()}). "
                 "FULL_SHARD required for this paper bench."
@@ -140,19 +176,22 @@ def fsdp_worker(
             _rank0(f"warmup {i + 1}/{WARMUP_STEPS}")
             one_step()
             torch.cuda.synchronize()
-            dist.barrier()
+            if world_size > 1:
+                dist.barrier()
             if rank == 0:
                 peak_vram = max(peak_vram, gpu_used_mib() or 0.0)
                 host_ram = max(host_ram, host_rss_mib() or 0.0)
 
-        dist.barrier()
+        if world_size > 1:
+            dist.barrier()
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         for i in range(TIMED_STEPS):
             _rank0(f"timed {i + 1}/{TIMED_STEPS}")
             one_step()
         torch.cuda.synchronize()
-        dist.barrier()
+        if world_size > 1:
+            dist.barrier()
         elapsed = time.perf_counter() - t0
 
         tokens = SEQ * per_rank_batch * world_size * TIMED_STEPS
@@ -199,12 +238,54 @@ def run_fsdp_multiprocess(
     gradient_checkpointing: bool,
     memory_efficient: bool,
     master_port: str = "29533",
+    require_full_shard: bool = True,
 ) -> FsdpResult:
     import torch
     import torch.multiprocessing as mp
 
     if not torch.cuda.is_available():
         return FsdpResult(status="fail", error="CUDA unavailable")
+
+    # Windows: FSDP forward AVs on current stacks (even tiny Linear + NO_SHARD).
+    if sys.platform.startswith("win"):
+        return FsdpResult(
+            status="fail",
+            error=(
+                "FSDP is not usable on Windows with current PyTorch/WDDM/Blackwell "
+                "(Access Violation on forward, even single-process). "
+                "Run benchmarks/fsdp on Linux, or benchmarks/pytorch feat "
+                "(host Adam offload on Windows)."
+            ),
+        )
+
+    if require_full_shard:
+        world_size = 2
+    else:
+        world_size = 2  # pytorch feat on Linux: FULL_SHARD via 2 ranks / 1 GPU
+
+    _force_localhost_env(master_port)
+    init_method = _init_method(master_port)
+
+    if world_size == 1:
+        result_list: list = []
+        fsdp_worker(
+            0,
+            world_size,
+            vocab,
+            embedding_dim,
+            block_count,
+            head_count,
+            max_pos,
+            gradient_checkpointing,
+            memory_efficient,
+            master_port,
+            result_list,
+            require_full_shard=False,
+            init_method=init_method,
+        )
+        if not result_list:
+            return FsdpResult(status="fail", error="FSDP worker returned no result")
+        return FsdpResult(**dict(result_list[0]))
 
     try:
         mp.set_start_method("spawn", force=True)
@@ -216,7 +297,7 @@ def run_fsdp_multiprocess(
     mp.spawn(
         fsdp_worker,
         args=(
-            FSDP_WORLD_SIZE,
+            world_size,
             vocab,
             embedding_dim,
             block_count,
@@ -226,8 +307,10 @@ def run_fsdp_multiprocess(
             memory_efficient,
             master_port,
             result_list,
+            True,
+            init_method,
         ),
-        nprocs=FSDP_WORLD_SIZE,
+        nprocs=world_size,
         join=True,
     )
     if not result_list:

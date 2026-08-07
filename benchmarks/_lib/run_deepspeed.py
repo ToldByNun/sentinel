@@ -42,14 +42,26 @@ def _import_deepspeed():
     try:
         import deepspeed
     except ImportError as ex:
+        py = f"{sys.version_info.major}{sys.version_info.minor}"
+        win_hint = ""
+        if sys.platform.startswith("win"):
+            win_hint = (
+                "\nOn Windows, plain `pip install deepspeed` often builds from sdist and fails. "
+                f"Install a published Windows wheel, e.g.:\n"
+                f"  python -m pip install deepspeed==0.16.3\n"
+                f"  # or pin the cp{py} wheel from https://pypi.org/project/deepspeed/0.16.3/#files\n"
+                "If pip still picks an sdist: "
+                "$env:DS_BUILD_OPS=0; python -m pip install deepspeed==0.16.3 --only-binary=:all:"
+            )
         raise ImportError(
-            "DeepSpeed is not installed. Install with: pip install deepspeed"
+            "DeepSpeed is not installed. Install with: pip install deepspeed" + win_hint
         ) from ex
 
     if not hasattr(deepspeed, "initialize"):
         raise RuntimeError(
             f"Imported wrong module named deepspeed from {getattr(deepspeed, '__file__', deepspeed)!r}. "
-            "Remove/rename benchmarks folders that shadow the package, or fix PYTHONPATH."
+            "Remove/rename benchmarks folders that shadow the package, or fix PYTHONPATH. "
+            "Run via `python benchmarks/deepspeed/1B.py` from repo root, not by importing the folder."
         )
     return deepspeed
 
@@ -71,24 +83,61 @@ def _ds_config(*, memory_efficient: bool) -> dict:
         "steps_per_print": 10_000_000,
         "optimizer": {
             "type": "Adam",
-            "params": {"lr": LEARNING_RATE, "betas": [0.9, 0.999], "eps": 1e-8, "weight_decay": 0.0},
+            "params": {
+                "lr": LEARNING_RATE,
+                "betas": [0.9, 0.999],
+                "eps": 1e-8,
+                "weight_decay": 0.0,
+                # Avoid DeepSpeedCPUAdam fused op (Windows wheels often mismatch torch).
+                "torch_adam": True,
+            },
         },
         "fp16": {"enabled": True, "loss_scale": 0, "initial_scale_power": 16},
         "zero_optimization": zero,
+        # Required when torch_adam=True with ZeRO-Offload.
+        "zero_force_ds_cpu_optimizer": False,
         "wall_clock_breakdown": False,
     }
 
 
 def _setup_single_gpu_dist(deepspeed) -> None:
-    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    # Windows gloo + machine hostname → WSAEADDRNOTAVAIL (10049); force loopback + file store.
+    import tempfile
+    from pathlib import Path
+
+    import torch.distributed as dist
+
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ.setdefault("MASTER_PORT", "29522")
     os.environ.setdefault("RANK", "0")
     os.environ.setdefault("LOCAL_RANK", "0")
     os.environ.setdefault("WORLD_SIZE", "1")
-    # DeepSpeed/torch distributed on Windows typically needs gloo.
+    for key in (
+        "TORCHELASTIC_RUN_ID",
+        "TORCHELASTIC_USE_AGENT_STORE",
+        "PET_MASTER_ADDR",
+        "PET_MASTER_PORT",
+    ):
+        os.environ.pop(key, None)
+
+    if dist.is_available() and dist.is_initialized():
+        progress("distributed already initialized")
+        return
+
     backend = "nccl" if sys.platform.startswith("linux") else "gloo"
-    progress(f"deepspeed.init_distributed backend={backend}")
-    deepspeed.init_distributed(dist_backend=backend)
+    if sys.platform.startswith("win"):
+        store = Path(tempfile.mkdtemp(prefix="ds_pg_")) / "store"
+        init_method = store.resolve().as_uri()
+        progress(f"torch.distributed.init_process_group backend={backend} init_method=file://…")
+        dist.init_process_group(
+            backend=backend,
+            init_method=init_method,
+            rank=0,
+            world_size=1,
+        )
+    else:
+        progress(f"deepspeed.init_distributed backend={backend} MASTER_ADDR=127.0.0.1")
+        deepspeed.init_distributed(dist_backend=backend)
 
 
 def run(model_id: str, profile: ProfileName = "fair") -> int:
@@ -110,6 +159,20 @@ def run(model_id: str, profile: ProfileName = "fair") -> int:
     tok_s = peak_vram = host_ram = step_ms = None
     status = "fail"
     try:
+        # DeepSpeedEngine.backward Access-Violates on native Windows + current
+        # torch/Blackwell stacks (repro'd on tiny Linear, ZeRO-0/2/3). Install works;
+        # training does not — use Linux/WSL for DeepSpeed paper cells.
+        if sys.platform.startswith("win"):
+            status = "na"
+            raise RuntimeError(
+                "DeepSpeed training is not usable on native Windows with this "
+                "PyTorch/WDDM/Blackwell stack (Access Violation in "
+                "DeepSpeedEngine.backward). Package install: "
+                "powershell benchmarks/install_deepspeed_windows.ps1 — "
+                "run DeepSpeed benches under WSL2/Linux. "
+                "Windows pytorch feat uses FP16+host Adam instead."
+            )
+
         deepspeed = _import_deepspeed()
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA unavailable")
@@ -167,7 +230,8 @@ def run(model_id: str, profile: ProfileName = "fair") -> int:
         status = "success"
         progress(f"finished OK tok/s={tok_s:.0f}")
     except Exception as ex:
-        status = "oom" if is_oom(ex) else "fail"
+        if status != "na":
+            status = "oom" if is_oom(ex) else "fail"
         peak_vram = max(peak_vram or 0.0, gpu_used_mib() or 0.0) if peak_vram is not None else gpu_used_mib()
         host_ram = max(host_ram or 0.0, host_rss_mib() or 0.0) if host_ram is not None else host_rss_mib()
         progress(f"{status}: {ex}")

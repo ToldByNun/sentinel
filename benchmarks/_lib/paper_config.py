@@ -10,7 +10,7 @@ Profiles (same meaning for every size):
          GPU: FP16 weights + activations (checkpointed)
          CPU: gradients + optimizer / masters
          Sentinel: host-SGD offload | DeepSpeed: ZeRO-Offload | FSDP: CPU offload
-         PyTorch single-GPU: no equivalent → status na
+         PyTorch: FSDP+CPUOffload on Linux; host-Adam offload on Windows (FSDP AV)
 
 OOM / na are valid paper cells.
 """
