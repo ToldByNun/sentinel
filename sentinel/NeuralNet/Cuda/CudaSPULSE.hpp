@@ -15,7 +15,7 @@ class CudaTransformerBlockGradients;
 class CudaSpulseState {
 public:
     CudaMatrix momentum;
-    /// <summary>device buffer: [0]=e_fast, [1]=e_slow</summary>
+    /// <summary>device buffer: [0]=e_fast, [1]=e_slow, [2]=lagged scale</summary>
     CudaDeviceBuffer energy;
 
     CudaSpulseState() = default;
@@ -28,12 +28,15 @@ public:
     void uploadFrom(const SpulseState& host);
 };
 
-/// <summary>device SPULSE state for hidden 2D weights in one block (fused QKV / gateUp)</summary>
+/// <summary>device SPULSE state for hidden 2D weights in one block (per-tensor; no fuse memcpy)</summary>
 class CudaTransformerBlockSpulseStates {
 public:
-    CudaSpulseState qkvWeight;
+    CudaSpulseState queryWeight;
+    CudaSpulseState keyWeight;
+    CudaSpulseState valueWeight;
     CudaSpulseState attentionOutputWeight;
-    CudaSpulseState feedForwardGateUpWeight;
+    CudaSpulseState feedForwardGateWeight;
+    CudaSpulseState feedForwardUpWeight;
     CudaSpulseState feedForwardDownWeight;
 
     void ensureFrom(const CudaTransformerBlock& block);

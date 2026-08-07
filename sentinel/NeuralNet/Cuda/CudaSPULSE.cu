@@ -78,7 +78,75 @@ __global__ void spulseSumSquaresScaled(
         atomicAdd(outSum, shared[0]);
 }
 
-/// <summary>1-thread: energy EMA + write scale into energy[2] scratch slot via outScale</summary>
+/// <summary>
+/// Fused step: momentum + apply with lagged scale (energy[2]) + accumulate ||g||².
+/// Follow with spulseCommitEnergyAndScale to refresh energy/scale for the next step.
+/// energy layout: [0]=e_fast, [1]=e_slow, [2]=scale
+/// </summary>
+__global__ void spulseFusedStep(
+    float* parameter,
+    float* momentum,
+    const float* gradient,
+    const float* energy,
+    float* sumSquares,
+    int elementCount,
+    float momentumBeta,
+    float oneMinusMom,
+    float gradientScale,
+    float learningRate,
+    float keep
+) {
+    __shared__ float shared[256];
+    const float stepScale = energy[2];
+    float local = 0.0f;
+    for (int index = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+         index < elementCount;
+         index += static_cast<int>(blockDim.x * gridDim.x)) {
+        const float g = gradient[index] * gradientScale;
+        const float m = momentumBeta * momentum[index] + oneMinusMom * g;
+        momentum[index] = m;
+        float value = parameter[index];
+        if (keep != 1.0f)
+            value *= keep;
+        parameter[index] = value - learningRate * stepScale * m;
+        local += g * g;
+    }
+    shared[threadIdx.x] = local;
+    __syncthreads();
+    for (int stride = static_cast<int>(blockDim.x) / 2; stride > 0; stride >>= 1) {
+        if (static_cast<int>(threadIdx.x) < stride)
+            shared[threadIdx.x] += shared[threadIdx.x + stride];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0)
+        atomicAdd(sumSquares, shared[0]);
+}
+
+/// <summary>1-thread: energy EMA + write next lagged scale into energy[2]</summary>
+__global__ void spulseCommitEnergyAndScale(
+    float* energy,
+    const float* sumSquares,
+    float fastBeta,
+    float slowBeta,
+    float oneMinusFast,
+    float oneMinusSlow,
+    float epsilon,
+    float scaleMin,
+    float scaleMax
+) {
+    float eFast = energy[0];
+    float eSlow = energy[1];
+    const float g2 = *sumSquares;
+    eFast = fastBeta * eFast + oneMinusFast * g2;
+    eSlow = slowBeta * eSlow + oneMinusSlow * g2;
+    energy[0] = eFast;
+    energy[1] = eSlow;
+    float scale = sqrtf(eSlow / (eFast + epsilon));
+    if (scale < scaleMin) scale = scaleMin;
+    if (scale > scaleMax) scale = scaleMax;
+    energy[2] = scale;
+}
+
 __global__ void spulseUpdateEnergyAndScale(
     float* energy,
     const float* sumSquares,
@@ -125,6 +193,7 @@ void hostUpdateCore(
     float* momentum,
     float& energyFast,
     float& energySlow,
+    float& scale,
     const float* gradient,
     size_t elementCount,
     float learningRate,
@@ -140,23 +209,22 @@ void hostUpdateCore(
     const float oneMinusMom = 1.0f - momentumBeta;
     const float oneMinusFast = 1.0f - fastBeta;
     const float oneMinusSlow = 1.0f - slowBeta;
+    const float stepScale = scale;
     float sumSquares = 0.0f;
+    const float keep = 1.0f - learningRate * weightDecay;
+    const float step = learningRate * stepScale;
     for (size_t i = 0; i < elementCount; ++i) {
         const float g = gradient[i] * gradientScale;
         momentum[i] = momentumBeta * momentum[i] + oneMinusMom * g;
         sumSquares += g * g;
-    }
-    energyFast = fastBeta * energyFast + oneMinusFast * sumSquares;
-    energySlow = slowBeta * energySlow + oneMinusSlow * sumSquares;
-    const float scale = computeScale(energyFast, energySlow, epsilon, scaleMin, scaleMax);
-    const float keep = 1.0f - learningRate * weightDecay;
-    const float step = learningRate * scale;
-    for (size_t i = 0; i < elementCount; ++i) {
         float value = parameter[i];
         if (keep != 1.0f)
             value *= keep;
         parameter[i] = value - step * momentum[i];
     }
+    energyFast = fastBeta * energyFast + oneMinusFast * sumSquares;
+    energySlow = slowBeta * energySlow + oneMinusSlow * sumSquares;
+    scale = computeScale(energyFast, energySlow, epsilon, scaleMin, scaleMax);
 }
 
 void hostUpdateFromHalfCore(
@@ -164,6 +232,7 @@ void hostUpdateFromHalfCore(
     float* momentum,
     float& energyFast,
     float& energySlow,
+    float& scale,
     const __half* gradHalf,
     size_t elementCount,
     float learningRate,
@@ -179,23 +248,22 @@ void hostUpdateFromHalfCore(
     const float oneMinusMom = 1.0f - momentumBeta;
     const float oneMinusFast = 1.0f - fastBeta;
     const float oneMinusSlow = 1.0f - slowBeta;
+    const float stepScale = scale;
     float sumSquares = 0.0f;
+    const float keep = 1.0f - learningRate * weightDecay;
+    const float step = learningRate * stepScale;
     for (size_t i = 0; i < elementCount; ++i) {
         const float g = gradientScale * __half2float(gradHalf[i]);
         momentum[i] = momentumBeta * momentum[i] + oneMinusMom * g;
         sumSquares += g * g;
-    }
-    energyFast = fastBeta * energyFast + oneMinusFast * sumSquares;
-    energySlow = slowBeta * energySlow + oneMinusSlow * sumSquares;
-    const float scale = computeScale(energyFast, energySlow, epsilon, scaleMin, scaleMax);
-    const float keep = 1.0f - learningRate * weightDecay;
-    const float step = learningRate * scale;
-    for (size_t i = 0; i < elementCount; ++i) {
         float value = parameter[i];
         if (keep != 1.0f)
             value *= keep;
         parameter[i] = value - step * momentum[i];
     }
+    energyFast = fastBeta * energyFast + oneMinusFast * sumSquares;
+    energySlow = slowBeta * energySlow + oneMinusSlow * sumSquares;
+    scale = computeScale(energyFast, energySlow, epsilon, scaleMin, scaleMax);
 }
 
 } // namespace
@@ -213,8 +281,12 @@ void CudaSpulseState::ensure(const CudaMatrix& parameter) {
         return;
     this->momentum.ensureSize(parameter.rows, parameter.cols);
     CudaOps::zeroInPlace(this->momentum);
-    this->energy.ensureCapacity(2 * sizeof(float));
-    CudaMatmul::memsetDevice(this->energy.deviceData, 0, 2 * sizeof(float));
+    // [0]=e_fast, [1]=e_slow, [2]=lagged scale (init 1)
+    this->energy.ensureCapacity(3 * sizeof(float));
+    const float init[3] = {0.0f, 0.0f, 1.0f};
+    throwIfFailed(
+        cudaMemcpy(this->energy.deviceData, init, 3 * sizeof(float), cudaMemcpyHostToDevice),
+        "CudaSpulseState::ensure energy init");
 }
 
 void CudaSpulseState::free() {
@@ -228,14 +300,15 @@ void CudaSpulseState::downloadInto(SpulseState& host) const {
         return;
     }
     this->momentum.downloadInto(host.momentum);
-    float energyHost[2] = {0.0f, 0.0f};
+    float energyHost[3] = {0.0f, 0.0f, 1.0f};
     if (this->energy.deviceData != nullptr) {
         throwIfFailed(
-            cudaMemcpy(energyHost, this->energy.deviceData, 2 * sizeof(float), cudaMemcpyDeviceToHost),
+            cudaMemcpy(energyHost, this->energy.deviceData, 3 * sizeof(float), cudaMemcpyDeviceToHost),
             "CudaSpulseState::downloadInto energy");
     }
     host.energyFast = energyHost[0];
     host.energySlow = energyHost[1];
+    host.scale = energyHost[2];
 }
 
 void CudaSpulseState::uploadFrom(const SpulseState& host) {
@@ -244,26 +317,30 @@ void CudaSpulseState::uploadFrom(const SpulseState& host) {
         return;
     }
     this->momentum.upload(host.momentum);
-    this->energy.ensureCapacity(2 * sizeof(float));
-    const float energyHost[2] = {host.energyFast, host.energySlow};
+    this->energy.ensureCapacity(3 * sizeof(float));
+    const float energyHost[3] = {host.energyFast, host.energySlow, host.scale};
     throwIfFailed(
-        cudaMemcpy(this->energy.deviceData, energyHost, 2 * sizeof(float), cudaMemcpyHostToDevice),
+        cudaMemcpy(this->energy.deviceData, energyHost, 3 * sizeof(float), cudaMemcpyHostToDevice),
         "CudaSpulseState::uploadFrom energy");
 }
 
 void CudaTransformerBlockSpulseStates::ensureFrom(const CudaTransformerBlock& block) {
-    if (block.attention.qkvWeight.empty() || block.feedForward.gateUpWeight.empty())
-        throw std::logic_error("CudaTransformerBlockSpulseStates::ensureFrom requires fused QKV/gateUp weights");
-    this->qkvWeight.ensure(block.attention.qkvWeight);
+    this->queryWeight.ensure(block.attention.queryWeight);
+    this->keyWeight.ensure(block.attention.keyWeight);
+    this->valueWeight.ensure(block.attention.valueWeight);
     this->attentionOutputWeight.ensure(block.attention.outputWeight);
-    this->feedForwardGateUpWeight.ensure(block.feedForward.gateUpWeight);
+    this->feedForwardGateWeight.ensure(block.feedForward.gateWeight);
+    this->feedForwardUpWeight.ensure(block.feedForward.upWeight);
     this->feedForwardDownWeight.ensure(block.feedForward.downWeight);
 }
 
 void CudaTransformerBlockSpulseStates::free() {
-    this->qkvWeight.free();
+    this->queryWeight.free();
+    this->keyWeight.free();
+    this->valueWeight.free();
     this->attentionOutputWeight.free();
-    this->feedForwardGateUpWeight.free();
+    this->feedForwardGateWeight.free();
+    this->feedForwardUpWeight.free();
     this->feedForwardDownWeight.free();
 }
 
@@ -331,37 +408,32 @@ void CudaSpulse::update(CudaMatrix& parameter, CudaSpulseState& state, const Cud
 
     const int elementCount = static_cast<int>(parameter.elementCount());
     const int threads = 256;
-    const int blocks = elementwiseBlocks(elementCount, threads);
+    const int blocks = (std::min)(1024, elementwiseBlocks(elementCount, threads));
     const float oneMinusMom = 1.0f - this->momentumBeta;
+    const float keep = 1.0f - this->learningRate * this->weightDecay;
     cudaStream_t stream = CudaMatmul::activeStream();
 
-    spulseLerpMomentum<<<blocks, threads, 0, stream>>>(
+    this->sumSquaresScratch.ensureCapacity(sizeof(float));
+    float* sumSquares = this->sumSquaresScratch.deviceData;
+    CudaMatmul::memsetDevice(sumSquares, 0, sizeof(float));
+
+    spulseFusedStep<<<blocks, threads, 0, stream>>>(
+        parameter.buffer.deviceData,
         state.momentum.buffer.deviceData,
         gradient.buffer.deviceData,
+        state.energy.deviceData,
+        sumSquares,
         elementCount,
         this->momentumBeta,
         oneMinusMom,
-        gradientScale);
-    throwIfFailed(cudaGetLastError(), "spulseLerpMomentum");
-
-    // sumSquaresScratch: [0]=sumSquares, [1]=scale
-    this->sumSquaresScratch.ensureCapacity(2 * sizeof(float));
-    float* sumSquares = this->sumSquaresScratch.deviceData;
-    float* scale = this->sumSquaresScratch.deviceData + 1;
-    CudaMatmul::memsetDevice(sumSquares, 0, sizeof(float));
-
-    const int reduceBlocks = (std::min)(1024, blocks);
-    spulseSumSquaresScaled<<<reduceBlocks, threads, 0, stream>>>(
-        gradient.buffer.deviceData,
-        elementCount,
         gradientScale,
-        sumSquares);
-    throwIfFailed(cudaGetLastError(), "spulseSumSquaresScaled");
+        this->learningRate,
+        keep);
+    throwIfFailed(cudaGetLastError(), "spulseFusedStep");
 
-    spulseUpdateEnergyAndScale<<<1, 1, 0, stream>>>(
+    spulseCommitEnergyAndScale<<<1, 1, 0, stream>>>(
         state.energy.deviceData,
         sumSquares,
-        scale,
         this->fastBeta,
         this->slowBeta,
         1.0f - this->fastBeta,
@@ -369,17 +441,7 @@ void CudaSpulse::update(CudaMatrix& parameter, CudaSpulseState& state, const Cud
         this->epsilon,
         this->scaleMin,
         this->scaleMax);
-    throwIfFailed(cudaGetLastError(), "spulseUpdateEnergyAndScale");
-
-    const float keep = 1.0f - this->learningRate * this->weightDecay;
-    spulseApply<<<blocks, threads, 0, stream>>>(
-        parameter.buffer.deviceData,
-        state.momentum.buffer.deviceData,
-        scale,
-        elementCount,
-        this->learningRate,
-        keep);
-    throwIfFailed(cudaGetLastError(), "spulseApply");
+    throwIfFailed(cudaGetLastError(), "spulseCommitEnergyAndScale");
 }
 
 void CudaSpulse::updateHost(Matrix& parameter, SpulseState& state, const Matrix& gradient, float gradientScale) const {
@@ -392,6 +454,7 @@ void CudaSpulse::updateHost(Matrix& parameter, SpulseState& state, const Matrix&
         state.momentum.data.data(),
         state.energyFast,
         state.energySlow,
+        state.scale,
         gradient.data.data(),
         parameter.data.size(),
         this->learningRate,
@@ -422,6 +485,7 @@ void CudaSpulse::updateHostFromHalf(
         state.momentum.data.data(),
         state.energyFast,
         state.energySlow,
+        state.scale,
         reinterpret_cast<const __half*>(gradHalf),
         elementCount,
         this->learningRate,
@@ -454,30 +518,14 @@ void CudaSpulse::applyHybridBlockWeights(
 ) {
     if (!this->ownsHybridBlockWeights()) return;
 
-    // Fused QKV: one SPULSE update for Q/K/V
-    block.attention.syncFusedQkvWeight();
-    block.attention.qkvWeightGradient.ensureSize(block.attention.qkvWeight.rows, block.attention.qkvWeight.cols);
-    const size_t qSliceBytes = block.attention.queryWeight.byteCount();
-    CudaMatmul::memcpyDevice(block.attention.qkvWeightGradient.buffer.deviceData, blockGradients.queryWeight.buffer.deviceData, qSliceBytes);
-    CudaMatmul::memcpyDevice(block.attention.qkvWeightGradient.buffer.deviceData + block.attention.queryWeight.elementCount(), blockGradients.keyWeight.buffer.deviceData, qSliceBytes);
-    CudaMatmul::memcpyDevice(block.attention.qkvWeightGradient.buffer.deviceData + 2ull * block.attention.queryWeight.elementCount(), blockGradients.valueWeight.buffer.deviceData, qSliceBytes);
-    this->update(block.attention.qkvWeight, spulseStates.qkvWeight, block.attention.qkvWeightGradient, gradientScale);
-    CudaMatmul::memcpyDevice(block.attention.queryWeight.buffer.deviceData, block.attention.qkvWeight.buffer.deviceData, qSliceBytes);
-    CudaMatmul::memcpyDevice(block.attention.keyWeight.buffer.deviceData, block.attention.qkvWeight.buffer.deviceData + block.attention.queryWeight.elementCount(), qSliceBytes);
-    CudaMatmul::memcpyDevice(block.attention.valueWeight.buffer.deviceData, block.attention.qkvWeight.buffer.deviceData + 2ull * block.attention.queryWeight.elementCount(), qSliceBytes);
-
+    // Per-tensor updates (no QKV/gateUp fuse memcpy — that was Muon-only overhead).
+    // Fused mirrors are refreshed by CudaLanguageModel::applyGradients → syncFusedMirrors.
+    this->update(block.attention.queryWeight, spulseStates.queryWeight, blockGradients.queryWeight, gradientScale);
+    this->update(block.attention.keyWeight, spulseStates.keyWeight, blockGradients.keyWeight, gradientScale);
+    this->update(block.attention.valueWeight, spulseStates.valueWeight, blockGradients.valueWeight, gradientScale);
     this->update(block.attention.outputWeight, spulseStates.attentionOutputWeight, blockGradients.attentionOutputWeight, gradientScale);
-
-    // Fused gate+up
-    block.feedForward.syncFusedGateUpWeight();
-    block.feedForward.gateUpWeightGradient.ensureSize(block.feedForward.gateUpWeight.rows, block.feedForward.gateUpWeight.cols);
-    const size_t gateSliceBytes = block.feedForward.gateWeight.byteCount();
-    CudaMatmul::memcpyDevice(block.feedForward.gateUpWeightGradient.buffer.deviceData, blockGradients.feedForwardGateWeight.buffer.deviceData, gateSliceBytes);
-    CudaMatmul::memcpyDevice(block.feedForward.gateUpWeightGradient.buffer.deviceData + block.feedForward.gateWeight.elementCount(), blockGradients.feedForwardUpWeight.buffer.deviceData, block.feedForward.upWeight.byteCount());
-    this->update(block.feedForward.gateUpWeight, spulseStates.feedForwardGateUpWeight, block.feedForward.gateUpWeightGradient, gradientScale);
-    CudaMatmul::memcpyDevice(block.feedForward.gateWeight.buffer.deviceData, block.feedForward.gateUpWeight.buffer.deviceData, gateSliceBytes);
-    CudaMatmul::memcpyDevice(block.feedForward.upWeight.buffer.deviceData, block.feedForward.gateUpWeight.buffer.deviceData + block.feedForward.gateWeight.elementCount(), block.feedForward.upWeight.byteCount());
-
+    this->update(block.feedForward.gateWeight, spulseStates.feedForwardGateWeight, blockGradients.feedForwardGateWeight, gradientScale);
+    this->update(block.feedForward.upWeight, spulseStates.feedForwardUpWeight, blockGradients.feedForwardUpWeight, gradientScale);
     this->update(block.feedForward.downWeight, spulseStates.feedForwardDownWeight, blockGradients.feedForwardDownWeight, gradientScale);
 }
 

@@ -254,6 +254,121 @@ int main() {
     }
 #endif
 
+    // Temporary: Adam vs SPULSE head-to-head tok/s (+ apply breakdown). Flip false after check.
+    const bool runSpulseThroughputCompare = true;
+
+    if (runSpulseThroughputCompare) {
+        SmokeLog::section("SPULSE vs Adam throughput");
+        if (!CudaMatmul::isAvailable()) {
+            SmokeLog::skip("SPULSE vs Adam (no CUDA)");
+            return 1;
+        }
+        try {
+            const int vocab = 16000;
+            const int embed = 768;
+            const int blocks = 12;
+            const int heads = 12;
+            const int pos = 512;
+            const int probeSeq = 256;
+            const int warmup = 3;
+            const int timed = 8;
+
+            auto resetGlobals = []() {
+                CudaAmp::clearMasterWeights();
+                CudaAmp::preferMixedPrecision = true;
+                CudaAmp::useLossScaling = true;
+                CudaAmp::resetLossScaler();
+                CudaAdam::preferCpuOffload = false;
+                CudaAdam::preferFp16GpuWeights = false;
+                CudaAdam::preferHostGradients = false;
+                CudaAdam::preferHostSgd = false;
+                CudaAdam::preferInt8Moments = true;
+                CudaSbao::enabled = false;
+                cudaGetLastError();
+            };
+
+            auto runConfig = [&](const char* label, bool spulse) -> double {
+                resetGlobals();
+                LanguageModel model(vocab, embed, pos, Adam(0.001f), blocks, heads);
+                model.enableCuda();
+                model.setCudaPreferCpuAdamOffload(false);
+                model.setCudaPreferInt8AdamMoments(true);
+                model.setCudaPreferFlashAttention(true);
+                model.setCudaPreferMuon(false);
+                model.setCudaPreferSpulse(spulse);
+                model.enableCudaTrain();
+                model.setActivationCheckpointMode(ActivationCheckpointMode::Off);
+                model.setCudaPreferTrainGraph(false);
+                model.applyCudaVramPackBudget();
+
+                size_t freeBytes = 0;
+                size_t totalBytes = 0;
+                cudaMemGetInfo(&freeBytes, &totalBytes);
+                const double tok = model.probeCudaPackedTrainTokensPerSecond(probeSeq, warmup, timed);
+                model.probeCudaTrainStepProfile(probeSeq, 2, 4);
+                SmokeLog::result(
+                    label,
+                    "spulse=%s  params=%.2fM  maxPackCols=%d  freeMiB=%.0f  tokens/s=%.0f",
+                    spulse ? "on" : "off",
+                    static_cast<double>(model.parameterElementCount()) / 1.0e6,
+                    model.cudaMaxPackedColumns(),
+                    static_cast<double>(freeBytes) / (1024.0 * 1024.0),
+                    tok);
+                return tok;
+            };
+
+            const double adamTok = runConfig("adam int8 ckpt-off", false);
+            const double spulseTok = runConfig("spulse hybrid ckpt-off", true);
+            const double ratio = adamTok > 0.0 ? (spulseTok / adamTok) : 0.0;
+            SmokeLog::result(
+                "SPULSE/Adam ratio",
+                "adam=%.0f  spulse=%.0f  ratio=%.3f  (%s)",
+                adamTok,
+                spulseTok,
+                ratio,
+                ratio >= 1.0 ? "SPULSE faster" : "Adam faster");
+
+            // Same shape as speed-bench 8×768 selective for a second point.
+            {
+                resetGlobals();
+                auto runSmall = [&](const char* label, bool spulse) -> double {
+                    LanguageModel model(4000, 768, 512, Adam(0.001f), 8, 12);
+                    model.enableCuda();
+                    model.setCudaPreferCpuAdamOffload(false);
+                    model.setCudaPreferInt8AdamMoments(true);
+                    model.setCudaPreferFlashAttention(true);
+                    model.setCudaPreferMuon(false);
+                    model.setCudaPreferSpulse(spulse);
+                    model.enableCudaTrain();
+                    model.setActivationCheckpointMode(ActivationCheckpointMode::Selective);
+                    model.setCudaPreferTrainGraph(false);
+                    model.applyCudaVramPackBudget();
+                    const double tok = model.probeCudaPackedTrainTokensPerSecond(256, 2, 8);
+                    SmokeLog::result(
+                        label,
+                        "spulse=%s  params=%.2fM  maxPackCols=%d  tokens/s=%.0f",
+                        spulse ? "on" : "off",
+                        static_cast<double>(model.parameterElementCount()) / 1.0e6,
+                        model.cudaMaxPackedColumns(),
+                        tok);
+                    return tok;
+                };
+                const double a = runSmall("adam 8x768 selective", false);
+                const double s = runSmall("spulse 8x768 selective", true);
+                SmokeLog::result(
+                    "8x768 SPULSE/Adam",
+                    "adam=%.0f  spulse=%.0f  ratio=%.3f",
+                    a,
+                    s,
+                    a > 0.0 ? s / a : 0.0);
+            }
+            return 0;
+        } catch (const std::exception& ex) {
+            SmokeLog::result("SPULSE vs Adam", "FAILED: %s", ex.what());
+            return 1;
+        }
+    }
+
     const bool runSmokes = false;
     const bool runSpeedBench = false;
     const bool runGate40k = false;

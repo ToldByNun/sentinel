@@ -17,10 +17,12 @@ void SpulseState::ensure(const Matrix& parameter) {
     this->momentum.fill(0.0f);
     this->energyFast = 0.0f;
     this->energySlow = 0.0f;
+    this->scale = 1.0f;
 }
 
 void SpulseState::clear() {
     this->momentum = Matrix();
     this->energyFast = 0.0f;
     this->energySlow = 0.0f;
+    this->scale = 1.0f;
 }
