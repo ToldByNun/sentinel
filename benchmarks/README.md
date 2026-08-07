@@ -14,14 +14,16 @@ Workload ([`_lib/paper_config.py`](_lib/paper_config.py)): vocab 32k · **256×1
 | Lib | fair | feat |
 | --- | ---- | ---- |
 | Sentinel | resident Adam | FP16w + host grads + host SGD |
-| PyTorch | vanilla CUDA module | **Linux:** FSDP 2-rank FULL_SHARD + CPUOffload; **Windows:** host Adam offload (FSDP AVs on WDDM/Blackwell) |
-| DeepSpeed | `deepspeed.initialize` ZeRO-2 | ZeRO-3 + CPU offload |
+| PyTorch | vanilla CUDA module | **Linux:** FSDP 2-rank FULL_SHARD + CPUOffload; **Windows:** FP16 GPU weights + host Adam (FSDP AV) |
+| DeepSpeed | `deepspeed.initialize` ZeRO-2 | ZeRO-3 + CPU offload (**Linux/WSL**; native Windows → `na`, AV) |
 | FSDP | FULL_SHARD via **2 ranks / 1 GPU** (Linux; Windows unsupported) | + CPUOffload |
 
 ## Run
 
 ```bash
-pip install torch deepspeed   # for non-sentinel stacks
+pip install torch
+# DeepSpeed Windows install (wheel — sdist builds usually fail):
+powershell benchmarks/install_deepspeed_windows.ps1
 
 python benchmarks/sentinel/benchmark.py
 python benchmarks/pytorch/benchmark.py
@@ -30,6 +32,15 @@ python benchmarks/fsdp/benchmark.py
 
 python benchmarks/deepspeed/100M.py fair
 ```
+
+**Windows notes**
+
+| Stack | Status |
+| ----- | ------ |
+| Sentinel | OK |
+| PyTorch feat | FP16 GPU weights + host Adam (~7 GiB @ 1B; FSDP AVs) |
+| FSDP | unsupported (AV) — Linux only |
+| DeepSpeed | install via wheel OK; **training AVs** on WDDM/Blackwell → `status=na`; use WSL2/Linux for paper cells |
 
 ## Indicative Sentinel throughput (RTX 5070 Ti 16 GB)
 

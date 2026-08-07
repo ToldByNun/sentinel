@@ -86,10 +86,11 @@ def _run_fair(spec, train, hw) -> tuple:
 
 
 def _run_feat_host_adam(spec, train) -> tuple:
-    """Windows-safe feat: GPU FP16 weights + grads/Adam masters on CPU (no FSDP).
+    """Windows-safe feat: FP16 GPU weights + grads/Adam on CPU (Sentinel-like).
 
-    PyTorch FSDP forward Access-Violates on Windows + current CUDA/Blackwell builds
-    (repro'd even on tiny Linear). Host Adam mirrors Sentinel feat residency.
+    FSDP AVs on this WDDM/Blackwell stack. An FP32 module on GPU made peak VRAM
+    look like ``fair`` (~weights+grads in FP32). Mirror Sentinel feat residency:
+    FP16 weights on device, FP32 masters + Adam moments on host.
     """
     import torch
     import torch.nn as nn
@@ -97,36 +98,43 @@ def _run_feat_host_adam(spec, train) -> tuple:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA unavailable")
     device = torch.device("cuda")
+    torch.cuda.reset_peak_memory_stats()
 
-    progress("feat: host Adam offload (Windows — FSDP AV on this stack)")
-    model = PaperLM(
-        VOCAB,
-        spec.embedding_dim,
-        spec.block_count,
-        spec.head_count,
-        spec.maximum_position_count,
-        train.gradient_checkpointing,
-    ).to(device)
-    progress(f"model ready params~{param_count(model) / 1e6:.1f}M")
+    progress("feat: FP16 GPU weights + host Adam (Windows — no FSDP)")
+    model = (
+        PaperLM(
+            VOCAB,
+            spec.embedding_dim,
+            spec.block_count,
+            spec.head_count,
+            spec.maximum_position_count,
+            train.gradient_checkpointing,
+        )
+        .to(device)
+        .half()
+    )
+    progress(f"model ready params~{param_count(model) / 1e6:.1f}M dtype=fp16")
 
     gpu_params = [p for p in model.parameters() if p.requires_grad]
     cpu_masters = [nn.Parameter(p.detach().float().cpu()) for p in gpu_params]
     opt = torch.optim.Adam(cpu_masters, lr=LEARNING_RATE)
-    # GradScaler.unscale_ must see the tensors that hold .grad (GPU weights).
-    unscale_opt = torch.optim.SGD(gpu_params, lr=0.0)
-    scaler = torch.amp.GradScaler("cuda", enabled=train.fp16_amp)
+    # GradScaler.unscale_ requires FP32 .grad; FP16 weights produce FP16 grads.
+    # Loss scaling is optional for this throughput/VRAM bench — skip scaler.
 
     peak_vram = gpu_used_mib() or 0.0
     host_ram = host_rss_mib() or 0.0
+
+    def _peak() -> float:
+        alloc = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
+        return max(gpu_used_mib() or 0.0, alloc)
 
     def one_step() -> None:
         x, y = make_batch(VOCAB, PACK_EXAMPLES, SEQ, device)
         for p in gpu_params:
             p.grad = None
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=train.fp16_amp):
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
             loss = model(x, y)
-        scaler.scale(loss).backward()
-        scaler.unscale_(unscale_opt)
+        loss.float().backward()
         for master, p in zip(cpu_masters, gpu_params):
             if p.grad is None:
                 master.grad = None
@@ -135,17 +143,17 @@ def _run_feat_host_adam(spec, train) -> tuple:
                 p.grad = None
         opt.step()
         opt.zero_grad(set_to_none=True)
-        scaler.update()
         with torch.no_grad():
             for master, p in zip(cpu_masters, gpu_params):
-                p.copy_(master.to(device=p.device, dtype=p.dtype))
+                p.copy_(master.to(device=p.device, dtype=p.dtype, non_blocking=True))
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
 
     model.train()
     for i in range(WARMUP_STEPS):
         progress(f"warmup {i + 1}/{WARMUP_STEPS}")
         one_step()
-        torch.cuda.synchronize()
-        peak_vram = max(peak_vram, gpu_used_mib() or 0.0)
+        peak_vram = max(peak_vram, _peak())
         host_ram = max(host_ram, host_rss_mib() or 0.0)
 
     torch.cuda.synchronize()
@@ -158,7 +166,7 @@ def _run_feat_host_adam(spec, train) -> tuple:
     tokens = SEQ * PACK_EXAMPLES * TIMED_STEPS
     tok_s = tokens / elapsed if elapsed > 0 else 0.0
     step_ms = (elapsed / TIMED_STEPS) * 1000.0
-    peak_vram = max(peak_vram, gpu_used_mib() or 0.0)
+    peak_vram = max(peak_vram, _peak())
     host_ram = max(host_ram, host_rss_mib() or 0.0)
     return tok_s, peak_vram, host_ram, step_ms
 
