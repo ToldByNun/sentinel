@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 #include <cuda_runtime.h>
@@ -30,6 +31,41 @@
 #endif
 
 namespace {
+
+// Perf levers (opt-in, defaults preserve shipped behavior). See
+// benchmarks/perf_4b_plan.md. Each reads its env var once.
+
+/// <summary>L3: async host-SGD overlap depth. Default 4; override with
+/// SENTINEL_MAX_ASYNC_HOST_UPDATE (clamped to [1, 16]).</summary>
+int sentinelMaxAsyncHostUpdate() {
+    static const int depth = []() {
+        const char* value = std::getenv("SENTINEL_MAX_ASYNC_HOST_UPDATE");
+        if (value == nullptr || value[0] == '\0') return 4;
+        const int parsed = std::atoi(value);
+        if (parsed < 1) return 1;
+        if (parsed > 16) return 16;
+        return parsed;
+    }();
+    return depth;
+}
+
+/// <summary>L4/L5: VRAM to leave free when converting Full-ckpt layers to the
+/// cheaper selective backward (less recompute = faster, more VRAM). Default
+/// 2048 MiB; override with SENTINEL_CKPT_KEEP_FREE_MIB (clamped to [256, 8192]).
+/// Lower = more selective layers = fewer full-block recomputes.</summary>
+size_t sentinelCheckpointKeepFreeBytes() {
+    static const size_t bytes = []() -> size_t {
+        const char* value = std::getenv("SENTINEL_CKPT_KEEP_FREE_MIB");
+        long mib = 2048;
+        if (value != nullptr && value[0] != '\0') {
+            mib = std::atol(value);
+            if (mib < 256) mib = 256;
+            if (mib > 8192) mib = 8192;
+        }
+        return static_cast<size_t>(mib) * 1024ull * 1024ull;
+    }();
+    return bytes;
+}
 
 /// <summary>wait for compute stream only — avoids stalling unrelated D2H copy streams</summary>
 void syncComputeStreamForTrace(const char* label) {
@@ -372,7 +408,8 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
 
     int pendingHostUpdateBlock = -1;
     // Depth 4: host fused-half apply trails GPU bwd; freelist has 8 host/device slots.
-    constexpr int kMaxAsyncHostUpdate = 4;
+    // L3 (opt-in): SENTINEL_MAX_ASYNC_HOST_UPDATE tunes this overlap depth.
+    const int kMaxAsyncHostUpdate = sentinelMaxAsyncHostUpdate();
     struct AsyncHostUpdateJob {
         int blockIndex = -1;
         std::future<void> future;
@@ -1440,7 +1477,9 @@ void CudaLanguageModel::enablePartialSelectiveLayers() {
     if (cudaMemGetInfo(&freeBytes, &totalBytes) != cudaSuccess) return;
 
     // Leave ≥2.0 GiB free — avoid WDDM thrash while fitting compact FP16 Selective layers.
-    constexpr size_t keepFree = 2048ull * 1024ull * 1024ull;
+    // L4/L5 (opt-in): SENTINEL_CKPT_KEEP_FREE_MIB lowers this to convert more layers
+    // to the cheaper selective backward (fewer full-block recomputes = higher tok/s).
+    const size_t keepFree = sentinelCheckpointKeepFreeBytes();
     if (freeBytes <= keepFree) return;
     const size_t budget = freeBytes - keepFree;
 
