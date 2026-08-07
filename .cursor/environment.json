@@ -1,0 +1,8 @@
+{
+  "name": "Sentinel (C++/CUDA LM framework)",
+  "user": "ubuntu",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "install": "bash .cursor/install.sh"
+}
