@@ -602,6 +602,10 @@ int main() {
     }
 
     // Arrow HF disk layout (sera_best_subset) via from-scratch ArrowChunkReader; JSONL still works
+    //
+    // "Normal" SERA smoke config — sized for a consumer 16GB card and stable Adam descent.
+    // Previous defaults (lr=1e-3, batch=64) + global short→long packing made trainLoss rise
+    // across epochs while test still improved. Prefer 3e-4 (same as scale-100M / HF import).
     const bool useArrowCorpus = true;
     const std::string samplePath = useArrowCorpus
         ? "../SERA-Data/sera_best_subset"
@@ -613,9 +617,10 @@ int main() {
     const int blockCount = 8;
     const int headCount = 12;
     const int maximumPositionCount = static_cast<int>(maximumTokenCount);
+    const float trainLearningRate = 3e-4f;
     const int trainEpochs = 10;
-    const int trainBatchSize = 64;
-    const int trainGradAccum = 4;
+    const int trainBatchSize = 32;
+    const int trainGradAccum = 4; // effective Adam batch = 128 examples
     const int chunkExampleCount = 2048;
     const int tokenizerVocabSize = 4000;
     const int tokenizerSampleRows = 2000;
@@ -2107,7 +2112,7 @@ int main() {
         source.chunkExampleCount(),
         moreAfterPrompt ? "yes" : "no");
 
-    LanguageModel model(tokenizer.vocabSize(), embeddingDim, maximumPositionCount, Adam(0.001f), blockCount, headCount);
+    LanguageModel model(tokenizer.vocabSize(), embeddingDim, maximumPositionCount, Adam(trainLearningRate), blockCount, headCount);
 
     const std::vector<int> parityTokenIds = promptChunk.examples[0].inputTokenIds;
     Matrix cpuLogits = model.forward(parityTokenIds);
@@ -2118,10 +2123,11 @@ int main() {
     model.enableCudaTrain();
     model.enableActivationCheckpointing(useCheckpointing);
     model.setCudaPreferFlashAttention(true);
-    SmokeLog::result("model", "blocks=%zu  heads=%d  embed=%d  cuda=%s  train=%s  maxTok=%zu maxPackCols=%d flash=on stream=on batch=%d accum=%d sbao=%s ckpt=%s",
+    SmokeLog::result("model", "blocks=%zu  heads=%d  embed=%d  lr=%.1e  cuda=%s  train=%s  maxTok=%zu maxPackCols=%d flash=on stream=on batch=%d accum=%d sbao=%s ckpt=%s",
         model.blocks.size(),
         model.blocks[0].attention.headCount,
         embeddingDim,
+        trainLearningRate,
         model.cudaEnabled() ? "on" : "off",
         model.cudaTrainEnabled() ? "cuda" : "cpu-openmp",
         maximumTokenCount,

@@ -650,6 +650,7 @@ public:
     /// train batches from one in-memory slice
     /// keeps Adam accum state across calls; flushRemainder forces a step at the end
     /// packStats counters are accumulated (caller zeros per epoch)
+    /// shuffleSeed != 0 → shuffle then length-sort within each pack window (stable SGD)
     /// </summary>
     void trainOnExamples(
         const LanguageModelDataset& dataset,
@@ -662,7 +663,8 @@ public:
         int& packCount,
         int& singleExamplePackCount,
         long long& packedExampleSum,
-        long long& packedTokenSum
+        long long& packedTokenSum,
+        unsigned shuffleSeed = 0
     );
 
     /// <summary>mean cross entropy over dataset examples on device</summary>

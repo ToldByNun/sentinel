@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- CUDA packed train: epoch shuffle + **window-local** length packing (was global short→long curriculum) and Adam-step pack caps so effective batch matches `batch×accum`. SERA harness default LR `3e-4`, batch `32` (was `1e-3` / `64`) for stable descending train/test loss.
+
 ### Added
 
 - **SPULSE** optimizer (opt-in): dual-horizon energy-scaled momentum on hidden 2D weights + Adam on embed/norms/biases/head (`set_prefer_spulse` / `setCudaPreferSpulse`). Hybrid coverage v1; Full planned. Logic lives in `CudaSPULSE.*`. GPU-resident path keeps full `u` on device. **Host fused-half**: default keeps `u` on GPU, bakes `delta = lr·s·û` into the grad buffer before half D2H, then HostSGD-shaped host axpy (same PCIe volume as HostSGD). EMA momentum uses **Adam-style bias correction** (`û = u / (1-β^t)`) so cold-start steps match HostSGD magnitude. Kernels use **float4/half2** loads and fuse energy commit into the last grid block (no `<<<1,1>>>` launch). `hostLightweight` is a VRAM fallback (no device `u`). Device `u` storage selectable via `SpulseMomentumStorage` / `set_spulse_momentum_storage`: **Fp32** (default), **Fp16**, or **Int8** (absmax blocks) for VRAM experiments. Distinct from SBAO (policy). Harness: `runSpulseThroughputCompare` (GPU), `runSpulseHostQualityCompare` (HostSGD vs SPULSE-Host: tok/s **and** loss quality — speed without quality fails).
