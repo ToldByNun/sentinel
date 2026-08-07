@@ -254,29 +254,31 @@ int main() {
     }
 #endif
 
-    // Temporary: GPU Adam vs SPULSE (resident). Flip false after check.
-    const bool runSpulseThroughputCompare = false;
-    // Temporary: HostSGD vs HostAdam vs SPULSE-Host. Flip false after check.
-    const bool runSpulseHostThroughputCompare = true;
+    // Temporary: HostSGD vs SPULSE-Host — speed AND loss quality (the real tradeoff).
+    // Flip false after check.
+    const bool runSpulseHostQualityCompare = true;
 
-    if (runSpulseHostThroughputCompare) {
-        SmokeLog::section("HostSGD vs HostAdam vs SPULSE-Host");
+    if (runSpulseHostQualityCompare) {
+        SmokeLog::section("HostSGD vs SPULSE-Host (speed + loss)");
         if (!CudaMatmul::isAvailable()) {
-            SmokeLog::skip("SPULSE-Host compare (no CUDA)");
+            SmokeLog::skip("SPULSE-Host quality compare (no CUDA)");
             return 1;
         }
         try {
-            enum class HostOptKind { HostSgd = 0, HostAdam = 1, SpulseHost = 2 };
-
             const int vocab = 4000;
             const int embed = 768;
             const int blocks = 8;
             const int heads = 12;
             const int pos = 512;
-            const int probeSeq = 256;
-            const int warmup = 3;
-            const int timed = 8;
-            const int forcedPackCols = 4096;
+            const int seq = 256;
+            const int packBatch = 8;
+            const int trainSteps = 12;
+            const int probeWarmup = 2;
+            const int probeTimed = 6;
+            // SPULSE final loss may not match HostSGD exactly (momentum + dual-horizon).
+            // Fail if SPULSE is meaningfully worse or fails to learn while SGD learns.
+            const float maxLossRatio = 1.20f; // lossN_spulse / lossN_sgd
+            const float minSpeedRatio = 0.90; // tok/s SPULSE / HostSGD
 
             auto resetGlobals = []() {
                 CudaAmp::clearMasterWeights();
@@ -294,127 +296,135 @@ int main() {
                 cudaGetLastError();
             };
 
-            auto runHost = [&](const char* label, HostOptKind kind) -> double {
+            auto makeFixedPack = [&](int vocabularySize) {
+                LanguageModelDataset dataset;
+                dataset.examples.resize(static_cast<size_t>(packBatch));
+                unsigned rng = 733u;
+                for (int exampleIndex = 0; exampleIndex < packBatch; ++exampleIndex) {
+                    LanguageModelExample& example = dataset.examples[static_cast<size_t>(exampleIndex)];
+                    example.inputTokenIds.resize(static_cast<size_t>(seq));
+                    example.targetTokenIds.resize(static_cast<size_t>(seq));
+                    for (size_t index = 0; index < static_cast<size_t>(seq); ++index) {
+                        rng = rng * 1664525u + 1013904223u;
+                        example.inputTokenIds[index] = static_cast<int>(rng % static_cast<unsigned>(vocabularySize));
+                        rng = rng * 1664525u + 1013904223u;
+                        example.targetTokenIds[index] = static_cast<int>(rng % static_cast<unsigned>(vocabularySize));
+                    }
+                }
+                return dataset;
+            };
+
+            struct HostRunResult {
+                double tokensPerSecond = 0.0;
+                float loss0 = 0.0f;
+                float lossN = 0.0f;
+                bool finite = false;
+                int maxPackCols = 0;
+            };
+
+            auto runHost = [&](const char* label, bool preferSpulse) -> HostRunResult {
                 resetGlobals();
+                // LanguageModel ctor uses fixed UniformInit seeds → identical weights per arch.
                 LanguageModel model(vocab, embed, pos, Adam(0.001f), blocks, heads);
                 model.enableCuda();
                 model.setCudaPreferFlashAttention(true);
                 model.setCudaPreferMuon(false);
-
-                switch (kind) {
-                case HostOptKind::HostSgd:
-                    model.setCudaSbaoMode(SbaoMode::HostFusedHalfSgd);
-                    model.setCudaPreferSpulse(false);
-                    break;
-                case HostOptKind::HostAdam:
-                    model.setCudaSbaoMode(SbaoMode::HostFusedHalfAdam);
-                    model.setCudaPreferSpulse(false);
-                    break;
-                    case HostOptKind::SpulseHost:
-                    // Same residency as HostSGD; GPU-u + half-delta D2H (HostSGD-shaped host axpy).
-                    model.setCudaSbaoMode(SbaoMode::HostFusedHalfSgd);
-                    model.setCudaPreferSpulse(true);
-                    break;
-                }
-
+                model.setCudaSbaoMode(SbaoMode::HostFusedHalfSgd);
+                model.setCudaPreferSpulse(preferSpulse);
                 model.enableCudaTrain();
                 model.setCudaPreferTrainGraph(false);
 
-                // HostAdam keeps its own Selective@forcedPack; SGD/SPULSE-Host share tuneOffload Full.
-                if (kind == HostOptKind::HostAdam) {
-                    model.setActivationCheckpointMode(ActivationCheckpointMode::Selective);
-                    model.setCudaMaxPackedColumns(forcedPackCols);
-                }
+                LanguageModelDataset trainData = makeFixedPack(vocab);
+                LanguageModelDataset emptyTest;
+
+                HostRunResult result;
+                result.maxPackCols = model.cudaMaxPackedColumns();
+                result.loss0 = model.averageLoss(trainData);
+
+                const auto trainStart = std::chrono::steady_clock::now();
+                for (int step = 0; step < trainSteps; ++step)
+                    model.train(trainData, emptyTest, 1, 1000, packBatch, 1);
+                if (cudaDeviceSynchronize() != cudaSuccess)
+                    throw std::runtime_error("SPULSE-Host quality compare train sync failed");
+                const double trainSec =
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - trainStart).count();
+
+                result.lossN = model.averageLoss(trainData);
+                result.finite = std::isfinite(result.loss0) && std::isfinite(result.lossN);
+                result.tokensPerSecond = trainSec > 0.0
+                    ? static_cast<double>(seq) * static_cast<double>(packBatch) * static_cast<double>(trainSteps) / trainSec
+                    : 0.0;
+
+                // Separate probe for steady-state tok/s (after the loss trajectory).
+                const double probeTok = model.probeCudaPackedTrainTokensPerSecond(seq, probeWarmup, probeTimed);
 
                 size_t freeBytes = 0;
                 size_t totalBytes = 0;
                 cudaMemGetInfo(&freeBytes, &totalBytes);
-                const double tok = model.probeCudaPackedTrainTokensPerSecond(probeSeq, warmup, timed);
                 SmokeLog::result(
                     label,
-                    "sbao=%s  spulse=%s  ckpt=%s  maxPackCols=%d  freeMiB=%.0f  tokens/s=%.0f",
-                    CudaSbao::modeName(model.cudaSbaoModeResolved()),
-                    kind == HostOptKind::SpulseHost ? "on" : "off",
-                    CudaLanguageModel::activationCheckpointModeName(model.cudaActivationCheckpointMode()),
-                    model.cudaMaxPackedColumns(),
+                    "spulse=%s  maxPackCols=%d  freeMiB=%.0f  loss0=%.4f lossN=%.4f  dLoss=%.4f  trainTok/s=%.0f  probeTok/s=%.0f  finite=%s",
+                    preferSpulse ? "on" : "off",
+                    result.maxPackCols,
                     static_cast<double>(freeBytes) / (1024.0 * 1024.0),
-                    tok);
-                return tok;
+                    result.loss0,
+                    result.lossN,
+                    result.loss0 - result.lossN,
+                    result.tokensPerSecond,
+                    probeTok,
+                    result.finite ? "yes" : "no");
+                // Prefer probe for speed ratio (less setup noise); keep trainTok for trajectory timing.
+                result.tokensPerSecond = probeTok;
+                return result;
             };
 
-            const double sgdTok = runHost("HostSGD 8x768", HostOptKind::HostSgd);
-            const double adamTok = runHost("HostAdam 8x768", HostOptKind::HostAdam);
-            const double spulseTok = runHost("SPULSE-Host 8x768", HostOptKind::SpulseHost);
+            const HostRunResult sgd = runHost("HostSGD 8x768", false);
+            const HostRunResult spulse = runHost("SPULSE-Host 8x768", true);
 
-            auto ratio = [](double num, double den) { return den > 0.0 ? num / den : 0.0; };
+            const double speedRatio = sgd.tokensPerSecond > 0.0 ? spulse.tokensPerSecond / sgd.tokensPerSecond : 0.0;
+            const float lossRatio = (sgd.lossN > 1e-6f) ? (spulse.lossN / sgd.lossN) : 0.0f;
+            const bool sgdLearned = sgd.finite && sgd.lossN < sgd.loss0;
+            const bool spulseLearned = spulse.finite && spulse.lossN < spulse.loss0;
+            const bool qualityOk = spulse.finite
+                && spulseLearned
+                && !(sgdLearned && lossRatio > maxLossRatio);
+            const bool speedOk = speedRatio >= minSpeedRatio;
+            const bool pass = qualityOk && speedOk;
+
             SmokeLog::result(
-                "8x768 host ratios",
-                "HostSGD=%.0f  HostAdam=%.0f  SPULSE-Host=%.0f  |  SPULSE/SGD=%.3f  SPULSE/Adam=%.3f  Adam/SGD=%.3f",
-                sgdTok,
-                adamTok,
-                spulseTok,
-                ratio(spulseTok, sgdTok),
-                ratio(spulseTok, adamTok),
-                ratio(adamTok, sgdTok));
+                "8x768 HostSGD vs SPULSE-Host",
+                "speed  SGD=%.0f  SPULSE=%.0f  SPULSE/SGD=%.3f  |  lossN  SGD=%.4f  SPULSE=%.4f  ratio=%.3f  |  learned SGD=%s SPULSE=%s",
+                sgd.tokensPerSecond,
+                spulse.tokensPerSecond,
+                speedRatio,
+                sgd.lossN,
+                spulse.lossN,
+                lossRatio,
+                sgdLearned ? "yes" : "no",
+                spulseLearned ? "yes" : "no");
+            SmokeLog::result(
+                "verdict",
+                "%s  quality=%s (maxLossRatio=%.2f)  speed=%s (minSpeedRatio=%.2f)  — speed without quality is not enough",
+                pass ? "PASS" : "FAIL",
+                qualityOk ? "ok" : "bad",
+                maxLossRatio,
+                speedOk ? "ok" : "slow",
+                minSpeedRatio);
 
-            // Second shape: 12×768 (still mid; HostAdam residency for Adam/SPULSE).
-            {
-                const int blocks12 = 12;
-                auto run12 = [&](const char* label, HostOptKind kind) -> double {
-                    resetGlobals();
-                    LanguageModel model(vocab, embed, pos, Adam(0.001f), blocks12, heads);
-                    model.enableCuda();
-                    model.setCudaPreferFlashAttention(true);
-                    model.setCudaPreferMuon(false);
-                    switch (kind) {
-                    case HostOptKind::HostSgd:
-                        model.setCudaSbaoMode(SbaoMode::HostFusedHalfSgd);
-                        model.setCudaPreferSpulse(false);
-                        break;
-                    case HostOptKind::HostAdam:
-                        model.setCudaSbaoMode(SbaoMode::HostFusedHalfAdam);
-                        model.setCudaPreferSpulse(false);
-                        break;
-                    case HostOptKind::SpulseHost:
-                        model.setCudaSbaoMode(SbaoMode::HostFusedHalfSgd);
-                        model.setCudaPreferSpulse(true);
-                        break;
-                    }
-                    model.enableCudaTrain();
-                    model.setCudaPreferTrainGraph(false);
-                    if (kind == HostOptKind::HostAdam) {
-                        model.setActivationCheckpointMode(ActivationCheckpointMode::Selective);
-                        model.setCudaMaxPackedColumns(forcedPackCols);
-                    }
-                    const double tok = model.probeCudaPackedTrainTokensPerSecond(probeSeq, warmup, timed);
-                    SmokeLog::result(
-                        label,
-                        "sbao=%s  spulse=%s  maxPackCols=%d  tokens/s=%.0f",
-                        CudaSbao::modeName(model.cudaSbaoModeResolved()),
-                        kind == HostOptKind::SpulseHost ? "on" : "off",
-                        model.cudaMaxPackedColumns(),
-                        tok);
-                    return tok;
-                };
-                const double s = run12("HostSGD 12x768", HostOptKind::HostSgd);
-                const double a = run12("HostAdam 12x768", HostOptKind::HostAdam);
-                const double p = run12("SPULSE-Host 12x768", HostOptKind::SpulseHost);
-                SmokeLog::result(
-                    "12x768 host ratios",
-                    "HostSGD=%.0f  HostAdam=%.0f  SPULSE-Host=%.0f  |  SPULSE/SGD=%.3f  SPULSE/Adam=%.3f",
-                    s,
-                    a,
-                    p,
-                    ratio(p, s),
-                    ratio(p, a));
-            }
+            if (!pass)
+                throw std::runtime_error(
+                    qualityOk
+                        ? "SPULSE-Host too slow vs HostSGD"
+                        : "SPULSE-Host loss quality worse than HostSGD (speed/quality tradeoff fails)");
             return 0;
         } catch (const std::exception& ex) {
-            SmokeLog::result("SPULSE-Host compare", "FAILED: %s", ex.what());
+            SmokeLog::result("SPULSE-Host quality compare", "FAILED: %s", ex.what());
             return 1;
         }
     }
 
+    // Temporary: GPU Adam vs SPULSE (resident). Flip false after check.
+    const bool runSpulseThroughputCompare = false;
     if (runSpulseThroughputCompare) {
         SmokeLog::section("SPULSE vs Adam throughput");
         if (!CudaMatmul::isAvailable()) {
