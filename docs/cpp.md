@@ -79,6 +79,7 @@ Tiny binaries: [`examples/train_tiny.cpp`](../examples/train_tiny.cpp), [`exampl
 
 SPULSE is an optimizer (`setCudaPreferSpulse`); SBAO remains residency policy.
 On the host fused-half path, SPULSE keeps momentum `u` on the GPU by default and downloads half-precision deltas (HostSGD-shaped host apply). Set `CudaSpulse::hostLightweight` only as a VRAM fallback (drops device `u`).
+Device `u` storage: `SpulseMomentumStorage::{Fp32,Fp16,Int8}` via `setCudaSpulseMomentumStorage` (Fp16/Int8 trade parity for VRAM).
 
 ---
 

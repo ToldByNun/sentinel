@@ -947,7 +947,10 @@ void CudaLanguageModel::ensureTrainState() {
                 this->hostBlockSpulseStates.clear();
                 this->blockSpulseStates.resize(this->blocks.size());
                 for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
-                    this->blockSpulseStates[blockIndex].ensureFrom(this->blocks[blockIndex]);
+                    this->blockSpulseStates[blockIndex].ensureFrom(
+                        this->blocks[blockIndex],
+                        this->spulse.momentumStorage,
+                        this->spulse.int8BlockSize);
                     if (blockIndex < this->blockAdamStates.size())
                         this->blockAdamStates[blockIndex].freeMuonManagedWeights();
                 }
@@ -958,7 +961,10 @@ void CudaLanguageModel::ensureTrainState() {
             this->hostBlockSpulseStates.clear();
             this->blockSpulseStates.resize(this->blocks.size());
             for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
-                this->blockSpulseStates[blockIndex].ensureFrom(this->blocks[blockIndex]);
+                this->blockSpulseStates[blockIndex].ensureFrom(
+                    this->blocks[blockIndex],
+                    this->spulse.momentumStorage,
+                    this->spulse.int8BlockSize);
                 if (blockIndex < this->blockAdamStates.size())
                     this->blockAdamStates[blockIndex].freeMuonManagedWeights();
             }

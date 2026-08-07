@@ -140,6 +140,165 @@ __global__ void spulsePrepareHostDelta(
         atomicAdd(sumSquares, shared[0]);
 }
 
+__global__ void spulseFusedStepHalf(
+    float* parameter,
+    __half* momentum,
+    const float* gradient,
+    const float* energy,
+    float* sumSquares,
+    int elementCount,
+    float momentumBeta,
+    float oneMinusMom,
+    float gradientScale,
+    float learningRate,
+    float keep
+) {
+    __shared__ float shared[256];
+    const float stepScale = energy[2];
+    float local = 0.0f;
+    for (int index = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+         index < elementCount;
+         index += static_cast<int>(blockDim.x * gridDim.x)) {
+        const float g = gradient[index] * gradientScale;
+        float m = momentumBeta * __half2float(momentum[index]) + oneMinusMom * g;
+        if (!isfinite(m)) m = 0.0f;
+        momentum[index] = __float2half_rn(m);
+        float value = parameter[index];
+        if (keep != 1.0f)
+            value *= keep;
+        parameter[index] = value - learningRate * stepScale * m;
+        local += g * g;
+    }
+    shared[threadIdx.x] = local;
+    __syncthreads();
+    for (int stride = static_cast<int>(blockDim.x) / 2; stride > 0; stride >>= 1) {
+        if (static_cast<int>(threadIdx.x) < stride)
+            shared[threadIdx.x] += shared[threadIdx.x + stride];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0)
+        atomicAdd(sumSquares, shared[0]);
+}
+
+__global__ void spulsePrepareHostDeltaHalf(
+    float* gradientOrDelta,
+    __half* momentum,
+    const float* energy,
+    float* sumSquares,
+    int elementCount,
+    float momentumBeta,
+    float oneMinusMom,
+    float gradientScale,
+    float learningRate
+) {
+    __shared__ float shared[256];
+    const float stepScale = energy[2];
+    float local = 0.0f;
+    for (int index = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+         index < elementCount;
+         index += static_cast<int>(blockDim.x * gridDim.x)) {
+        const float g = gradientOrDelta[index] * gradientScale;
+        float m = momentumBeta * __half2float(momentum[index]) + oneMinusMom * g;
+        if (!isfinite(m)) m = 0.0f;
+        momentum[index] = __float2half_rn(m);
+        gradientOrDelta[index] = learningRate * stepScale * m;
+        local += g * g;
+    }
+    shared[threadIdx.x] = local;
+    __syncthreads();
+    for (int stride = static_cast<int>(blockDim.x) / 2; stride > 0; stride >>= 1) {
+        if (static_cast<int>(threadIdx.x) < stride)
+            shared[threadIdx.x] += shared[threadIdx.x + stride];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0)
+        atomicAdd(sumSquares, shared[0]);
+}
+
+/// <summary>One CUDA block = one absmax quant block. writeDelta=true → host-delta path (no θ update).</summary>
+__global__ void spulseStepInt8(
+    float* parameterOrDelta,
+    signed char* momentumQ,
+    float* momentumScales,
+    const float* gradient,
+    const float* energy,
+    float* sumSquares,
+    int elementCount,
+    int blockSize,
+    float momentumBeta,
+    float oneMinusMom,
+    float gradientScale,
+    float learningRate,
+    float keep,
+    int writeDelta
+) {
+    const int quantBlock = static_cast<int>(blockIdx.x);
+    const int start = quantBlock * blockSize;
+    if (start >= elementCount) return;
+    const int count = (start + blockSize <= elementCount) ? blockSize : (elementCount - start);
+    const int threadCount = static_cast<int>(blockDim.x);
+
+    extern __shared__ float shared[];
+    float* momFp = shared;
+    float* reduceMax = shared + blockSize;
+    float* reduceSum = reduceMax + threadCount;
+
+    const float oldScale = momentumScales[quantBlock];
+    const float stepScale = energy[2];
+    float localSum = 0.0f;
+
+    for (int local = static_cast<int>(threadIdx.x); local < count; local += threadCount) {
+        const int index = start + local;
+        float m = (oldScale == 0.0f) ? 0.0f : static_cast<float>(momentumQ[index]) * oldScale;
+        if (!isfinite(m)) m = 0.0f;
+        const float g = (gradient != nullptr ? gradient[index] : parameterOrDelta[index]) * gradientScale;
+        m = momentumBeta * m + oneMinusMom * g;
+        if (!isfinite(m)) m = 0.0f;
+        momFp[local] = m;
+        localSum += g * g;
+
+        if (writeDelta) {
+            parameterOrDelta[index] = learningRate * stepScale * m;
+        } else {
+            float value = parameterOrDelta[index];
+            if (keep != 1.0f)
+                value *= keep;
+            parameterOrDelta[index] = value - learningRate * stepScale * m;
+        }
+    }
+    reduceSum[threadIdx.x] = localSum;
+
+    float localMax = 0.0f;
+    for (int local = static_cast<int>(threadIdx.x); local < count; local += threadCount)
+        localMax = fmaxf(localMax, fabsf(momFp[local]));
+    reduceMax[threadIdx.x] = localMax;
+    __syncthreads();
+
+    for (int stride = threadCount / 2; stride > 0; stride >>= 1) {
+        if (static_cast<int>(threadIdx.x) < stride) {
+            reduceMax[threadIdx.x] = fmaxf(reduceMax[threadIdx.x], reduceMax[threadIdx.x + stride]);
+            reduceSum[threadIdx.x] += reduceSum[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        atomicAdd(sumSquares, reduceSum[0]);
+        const float absmax = reduceMax[0];
+        const float newScale = (absmax > 0.0f) ? (absmax / 127.0f) : 0.0f;
+        momentumScales[quantBlock] = newScale;
+    }
+    __syncthreads();
+
+    const float newScale = momentumScales[quantBlock];
+    for (int local = static_cast<int>(threadIdx.x); local < count; local += threadCount) {
+        float quantized = (newScale == 0.0f) ? 0.0f : rintf(momFp[local] / newScale);
+        quantized = fminf(127.0f, fmaxf(-127.0f, quantized));
+        if (!isfinite(quantized)) quantized = 0.0f;
+        momentumQ[start + local] = static_cast<signed char>(quantized);
+    }
+}
+
 void hostUpdateCore(
     float* parameter,
     float* momentum,
@@ -259,19 +418,54 @@ void hostUpdateFromHalfLite(
 } // namespace
 
 bool CudaSpulseState::empty() const {
-    return this->momentum.empty();
+    return this->rows == 0 || this->cols == 0;
 }
 
-void CudaSpulseState::ensure(size_t rows, size_t cols) {
+void CudaSpulseState::ensure(
+    size_t rows,
+    size_t cols,
+    SpulseMomentumStorage storage,
+    int int8BlockSize
+) {
     if (rows == 0 || cols == 0) throw std::invalid_argument("CudaSpulseState::ensure empty shape");
-    if (!this->momentum.empty()
-        && this->momentum.rows == rows
-        && this->momentum.cols == cols
-        && this->energy.deviceData != nullptr)
-        return;
-    this->momentum.ensureSize(rows, cols);
-    CudaOps::zeroInPlace(this->momentum);
-    // [0]=e_fast, [1]=e_slow, [2]=lagged scale (init 1)
+    if (int8BlockSize <= 0) throw std::invalid_argument("CudaSpulseState::ensure int8BlockSize must be > 0");
+
+    const size_t elementCount = rows * cols;
+    const bool sameShape = this->rows == rows && this->cols == cols && this->energy.deviceData != nullptr
+        && this->storage == storage
+        && (storage != SpulseMomentumStorage::Int8 || this->int8BlockSize == int8BlockSize);
+    if (sameShape) {
+        if (storage == SpulseMomentumStorage::Fp32 && this->momentum.hasDeviceStorage()) return;
+        if (storage == SpulseMomentumStorage::Fp16 && this->momentumHalf.deviceData != nullptr) return;
+        if (storage == SpulseMomentumStorage::Int8 && this->momentumQ.deviceData != nullptr) return;
+    }
+
+    this->free();
+    this->rows = rows;
+    this->cols = cols;
+    this->storage = storage;
+    this->int8BlockSize = int8BlockSize;
+    this->scaleCount = 0;
+
+    if (storage == SpulseMomentumStorage::Fp32) {
+        this->momentum.ensureSize(rows, cols);
+        CudaOps::zeroInPlace(this->momentum);
+    } else if (storage == SpulseMomentumStorage::Fp16) {
+        this->momentumHalf.ensureCapacity(elementCount * sizeof(__half));
+        throwIfFailed(
+            cudaMemset(this->momentumHalf.deviceData, 0, elementCount * sizeof(__half)),
+            "CudaSpulseState::ensure momentumHalf zero");
+    } else {
+        this->scaleCount = static_cast<int>((elementCount + static_cast<size_t>(int8BlockSize) - 1)
+            / static_cast<size_t>(int8BlockSize));
+        this->momentumQ.ensureCapacity(elementCount);
+        this->momentumQ.zeroInPlace();
+        this->momentumScales.ensureCapacity(static_cast<size_t>(this->scaleCount) * sizeof(float));
+        throwIfFailed(
+            cudaMemset(this->momentumScales.deviceData, 0, static_cast<size_t>(this->scaleCount) * sizeof(float)),
+            "CudaSpulseState::ensure momentumScales zero");
+    }
+
     this->energy.ensureCapacity(3 * sizeof(float));
     const float init[3] = {0.0f, 0.0f, 1.0f};
     throwIfFailed(
@@ -279,22 +473,57 @@ void CudaSpulseState::ensure(size_t rows, size_t cols) {
         "CudaSpulseState::ensure energy init");
 }
 
-void CudaSpulseState::ensure(const CudaMatrix& parameter) {
+void CudaSpulseState::ensure(
+    const CudaMatrix& parameter,
+    SpulseMomentumStorage storage,
+    int int8BlockSize
+) {
     if (parameter.empty()) throw std::invalid_argument("CudaSpulseState::ensure empty parameter");
-    this->ensure(parameter.rows, parameter.cols);
+    this->ensure(parameter.rows, parameter.cols, storage, int8BlockSize);
 }
 
 void CudaSpulseState::free() {
     this->momentum.free();
+    this->momentumHalf.free();
+    this->momentumQ.free();
+    this->momentumScales.free();
     this->energy.free();
+    this->rows = 0;
+    this->cols = 0;
+    this->scaleCount = 0;
 }
 
 void CudaSpulseState::downloadInto(SpulseState& host) const {
-    if (this->momentum.empty()) {
+    if (this->empty()) {
         host.clear();
         return;
     }
-    this->momentum.downloadInto(host.momentum);
+    host.momentum.ensureSize(this->rows, this->cols);
+    const size_t elementCount = this->rows * this->cols;
+
+    if (this->storage == SpulseMomentumStorage::Fp32) {
+        this->momentum.downloadInto(host.momentum);
+    } else if (this->storage == SpulseMomentumStorage::Fp16) {
+        std::vector<__half> halfHost(elementCount);
+        throwIfFailed(
+            cudaMemcpy(halfHost.data(), this->momentumHalf.deviceData, elementCount * sizeof(__half), cudaMemcpyDeviceToHost),
+            "CudaSpulseState::downloadInto momentumHalf");
+        for (size_t i = 0; i < elementCount; ++i)
+            host.momentum.data[i] = __half2float(halfHost[i]);
+    } else {
+        std::vector<signed char> qHost(elementCount);
+        std::vector<float> scales(static_cast<size_t>(this->scaleCount), 0.0f);
+        this->momentumQ.copyToHost(qHost.data(), elementCount);
+        throwIfFailed(
+            cudaMemcpy(scales.data(), this->momentumScales.deviceData, scales.size() * sizeof(float), cudaMemcpyDeviceToHost),
+            "CudaSpulseState::downloadInto momentumScales");
+        for (size_t i = 0; i < elementCount; ++i) {
+            const int block = static_cast<int>(i / static_cast<size_t>(this->int8BlockSize));
+            const float scale = scales[static_cast<size_t>(block)];
+            host.momentum.data[i] = scale == 0.0f ? 0.0f : static_cast<float>(qHost[i]) * scale;
+        }
+    }
+
     float energyHost[3] = {0.0f, 0.0f, 1.0f};
     if (this->energy.deviceData != nullptr) {
         throwIfFailed(
@@ -311,7 +540,41 @@ void CudaSpulseState::uploadFrom(const SpulseState& host) {
         this->free();
         return;
     }
-    this->momentum.upload(host.momentum);
+    this->ensure(host.momentum.rows, host.momentum.cols, this->storage, this->int8BlockSize);
+    const size_t elementCount = host.momentum.data.size();
+
+    if (this->storage == SpulseMomentumStorage::Fp32) {
+        this->momentum.upload(host.momentum);
+    } else if (this->storage == SpulseMomentumStorage::Fp16) {
+        std::vector<__half> halfHost(elementCount);
+        for (size_t i = 0; i < elementCount; ++i)
+            halfHost[i] = __float2half_rn(host.momentum.data[i]);
+        throwIfFailed(
+            cudaMemcpy(this->momentumHalf.deviceData, halfHost.data(), elementCount * sizeof(__half), cudaMemcpyHostToDevice),
+            "CudaSpulseState::uploadFrom momentumHalf");
+    } else {
+        std::vector<signed char> qHost(elementCount, 0);
+        std::vector<float> scales(static_cast<size_t>(this->scaleCount), 0.0f);
+        for (int block = 0; block < this->scaleCount; ++block) {
+            const size_t start = static_cast<size_t>(block) * static_cast<size_t>(this->int8BlockSize);
+            const size_t end = (std::min)(elementCount, start + static_cast<size_t>(this->int8BlockSize));
+            float absmax = 0.0f;
+            for (size_t i = start; i < end; ++i)
+                absmax = (std::max)(absmax, std::fabs(host.momentum.data[i]));
+            const float scale = absmax > 0.0f ? absmax / 127.0f : 0.0f;
+            scales[static_cast<size_t>(block)] = scale;
+            for (size_t i = start; i < end; ++i) {
+                float q = scale == 0.0f ? 0.0f : std::round(host.momentum.data[i] / scale);
+                q = (std::min)(127.0f, (std::max)(-127.0f, q));
+                qHost[i] = static_cast<signed char>(q);
+            }
+        }
+        this->momentumQ.copyFromHost(qHost.data(), elementCount);
+        throwIfFailed(
+            cudaMemcpy(this->momentumScales.deviceData, scales.data(), scales.size() * sizeof(float), cudaMemcpyHostToDevice),
+            "CudaSpulseState::uploadFrom momentumScales");
+    }
+
     this->energy.ensureCapacity(3 * sizeof(float));
     const float energyHost[3] = {host.energyFast, host.energySlow, host.scale};
     throwIfFailed(
@@ -319,14 +582,18 @@ void CudaSpulseState::uploadFrom(const SpulseState& host) {
         "CudaSpulseState::uploadFrom energy");
 }
 
-void CudaTransformerBlockSpulseStates::ensureFrom(const CudaTransformerBlock& block) {
-    this->queryWeight.ensure(block.attention.queryWeight);
-    this->keyWeight.ensure(block.attention.keyWeight);
-    this->valueWeight.ensure(block.attention.valueWeight);
-    this->attentionOutputWeight.ensure(block.attention.outputWeight);
-    this->feedForwardGateWeight.ensure(block.feedForward.gateWeight);
-    this->feedForwardUpWeight.ensure(block.feedForward.upWeight);
-    this->feedForwardDownWeight.ensure(block.feedForward.downWeight);
+void CudaTransformerBlockSpulseStates::ensureFrom(
+    const CudaTransformerBlock& block,
+    SpulseMomentumStorage storage,
+    int int8BlockSize
+) {
+    this->queryWeight.ensure(block.attention.queryWeight, storage, int8BlockSize);
+    this->keyWeight.ensure(block.attention.keyWeight, storage, int8BlockSize);
+    this->valueWeight.ensure(block.attention.valueWeight, storage, int8BlockSize);
+    this->attentionOutputWeight.ensure(block.attention.outputWeight, storage, int8BlockSize);
+    this->feedForwardGateWeight.ensure(block.feedForward.gateWeight, storage, int8BlockSize);
+    this->feedForwardUpWeight.ensure(block.feedForward.upWeight, storage, int8BlockSize);
+    this->feedForwardDownWeight.ensure(block.feedForward.downWeight, storage, int8BlockSize);
 }
 
 void CudaTransformerBlockSpulseStates::free() {
@@ -359,7 +626,9 @@ CudaSpulse::CudaSpulse(
     float scaleMax,
     float weightDecay,
     SpulseCoverage coverage,
-    bool hostLightweight
+    bool hostLightweight,
+    SpulseMomentumStorage momentumStorage,
+    int int8BlockSize
 )
     : learningRate(learningRate),
       momentumBeta(momentumBeta),
@@ -370,7 +639,9 @@ CudaSpulse::CudaSpulse(
       scaleMax(scaleMax),
       weightDecay(weightDecay),
       coverage(coverage),
-      hostLightweight(hostLightweight) {
+      hostLightweight(hostLightweight),
+      momentumStorage(momentumStorage),
+      int8BlockSize(int8BlockSize) {
     if (learningRate <= 0.0f) throw std::invalid_argument("CudaSpulse learningRate must be > 0");
     if (momentumBeta < 0.0f || momentumBeta >= 1.0f) throw std::invalid_argument("CudaSpulse momentumBeta must be in [0, 1)");
     if (fastBeta < 0.0f || fastBeta >= 1.0f) throw std::invalid_argument("CudaSpulse fastBeta must be in [0, 1)");
@@ -379,12 +650,22 @@ CudaSpulse::CudaSpulse(
     if (epsilon <= 0.0f) throw std::invalid_argument("CudaSpulse epsilon must be > 0");
     if (scaleMin <= 0.0f || scaleMax < scaleMin) throw std::invalid_argument("CudaSpulse invalid scale clip");
     if (weightDecay < 0.0f) throw std::invalid_argument("CudaSpulse weightDecay must be >= 0");
+    if (int8BlockSize <= 0) throw std::invalid_argument("CudaSpulse int8BlockSize must be > 0");
 }
 
 const char* CudaSpulse::coverageName(SpulseCoverage coverage) {
     switch (coverage) {
     case SpulseCoverage::Hybrid: return "Hybrid";
     case SpulseCoverage::Full: return "Full";
+    }
+    return "Unknown";
+}
+
+const char* CudaSpulse::momentumStorageName(SpulseMomentumStorage storage) {
+    switch (storage) {
+    case SpulseMomentumStorage::Fp32: return "Fp32";
+    case SpulseMomentumStorage::Fp16: return "Fp16";
+    case SpulseMomentumStorage::Int8: return "Int8";
     }
     return "Unknown";
 }
@@ -401,11 +682,9 @@ void CudaSpulse::update(CudaMatrix& parameter, CudaSpulseState& state, const Cud
     if (parameter.empty()) throw std::invalid_argument("CudaSpulse::update empty parameter");
     if (gradient.elementCount() != parameter.elementCount())
         throw std::invalid_argument("CudaSpulse::update gradient/parameter size mismatch");
-    state.ensure(parameter);
+    state.ensure(parameter, this->momentumStorage, this->int8BlockSize);
 
     const int elementCount = static_cast<int>(parameter.elementCount());
-    const int threads = 256;
-    const int blocks = (std::min)(1024, elementwiseBlocks(elementCount, threads));
     const float oneMinusMom = 1.0f - this->momentumBeta;
     const float keep = 1.0f - this->learningRate * this->weightDecay;
     cudaStream_t stream = CudaMatmul::activeStream();
@@ -414,19 +693,60 @@ void CudaSpulse::update(CudaMatrix& parameter, CudaSpulseState& state, const Cud
     float* sumSquares = this->sumSquaresScratch.deviceData;
     CudaMatmul::memsetDevice(sumSquares, 0, sizeof(float));
 
-    spulseFusedStep<<<blocks, threads, 0, stream>>>(
-        parameter.buffer.deviceData,
-        state.momentum.buffer.deviceData,
-        gradient.buffer.deviceData,
-        state.energy.deviceData,
-        sumSquares,
-        elementCount,
-        this->momentumBeta,
-        oneMinusMom,
-        gradientScale,
-        this->learningRate,
-        keep);
-    throwIfFailed(cudaGetLastError(), "spulseFusedStep");
+    if (state.storage == SpulseMomentumStorage::Fp32) {
+        const int threads = 256;
+        const int blocks = (std::min)(1024, elementwiseBlocks(elementCount, threads));
+        spulseFusedStep<<<blocks, threads, 0, stream>>>(
+            parameter.buffer.deviceData,
+            state.momentum.buffer.deviceData,
+            gradient.buffer.deviceData,
+            state.energy.deviceData,
+            sumSquares,
+            elementCount,
+            this->momentumBeta,
+            oneMinusMom,
+            gradientScale,
+            this->learningRate,
+            keep);
+        throwIfFailed(cudaGetLastError(), "spulseFusedStep");
+    } else if (state.storage == SpulseMomentumStorage::Fp16) {
+        const int threads = 256;
+        const int blocks = (std::min)(1024, elementwiseBlocks(elementCount, threads));
+        spulseFusedStepHalf<<<blocks, threads, 0, stream>>>(
+            parameter.buffer.deviceData,
+            reinterpret_cast<__half*>(state.momentumHalf.deviceData),
+            gradient.buffer.deviceData,
+            state.energy.deviceData,
+            sumSquares,
+            elementCount,
+            this->momentumBeta,
+            oneMinusMom,
+            gradientScale,
+            this->learningRate,
+            keep);
+        throwIfFailed(cudaGetLastError(), "spulseFusedStepHalf");
+    } else {
+        const int blockSize = state.int8BlockSize;
+        const int threads = (std::min)(256, blockSize);
+        const int blocks = state.scaleCount;
+        const size_t sharedBytes = static_cast<size_t>(blockSize + 2 * threads) * sizeof(float);
+        spulseStepInt8<<<blocks, threads, sharedBytes, stream>>>(
+            parameter.buffer.deviceData,
+            state.momentumQ.deviceData,
+            state.momentumScales.deviceData,
+            gradient.buffer.deviceData,
+            state.energy.deviceData,
+            sumSquares,
+            elementCount,
+            blockSize,
+            this->momentumBeta,
+            oneMinusMom,
+            gradientScale,
+            this->learningRate,
+            keep,
+            0);
+        throwIfFailed(cudaGetLastError(), "spulseStepInt8");
+    }
 
     spulseCommitEnergyAndScale<<<1, 1, 0, stream>>>(
         state.energy.deviceData,
@@ -450,11 +770,9 @@ void CudaSpulse::prepareHostDeltaInPlace(
 ) {
     if (gradientOrDelta == nullptr) throw std::invalid_argument("CudaSpulse::prepareHostDeltaInPlace null buffer");
     if (rows == 0 || cols == 0) throw std::invalid_argument("CudaSpulse::prepareHostDeltaInPlace empty shape");
-    state.ensure(rows, cols);
+    state.ensure(rows, cols, this->momentumStorage, this->int8BlockSize);
 
     const int elementCount = static_cast<int>(rows * cols);
-    const int threads = 256;
-    const int blocks = (std::min)(1024, elementwiseBlocks(elementCount, threads));
     const float oneMinusMom = 1.0f - this->momentumBeta;
     cudaStream_t stream = CudaMatmul::activeStream();
 
@@ -462,17 +780,56 @@ void CudaSpulse::prepareHostDeltaInPlace(
     float* sumSquares = this->sumSquaresScratch.deviceData;
     CudaMatmul::memsetDevice(sumSquares, 0, sizeof(float));
 
-    spulsePrepareHostDelta<<<blocks, threads, 0, stream>>>(
-        gradientOrDelta,
-        state.momentum.buffer.deviceData,
-        state.energy.deviceData,
-        sumSquares,
-        elementCount,
-        this->momentumBeta,
-        oneMinusMom,
-        gradientScale,
-        this->learningRate);
-    throwIfFailed(cudaGetLastError(), "spulsePrepareHostDelta");
+    if (state.storage == SpulseMomentumStorage::Fp32) {
+        const int threads = 256;
+        const int blocks = (std::min)(1024, elementwiseBlocks(elementCount, threads));
+        spulsePrepareHostDelta<<<blocks, threads, 0, stream>>>(
+            gradientOrDelta,
+            state.momentum.buffer.deviceData,
+            state.energy.deviceData,
+            sumSquares,
+            elementCount,
+            this->momentumBeta,
+            oneMinusMom,
+            gradientScale,
+            this->learningRate);
+        throwIfFailed(cudaGetLastError(), "spulsePrepareHostDelta");
+    } else if (state.storage == SpulseMomentumStorage::Fp16) {
+        const int threads = 256;
+        const int blocks = (std::min)(1024, elementwiseBlocks(elementCount, threads));
+        spulsePrepareHostDeltaHalf<<<blocks, threads, 0, stream>>>(
+            gradientOrDelta,
+            reinterpret_cast<__half*>(state.momentumHalf.deviceData),
+            state.energy.deviceData,
+            sumSquares,
+            elementCount,
+            this->momentumBeta,
+            oneMinusMom,
+            gradientScale,
+            this->learningRate);
+        throwIfFailed(cudaGetLastError(), "spulsePrepareHostDeltaHalf");
+    } else {
+        const int blockSize = state.int8BlockSize;
+        const int threads = (std::min)(256, blockSize);
+        const int blocks = state.scaleCount;
+        const size_t sharedBytes = static_cast<size_t>(blockSize + 2 * threads) * sizeof(float);
+        spulseStepInt8<<<blocks, threads, sharedBytes, stream>>>(
+            gradientOrDelta,
+            state.momentumQ.deviceData,
+            state.momentumScales.deviceData,
+            nullptr,
+            state.energy.deviceData,
+            sumSquares,
+            elementCount,
+            blockSize,
+            this->momentumBeta,
+            oneMinusMom,
+            gradientScale,
+            this->learningRate,
+            1.0f,
+            1);
+        throwIfFailed(cudaGetLastError(), "spulseStepInt8 (host delta)");
+    }
 
     spulseCommitEnergyAndScale<<<1, 1, 0, stream>>>(
         state.energy.deviceData,
@@ -714,44 +1071,53 @@ void CudaSpulse::runSmokeDemo(int parameterRows, int parameterCols) {
         hostGrad.data[index] = (static_cast<float>(rng >> 8) / 16777216.0f) * 0.02f - 0.01f;
     }
 
-    CudaSpulse opt(1e-3f, 0.9f, 0.9f, 0.999f, 1e-8f, 0.25f, 4.0f, 0.0f, SpulseCoverage::Hybrid);
-    Matrix hostParamRef = hostParam;
-    SpulseState hostState;
-    opt.updateHost(hostParamRef, hostState, hostGrad, 1.0f);
+    auto runOnce = [&](SpulseMomentumStorage storage, float maxAllowedDiff, const char* label) {
+        CudaSpulse opt(
+            1e-3f, 0.9f, 0.9f, 0.999f, 1e-8f, 0.25f, 4.0f, 0.0f,
+            SpulseCoverage::Hybrid, false, storage, 256);
+        Matrix hostParamRef = hostParam;
+        SpulseState hostState;
+        // Host reference always uses FP32 u.
+        CudaSpulse hostOpt(1e-3f, 0.9f, 0.9f, 0.999f, 1e-8f, 0.25f, 4.0f, 0.0f, SpulseCoverage::Hybrid);
+        hostOpt.updateHost(hostParamRef, hostState, hostGrad, 1.0f);
 
-    CudaMatrix deviceParam;
-    deviceParam.upload(hostParam);
-    CudaMatrix deviceGrad;
-    deviceGrad.upload(hostGrad);
-    CudaSpulseState deviceState;
-    opt.update(deviceParam, deviceState, deviceGrad, 1.0f);
-    throwIfFailed(cudaDeviceSynchronize(), "CudaSpulse update synchronize");
-    Matrix deviceDownloaded = deviceParam.download();
+        CudaMatrix deviceParam;
+        deviceParam.upload(hostParam);
+        CudaMatrix deviceGrad;
+        deviceGrad.upload(hostGrad);
+        CudaSpulseState deviceState;
+        opt.update(deviceParam, deviceState, deviceGrad, 1.0f);
+        throwIfFailed(cudaDeviceSynchronize(), "CudaSpulse update synchronize");
+        Matrix deviceDownloaded = deviceParam.download();
 
-    float maxDiff = 0.0f;
-    bool nonFinite = false;
-    for (size_t index = 0; index < hostParamRef.data.size(); ++index) {
-        if (!std::isfinite(hostParamRef.data[index]) || !std::isfinite(deviceDownloaded.data[index]))
-            nonFinite = true;
-        maxDiff = (std::max)(maxDiff, std::fabs(hostParamRef.data[index] - deviceDownloaded.data[index]));
-    }
+        float maxDiff = 0.0f;
+        bool nonFinite = false;
+        for (size_t index = 0; index < hostParamRef.data.size(); ++index) {
+            if (!std::isfinite(hostParamRef.data[index]) || !std::isfinite(deviceDownloaded.data[index]))
+                nonFinite = true;
+            maxDiff = (std::max)(maxDiff, std::fabs(hostParamRef.data[index] - deviceDownloaded.data[index]));
+        }
 
-    SpulseState energyCheck;
-    deviceState.downloadInto(energyCheck);
-    const bool energyOk = std::isfinite(energyCheck.energyFast) && std::isfinite(energyCheck.energySlow)
-        && energyCheck.energyFast >= 0.0f && energyCheck.energySlow >= 0.0f;
+        SpulseState energyCheck;
+        deviceState.downloadInto(energyCheck);
+        const bool energyOk = std::isfinite(energyCheck.energyFast) && std::isfinite(energyCheck.energySlow)
+            && energyCheck.energyFast >= 0.0f && energyCheck.energySlow >= 0.0f;
 
-    SmokeLog::result(
-        "SPULSE host↔GPU",
-        "shape=%dx%d  maxDiff=%.3e  finite=%s  energyOk=%s  eFast=%.3e eSlow=%.3e",
-        parameterRows,
-        parameterCols,
-        maxDiff,
-        nonFinite ? "no" : "yes",
-        energyOk ? "yes" : "no",
-        energyCheck.energyFast,
-        energyCheck.energySlow);
+        SmokeLog::result(
+            label,
+            "storage=%s  shape=%dx%d  maxDiff=%.3e  finite=%s  energyOk=%s",
+            CudaSpulse::momentumStorageName(storage),
+            parameterRows,
+            parameterCols,
+            maxDiff,
+            nonFinite ? "no" : "yes",
+            energyOk ? "yes" : "no");
 
-    if (nonFinite || !energyOk || maxDiff > 5e-4f)
-        throw std::runtime_error("CudaSpulse::runSmokeDemo parity/finite check failed");
+        if (nonFinite || !energyOk || maxDiff > maxAllowedDiff)
+            throw std::runtime_error(std::string("CudaSpulse::runSmokeDemo failed: ") + label);
+    };
+
+    runOnce(SpulseMomentumStorage::Fp32, 5e-4f, "SPULSE host↔GPU");
+    runOnce(SpulseMomentumStorage::Fp16, 2e-3f, "SPULSE Fp16-u");
+    runOnce(SpulseMomentumStorage::Int8, 5e-2f, "SPULSE Int8-u");
 }

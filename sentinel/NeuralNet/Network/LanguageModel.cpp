@@ -890,6 +890,18 @@ void LanguageModel::setCudaSpulseScaleClip(float scaleMin, float scaleMax) {
     this->device->spulse.scaleMax = scaleMax;
 }
 
+void LanguageModel::setCudaSpulseMomentumStorage(SpulseMomentumStorage storage) {
+    if (this->device == nullptr) this->enableCuda();
+    if (this->device == nullptr) return;
+    if (this->device->spulse.momentumStorage == storage) return;
+    this->device->spulse.momentumStorage = storage;
+    this->device->trainStateReady = false;
+    if (this->deviceTrainEnabled)
+        this->device->ensureTrainState();
+    std::cout << "LanguageModel::setCudaSpulseMomentumStorage: "
+              << CudaSpulse::momentumStorageName(storage) << '\n';
+}
+
 void LanguageModel::setCudaPreferFlashAttention(bool enabled) {
     if (this->device == nullptr) this->enableCuda();
     if (this->device == nullptr) return;

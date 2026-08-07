@@ -14,6 +14,16 @@ enum class SpulseCoverage : std::int32_t {
     Full = 1
 };
 
+/// <summary>
+/// Device storage for momentum <c>u</c>. FP16/Int8 cut VRAM for host-offload GPU-<c>u</c>
+/// (EMA is usually smooth enough). Default Fp32 for reference / parity.
+/// </summary>
+enum class SpulseMomentumStorage : std::int32_t {
+    Fp32 = 0,
+    Fp16 = 1,
+    Int8 = 2
+};
+
 /// <summary>host momentum + dual-horizon energy scalars for one parameter</summary>
 class SpulseState {
 public:
