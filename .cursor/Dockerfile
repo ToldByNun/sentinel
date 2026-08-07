@@ -42,10 +42,26 @@ RUN cd /tmp \
     && echo "/usr/local/cuda-13.0/lib64" > /etc/ld.so.conf.d/cuda-13.conf \
     && ldconfig
 
-# Make the CUDA toolchain discoverable for all shells and build steps.
+# Make the CUDA toolchain discoverable everywhere:
+#   - ENV: non-login shells and Docker RUN/CMD.
+#   - /etc/profile.d: login shells (the agent's shell rebuilds PATH from profile,
+#     which otherwise drops the Docker ENV PATH).
+#   - /usr/local/bin symlink: guaranteed for any shell, since it is always on the
+#     default PATH (nvcc self-locates its helper tools via its real path).
 ENV CUDA_HOME=/usr/local/cuda-13.0 \
     CUDA_PATH=/usr/local/cuda-13.0 \
     PATH=/usr/local/cuda-13.0/bin:${PATH}
+
+RUN printf '%s\n' \
+        'export CUDA_HOME=/usr/local/cuda-13.0' \
+        'export CUDA_PATH=/usr/local/cuda-13.0' \
+        'case ":$PATH:" in' \
+        '  *:/usr/local/cuda-13.0/bin:*) ;;' \
+        '  *) export PATH=/usr/local/cuda-13.0/bin:$PATH ;;' \
+        'esac' \
+        > /etc/profile.d/cuda.sh \
+    && chmod 644 /etc/profile.d/cuda.sh \
+    && ln -sf /usr/local/cuda-13.0/bin/nvcc /usr/local/bin/nvcc
 
 # Ubuntu 24.04 ships a default non-root `ubuntu` user (uid 1000).
 USER ubuntu
