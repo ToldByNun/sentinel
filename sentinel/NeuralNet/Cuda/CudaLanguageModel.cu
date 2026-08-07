@@ -943,6 +943,26 @@ void CudaLanguageModel::ensureTrainState() {
     if (CudaAdam::preferCpuOffload && CudaAdam::preferFp16GpuWeights)
         this->materializeFp16GpuWorkingWeights();
 
+    if (this->preferSpulse && CudaAdam::preferFp16GpuWeights && CudaSbao::pipelineHostWeightUpdate()) {
+        if (this->hostBlockAdamStates.size() != this->blocks.size())
+            this->hostBlockAdamStates.resize(this->blocks.size());
+        this->hostBlockSpulseStates.resize(this->blocks.size());
+        for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+            CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[blockIndex];
+            CudaTransformerBlockHostSpulseStates& spulseHosts = this->hostBlockSpulseStates[blockIndex];
+            // Masters are seeded in materializeFp16GpuWorkingWeights; allocate SPULSE momentum now.
+            if (!hosts.queryWeightMaster.empty()) {
+                spulseHosts.queryWeight.ensure(hosts.queryWeightMaster);
+                spulseHosts.keyWeight.ensure(hosts.keyWeightMaster);
+                spulseHosts.valueWeight.ensure(hosts.valueWeightMaster);
+                spulseHosts.attentionOutputWeight.ensure(hosts.attentionOutputWeightMaster);
+                spulseHosts.feedForwardGateWeight.ensure(hosts.feedForwardGateWeightMaster);
+                spulseHosts.feedForwardUpWeight.ensure(hosts.feedForwardUpWeightMaster);
+                spulseHosts.feedForwardDownWeight.ensure(hosts.feedForwardDownWeightMaster);
+            }
+        }
+    }
+
     if (CudaAdam::preferHostGradients) {
         if (this->hostBlockAdamStates.size() != this->blocks.size())
             this->hostBlockAdamStates.resize(this->blocks.size());

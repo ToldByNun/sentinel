@@ -552,7 +552,11 @@ void LanguageModel::enableCudaTrain() {
     }
     std::cout << "LanguageModel::enableCudaTrain: device training enabled (packed batches, ckpt="
               << CudaLanguageModel::activationCheckpointModeName(this->device->activationCheckpointMode)
-              << ", opt=" << (this->device->preferSpulse ? "spulse+adam" : (this->device->preferMuon ? "muon+adam" : "adam"))
+              << ", opt=" << (this->device->preferSpulse
+                    ? (CudaSbao::pipelineHostWeightUpdate() ? "spulse-host+adam" : "spulse+adam")
+                    : (this->device->preferMuon ? "muon+adam"
+                        : (CudaAdam::preferHostSgd ? "host-sgd"
+                            : (CudaSbao::pipelineHostAdam() ? "host-adam" : "adam"))))
               << ", sbao=" << (CudaSbao::enabled ? CudaSbao::modeName(CudaSbao::resolved) : "off")
               << ", FP16 amp "
               << (CudaAmp::preferMixedPrecision ? "on" : "off")

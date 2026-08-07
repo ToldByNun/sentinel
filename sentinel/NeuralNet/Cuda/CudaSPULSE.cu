@@ -38,51 +38,6 @@ float computeScale(float energyFast, float energySlow, float epsilon, float scal
     return clipScale(std::sqrt(energySlow / (energyFast + epsilon)), scaleMin, scaleMax);
 }
 
-__global__ void spulseLerpMomentum(
-    float* momentum,
-    const float* gradient,
-    int elementCount,
-    float beta,
-    float oneMinusBeta,
-    float gradientScale
-) {
-    const int index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index >= elementCount) return;
-    const float g = gradient[index] * gradientScale;
-    momentum[index] = beta * momentum[index] + oneMinusBeta * g;
-}
-
-__global__ void spulseSumSquaresScaled(
-    const float* gradient,
-    int elementCount,
-    float gradientScale,
-    float* outSum
-) {
-    __shared__ float shared[256];
-    float local = 0.0f;
-    const float scale = gradientScale;
-    for (int index = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
-         index < elementCount;
-         index += static_cast<int>(blockDim.x * gridDim.x)) {
-        const float g = gradient[index] * scale;
-        local += g * g;
-    }
-    shared[threadIdx.x] = local;
-    __syncthreads();
-    for (int stride = static_cast<int>(blockDim.x) / 2; stride > 0; stride >>= 1) {
-        if (static_cast<int>(threadIdx.x) < stride)
-            shared[threadIdx.x] += shared[threadIdx.x + stride];
-        __syncthreads();
-    }
-    if (threadIdx.x == 0)
-        atomicAdd(outSum, shared[0]);
-}
-
-/// <summary>
-/// Fused step: momentum + apply with lagged scale (energy[2]) + accumulate ||g||².
-/// Follow with spulseCommitEnergyAndScale to refresh energy/scale for the next step.
-/// energy layout: [0]=e_fast, [1]=e_slow, [2]=scale
-/// </summary>
 __global__ void spulseFusedStep(
     float* parameter,
     float* momentum,
@@ -145,47 +100,6 @@ __global__ void spulseCommitEnergyAndScale(
     if (scale < scaleMin) scale = scaleMin;
     if (scale > scaleMax) scale = scaleMax;
     energy[2] = scale;
-}
-
-__global__ void spulseUpdateEnergyAndScale(
-    float* energy,
-    const float* sumSquares,
-    float* outScale,
-    float fastBeta,
-    float slowBeta,
-    float oneMinusFast,
-    float oneMinusSlow,
-    float epsilon,
-    float scaleMin,
-    float scaleMax
-) {
-    float eFast = energy[0];
-    float eSlow = energy[1];
-    const float g2 = *sumSquares;
-    eFast = fastBeta * eFast + oneMinusFast * g2;
-    eSlow = slowBeta * eSlow + oneMinusSlow * g2;
-    energy[0] = eFast;
-    energy[1] = eSlow;
-    float scale = sqrtf(eSlow / (eFast + epsilon));
-    if (scale < scaleMin) scale = scaleMin;
-    if (scale > scaleMax) scale = scaleMax;
-    *outScale = scale;
-}
-
-__global__ void spulseApply(
-    float* parameter,
-    const float* momentum,
-    const float* scale,
-    int elementCount,
-    float learningRate,
-    float keep
-) {
-    const int index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index >= elementCount) return;
-    float value = parameter[index];
-    if (keep != 1.0f)
-        value *= keep;
-    parameter[index] = value - learningRate * (*scale) * momentum[index];
 }
 
 void hostUpdateCore(

@@ -254,8 +254,166 @@ int main() {
     }
 #endif
 
-    // Temporary: Adam vs SPULSE head-to-head tok/s (+ apply breakdown). Flip false after check.
-    const bool runSpulseThroughputCompare = true;
+    // Temporary: GPU Adam vs SPULSE (resident). Flip false after check.
+    const bool runSpulseThroughputCompare = false;
+    // Temporary: HostSGD vs HostAdam vs SPULSE-Host. Flip false after check.
+    const bool runSpulseHostThroughputCompare = true;
+
+    if (runSpulseHostThroughputCompare) {
+        SmokeLog::section("HostSGD vs HostAdam vs SPULSE-Host");
+        if (!CudaMatmul::isAvailable()) {
+            SmokeLog::skip("SPULSE-Host compare (no CUDA)");
+            return 1;
+        }
+        try {
+            enum class HostOptKind { HostSgd = 0, HostAdam = 1, SpulseHost = 2 };
+
+            const int vocab = 4000;
+            const int embed = 768;
+            const int blocks = 8;
+            const int heads = 12;
+            const int pos = 512;
+            const int probeSeq = 256;
+            const int warmup = 3;
+            const int timed = 8;
+            const int forcedPackCols = 4096;
+
+            auto resetGlobals = []() {
+                CudaAmp::clearMasterWeights();
+                CudaAmp::preferMixedPrecision = true;
+                CudaAmp::useLossScaling = true;
+                CudaAmp::resetLossScaler();
+                CudaAdam::preferCpuOffload = false;
+                CudaAdam::preferFp16GpuWeights = false;
+                CudaAdam::preferHostGradients = false;
+                CudaAdam::preferHostSgd = false;
+                CudaAdam::preferInt8Moments = true;
+                CudaSbao::enabled = false;
+                CudaSbao::request = SbaoMode::Auto;
+                CudaSbao::resolved = SbaoMode::GpuInt8Adam;
+                cudaGetLastError();
+            };
+
+            auto runHost = [&](const char* label, HostOptKind kind) -> double {
+                resetGlobals();
+                LanguageModel model(vocab, embed, pos, Adam(0.001f), blocks, heads);
+                model.enableCuda();
+                model.setCudaPreferFlashAttention(true);
+                model.setCudaPreferMuon(false);
+
+                switch (kind) {
+                case HostOptKind::HostSgd:
+                    model.setCudaSbaoMode(SbaoMode::HostFusedHalfSgd);
+                    model.setCudaPreferSpulse(false);
+                    break;
+                case HostOptKind::HostAdam:
+                    model.setCudaSbaoMode(SbaoMode::HostFusedHalfAdam);
+                    model.setCudaPreferSpulse(false);
+                    break;
+                case HostOptKind::SpulseHost:
+                    // Same residency as HostAdam; SPULSE replaces host Adam on large weights.
+                    model.setCudaSbaoMode(SbaoMode::HostFusedHalfAdam);
+                    model.setCudaPreferSpulse(true);
+                    break;
+                }
+
+                model.enableCudaTrain();
+                model.setCudaPreferTrainGraph(false);
+
+                // Unify layout where HostAdam/SPULSE-Host allow it (HostSGD keeps tuneOffload Full).
+                if (kind != HostOptKind::HostSgd) {
+                    model.setActivationCheckpointMode(ActivationCheckpointMode::Selective);
+                    model.setCudaMaxPackedColumns(forcedPackCols);
+                }
+
+                size_t freeBytes = 0;
+                size_t totalBytes = 0;
+                cudaMemGetInfo(&freeBytes, &totalBytes);
+                const double tok = model.probeCudaPackedTrainTokensPerSecond(probeSeq, warmup, timed);
+                SmokeLog::result(
+                    label,
+                    "sbao=%s  spulse=%s  ckpt=%s  maxPackCols=%d  freeMiB=%.0f  tokens/s=%.0f",
+                    CudaSbao::modeName(model.cudaSbaoModeResolved()),
+                    kind == HostOptKind::SpulseHost ? "on" : "off",
+                    CudaLanguageModel::activationCheckpointModeName(model.cudaActivationCheckpointMode()),
+                    model.cudaMaxPackedColumns(),
+                    static_cast<double>(freeBytes) / (1024.0 * 1024.0),
+                    tok);
+                return tok;
+            };
+
+            const double sgdTok = runHost("HostSGD 8x768", HostOptKind::HostSgd);
+            const double adamTok = runHost("HostAdam 8x768", HostOptKind::HostAdam);
+            const double spulseTok = runHost("SPULSE-Host 8x768", HostOptKind::SpulseHost);
+
+            auto ratio = [](double num, double den) { return den > 0.0 ? num / den : 0.0; };
+            SmokeLog::result(
+                "8x768 host ratios",
+                "HostSGD=%.0f  HostAdam=%.0f  SPULSE-Host=%.0f  |  SPULSE/SGD=%.3f  SPULSE/Adam=%.3f  Adam/SGD=%.3f",
+                sgdTok,
+                adamTok,
+                spulseTok,
+                ratio(spulseTok, sgdTok),
+                ratio(spulseTok, adamTok),
+                ratio(adamTok, sgdTok));
+
+            // Second shape: 12×768 (still mid; HostAdam residency for Adam/SPULSE).
+            {
+                const int blocks12 = 12;
+                auto run12 = [&](const char* label, HostOptKind kind) -> double {
+                    resetGlobals();
+                    LanguageModel model(vocab, embed, pos, Adam(0.001f), blocks12, heads);
+                    model.enableCuda();
+                    model.setCudaPreferFlashAttention(true);
+                    model.setCudaPreferMuon(false);
+                    switch (kind) {
+                    case HostOptKind::HostSgd:
+                        model.setCudaSbaoMode(SbaoMode::HostFusedHalfSgd);
+                        model.setCudaPreferSpulse(false);
+                        break;
+                    case HostOptKind::HostAdam:
+                        model.setCudaSbaoMode(SbaoMode::HostFusedHalfAdam);
+                        model.setCudaPreferSpulse(false);
+                        break;
+                    case HostOptKind::SpulseHost:
+                        model.setCudaSbaoMode(SbaoMode::HostFusedHalfAdam);
+                        model.setCudaPreferSpulse(true);
+                        break;
+                    }
+                    model.enableCudaTrain();
+                    model.setCudaPreferTrainGraph(false);
+                    if (kind != HostOptKind::HostSgd) {
+                        model.setActivationCheckpointMode(ActivationCheckpointMode::Selective);
+                        model.setCudaMaxPackedColumns(forcedPackCols);
+                    }
+                    const double tok = model.probeCudaPackedTrainTokensPerSecond(probeSeq, warmup, timed);
+                    SmokeLog::result(
+                        label,
+                        "sbao=%s  spulse=%s  maxPackCols=%d  tokens/s=%.0f",
+                        CudaSbao::modeName(model.cudaSbaoModeResolved()),
+                        kind == HostOptKind::SpulseHost ? "on" : "off",
+                        model.cudaMaxPackedColumns(),
+                        tok);
+                    return tok;
+                };
+                const double s = run12("HostSGD 12x768", HostOptKind::HostSgd);
+                const double a = run12("HostAdam 12x768", HostOptKind::HostAdam);
+                const double p = run12("SPULSE-Host 12x768", HostOptKind::SpulseHost);
+                SmokeLog::result(
+                    "12x768 host ratios",
+                    "HostSGD=%.0f  HostAdam=%.0f  SPULSE-Host=%.0f  |  SPULSE/SGD=%.3f  SPULSE/Adam=%.3f",
+                    s,
+                    a,
+                    p,
+                    ratio(p, s),
+                    ratio(p, a));
+            }
+            return 0;
+        } catch (const std::exception& ex) {
+            SmokeLog::result("SPULSE-Host compare", "FAILED: %s", ex.what());
+            return 1;
+        }
+    }
 
     if (runSpulseThroughputCompare) {
         SmokeLog::section("SPULSE vs Adam throughput");
@@ -328,7 +486,6 @@ int main() {
                 ratio,
                 ratio >= 1.0 ? "SPULSE faster" : "Adam faster");
 
-            // Same shape as speed-bench 8×768 selective for a second point.
             {
                 resetGlobals();
                 auto runSmall = [&](const char* label, bool spulse) -> double {
