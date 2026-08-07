@@ -311,8 +311,8 @@ int main() {
                     model.setCudaPreferSpulse(false);
                     break;
                 case HostOptKind::SpulseHost:
-                    // Same residency as HostAdam; SPULSE replaces host Adam on large weights.
-                    model.setCudaSbaoMode(SbaoMode::HostFusedHalfAdam);
+                    // Same residency/pack path as HostSGD; lite host apply (no momentum buffer).
+                    model.setCudaSbaoMode(SbaoMode::HostFusedHalfSgd);
                     model.setCudaPreferSpulse(true);
                     break;
                 }
@@ -320,8 +320,8 @@ int main() {
                 model.enableCudaTrain();
                 model.setCudaPreferTrainGraph(false);
 
-                // Unify layout where HostAdam/SPULSE-Host allow it (HostSGD keeps tuneOffload Full).
-                if (kind != HostOptKind::HostSgd) {
+                // HostAdam keeps its own Selective@forcedPack; SGD/SPULSE-Host share tuneOffload Full.
+                if (kind == HostOptKind::HostAdam) {
                     model.setActivationCheckpointMode(ActivationCheckpointMode::Selective);
                     model.setCudaMaxPackedColumns(forcedPackCols);
                 }
@@ -376,13 +376,13 @@ int main() {
                         model.setCudaPreferSpulse(false);
                         break;
                     case HostOptKind::SpulseHost:
-                        model.setCudaSbaoMode(SbaoMode::HostFusedHalfAdam);
+                        model.setCudaSbaoMode(SbaoMode::HostFusedHalfSgd);
                         model.setCudaPreferSpulse(true);
                         break;
                     }
                     model.enableCudaTrain();
                     model.setCudaPreferTrainGraph(false);
-                    if (kind != HostOptKind::HostSgd) {
+                    if (kind == HostOptKind::HostAdam) {
                         model.setActivationCheckpointMode(ActivationCheckpointMode::Selective);
                         model.setCudaMaxPackedColumns(forcedPackCols);
                     }

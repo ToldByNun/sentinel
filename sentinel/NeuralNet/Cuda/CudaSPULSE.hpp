@@ -83,6 +83,11 @@ public:
     float scaleMax;
     float weightDecay;
     SpulseCoverage coverage;
+    /// <summary>
+    /// Host fused-half path: skip per-element momentum (dual-horizon scale × grad only).
+    /// Matches HostSGD memory traffic so SPULSE-Host can compete on tok/s; GPU keeps full momentum.
+    /// </summary>
+    bool hostLightweight;
 
     /// <summary>scratch for ||g||² reduction (device); reused across updates</summary>
     CudaDeviceBuffer sumSquaresScratch;
@@ -96,7 +101,8 @@ public:
         float scaleMin = 0.25f,
         float scaleMax = 4.0f,
         float weightDecay = 0.0f,
-        SpulseCoverage coverage = SpulseCoverage::Hybrid);
+        SpulseCoverage coverage = SpulseCoverage::Hybrid,
+        bool hostLightweight = true);
 
     /// <summary>true when this tensor class is owned by SPULSE under current coverage</summary>
     bool ownsHybridBlockWeights() const;

@@ -476,10 +476,11 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
             const float sMax = this->spulse.scaleMax;
             const float wd = this->spulse.weightDecay;
             const SpulseCoverage coverage = this->spulse.coverage;
+            const bool hostLite = this->spulse.hostLightweight;
             asyncHostUpdateJobs.push_back(AsyncHostUpdateJob{
                 blockToUpdate,
-                std::async(std::launch::async, [lr, mom, fast, slow, eps, sMin, sMax, wd, coverage, gradScale]() {
-                    CudaSpulse local(lr, mom, fast, slow, eps, sMin, sMax, wd, coverage);
+                std::async(std::launch::async, [lr, mom, fast, slow, eps, sMin, sMax, wd, coverage, hostLite, gradScale]() {
+                    CudaSpulse local(lr, mom, fast, slow, eps, sMin, sMax, wd, coverage, hostLite);
                     std::vector<SbaoFusedHalfHostPiece> views;
                     std::uint16_t* hostPin = nullptr;
                     if (!CudaSbao::takeReadyFusedHalfHostBatch(views, hostPin))
@@ -947,18 +948,20 @@ void CudaLanguageModel::ensureTrainState() {
         if (this->hostBlockAdamStates.size() != this->blocks.size())
             this->hostBlockAdamStates.resize(this->blocks.size());
         this->hostBlockSpulseStates.resize(this->blocks.size());
-        for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
-            CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[blockIndex];
-            CudaTransformerBlockHostSpulseStates& spulseHosts = this->hostBlockSpulseStates[blockIndex];
-            // Masters are seeded in materializeFp16GpuWorkingWeights; allocate SPULSE momentum now.
-            if (!hosts.queryWeightMaster.empty()) {
-                spulseHosts.queryWeight.ensure(hosts.queryWeightMaster);
-                spulseHosts.keyWeight.ensure(hosts.keyWeightMaster);
-                spulseHosts.valueWeight.ensure(hosts.valueWeightMaster);
-                spulseHosts.attentionOutputWeight.ensure(hosts.attentionOutputWeightMaster);
-                spulseHosts.feedForwardGateWeight.ensure(hosts.feedForwardGateWeightMaster);
-                spulseHosts.feedForwardUpWeight.ensure(hosts.feedForwardUpWeightMaster);
-                spulseHosts.feedForwardDownWeight.ensure(hosts.feedForwardDownWeightMaster);
+        // hostLightweight (default): only dual-horizon scalars — no per-element momentum alloc.
+        if (!this->spulse.hostLightweight) {
+            for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+                CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[blockIndex];
+                CudaTransformerBlockHostSpulseStates& spulseHosts = this->hostBlockSpulseStates[blockIndex];
+                if (!hosts.queryWeightMaster.empty()) {
+                    spulseHosts.queryWeight.ensure(hosts.queryWeightMaster);
+                    spulseHosts.keyWeight.ensure(hosts.keyWeightMaster);
+                    spulseHosts.valueWeight.ensure(hosts.valueWeightMaster);
+                    spulseHosts.attentionOutputWeight.ensure(hosts.attentionOutputWeightMaster);
+                    spulseHosts.feedForwardGateWeight.ensure(hosts.feedForwardGateWeightMaster);
+                    spulseHosts.feedForwardUpWeight.ensure(hosts.feedForwardUpWeightMaster);
+                    spulseHosts.feedForwardDownWeight.ensure(hosts.feedForwardDownWeightMaster);
+                }
             }
         }
     }

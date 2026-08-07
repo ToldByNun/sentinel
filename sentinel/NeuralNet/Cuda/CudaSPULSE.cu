@@ -180,6 +180,44 @@ void hostUpdateFromHalfCore(
     scale = computeScale(energyFast, energySlow, epsilon, scaleMin, scaleMax);
 }
 
+/// <summary>
+/// HostSGD-shaped loop: master -= lr * scale * g. No momentum buffer.
+/// Extra work vs HostSGD: accumulate ||g||² + update dual-horizon scale for next step.
+/// </summary>
+void hostUpdateFromHalfLite(
+    float* parameter,
+    float& energyFast,
+    float& energySlow,
+    float& scale,
+    const __half* gradHalf,
+    size_t elementCount,
+    float learningRate,
+    float fastBeta,
+    float slowBeta,
+    float epsilon,
+    float scaleMin,
+    float scaleMax,
+    float weightDecay,
+    float gradientScale
+) {
+    const float oneMinusFast = 1.0f - fastBeta;
+    const float oneMinusSlow = 1.0f - slowBeta;
+    const float step = learningRate * scale;
+    const float keep = 1.0f - learningRate * weightDecay;
+    float sumSquares = 0.0f;
+    for (size_t i = 0; i < elementCount; ++i) {
+        const float g = gradientScale * __half2float(gradHalf[i]);
+        sumSquares += g * g;
+        float value = parameter[i];
+        if (keep != 1.0f)
+            value *= keep;
+        parameter[i] = value - step * g;
+    }
+    energyFast = fastBeta * energyFast + oneMinusFast * sumSquares;
+    energySlow = slowBeta * energySlow + oneMinusSlow * sumSquares;
+    scale = computeScale(energyFast, energySlow, epsilon, scaleMin, scaleMax);
+}
+
 } // namespace
 
 bool CudaSpulseState::empty() const {
@@ -277,7 +315,8 @@ CudaSpulse::CudaSpulse(
     float scaleMin,
     float scaleMax,
     float weightDecay,
-    SpulseCoverage coverage
+    SpulseCoverage coverage,
+    bool hostLightweight
 )
     : learningRate(learningRate),
       momentumBeta(momentumBeta),
@@ -287,7 +326,8 @@ CudaSpulse::CudaSpulse(
       scaleMin(scaleMin),
       scaleMax(scaleMax),
       weightDecay(weightDecay),
-      coverage(coverage) {
+      coverage(coverage),
+      hostLightweight(hostLightweight) {
     if (learningRate <= 0.0f) throw std::invalid_argument("CudaSpulse learningRate must be > 0");
     if (momentumBeta < 0.0f || momentumBeta >= 1.0f) throw std::invalid_argument("CudaSpulse momentumBeta must be in [0, 1)");
     if (fastBeta < 0.0f || fastBeta >= 1.0f) throw std::invalid_argument("CudaSpulse fastBeta must be in [0, 1)");
@@ -393,6 +433,29 @@ void CudaSpulse::updateHostFromHalf(
     if (gradHalf == nullptr) throw std::invalid_argument("CudaSpulse::updateHostFromHalf null gradHalf");
     if (parameter.data.size() != elementCount)
         throw std::invalid_argument("CudaSpulse::updateHostFromHalf size mismatch");
+
+    if (this->hostLightweight) {
+        // Energy scalars only — do not allocate per-element momentum (HostSGD traffic).
+        if (state.scale <= 0.0f)
+            state.scale = 1.0f;
+        hostUpdateFromHalfLite(
+            parameter.data.data(),
+            state.energyFast,
+            state.energySlow,
+            state.scale,
+            reinterpret_cast<const __half*>(gradHalf),
+            elementCount,
+            this->learningRate,
+            this->fastBeta,
+            this->slowBeta,
+            this->epsilon,
+            this->scaleMin,
+            this->scaleMax,
+            this->weightDecay,
+            gradientScale);
+        return;
+    }
+
     state.ensure(parameter);
     hostUpdateFromHalfCore(
         parameter.data.data(),
@@ -415,7 +478,7 @@ void CudaSpulse::updateHostFromHalf(
 
 void CudaSpulse::applyFusedHalfHostPieces(const std::vector<SpulseFusedHalfHostPiece>& pieces, float gradientScale) const {
 #if defined(_OPENMP)
-    #pragma omp parallel for schedule(dynamic)
+    #pragma omp parallel for schedule(static)
 #endif
     for (int pieceIndex = 0; pieceIndex < static_cast<int>(pieces.size()); ++pieceIndex) {
         const SpulseFusedHalfHostPiece& piece = pieces[static_cast<size_t>(pieceIndex)];
