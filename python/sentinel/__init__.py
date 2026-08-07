@@ -1,7 +1,7 @@
 """Sentinel — C++/CUDA full-train causal LM (pip: sentinel-lm).
 
 Public surface: BPETokenizer, HfTokenizer, LanguageModelDataset, LanguageModel,
-ActivationCheckpointMode, SbaoMode, cuda_available.
+ActivationCheckpointMode, SbaoMode, SpulseCoverage, cuda_available.
 
 API docs: https://github.com/ToldByNun/sentinel/blob/main/docs/python.md
 """
@@ -59,6 +59,7 @@ _add_cuda_dll_directories()
 from ._core import (  # noqa: E402
     ActivationCheckpointMode,
     SbaoMode,
+    SpulseCoverage,
     BPETokenizer,
     HfTokenizer,
     LanguageModel,
@@ -70,6 +71,7 @@ from ._core import (  # noqa: E402
 __all__ = [
     "ActivationCheckpointMode",
     "SbaoMode",
+    "SpulseCoverage",
     "BPETokenizer",
     "HfTokenizer",
     "LanguageModel",

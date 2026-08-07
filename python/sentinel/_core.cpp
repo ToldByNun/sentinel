@@ -55,6 +55,10 @@ NB_MODULE(_core, m) {
         .value("HostFusedHalfAdam", SbaoMode::HostFusedHalfAdam)
         .value("HostFusedHalfSgd", SbaoMode::HostFusedHalfSgd);
 
+    nb::enum_<SpulseCoverage>(m, "SpulseCoverage")
+        .value("Hybrid", SpulseCoverage::Hybrid)
+        .value("Full", SpulseCoverage::Full);
+
     nb::class_<BPETokenizer>(m, "BPETokenizer")
         .def(nb::init<>())
         .def(
@@ -166,6 +170,31 @@ NB_MODULE(_core, m) {
             "set_prefer_muon",
             &LanguageModel::setCudaPreferMuon,
             nb::arg("enabled"))
+        .def(
+            "set_prefer_spulse",
+            &LanguageModel::setCudaPreferSpulse,
+            nb::arg("enabled"))
+        .def(
+            "set_spulse_coverage",
+            &LanguageModel::setCudaSpulseCoverage,
+            nb::arg("coverage"))
+        .def(
+            "set_spulse_momentum_beta",
+            &LanguageModel::setCudaSpulseMomentumBeta,
+            nb::arg("beta"))
+        .def(
+            "set_spulse_fast_beta",
+            &LanguageModel::setCudaSpulseFastBeta,
+            nb::arg("beta"))
+        .def(
+            "set_spulse_slow_beta",
+            &LanguageModel::setCudaSpulseSlowBeta,
+            nb::arg("beta"))
+        .def(
+            "set_spulse_scale_clip",
+            &LanguageModel::setCudaSpulseScaleClip,
+            nb::arg("scale_min"),
+            nb::arg("scale_max"))
         .def(
             "set_prefer_int8_adam_moments",
             &LanguageModel::setCudaPreferInt8AdamMoments,

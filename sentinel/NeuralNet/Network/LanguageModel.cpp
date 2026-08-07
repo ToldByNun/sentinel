@@ -412,7 +412,7 @@ void LanguageModel::probeCudaTrainStepProfile(int sequenceLength, int warmupStep
         avgAccum,
         avgApply,
         mp.updateCount,
-        device.preferMuon ? "muon+adam" : "adam");
+        device.preferSpulse ? "spulse+adam" : (device.preferMuon ? "muon+adam" : "adam"));
 
     if (device.preferMuon && mp.updateCount > 0) {
         SmokeLog::result(
@@ -552,7 +552,7 @@ void LanguageModel::enableCudaTrain() {
     }
     std::cout << "LanguageModel::enableCudaTrain: device training enabled (packed batches, ckpt="
               << CudaLanguageModel::activationCheckpointModeName(this->device->activationCheckpointMode)
-              << ", opt=" << (this->device->preferMuon ? "muon+adam" : "adam")
+              << ", opt=" << (this->device->preferSpulse ? "spulse+adam" : (this->device->preferMuon ? "muon+adam" : "adam"))
               << ", sbao=" << (CudaSbao::enabled ? CudaSbao::modeName(CudaSbao::resolved) : "off")
               << ", FP16 amp "
               << (CudaAmp::preferMixedPrecision ? "on" : "off")
@@ -830,6 +830,60 @@ void LanguageModel::setCudaMuonNsSteps(int steps) {
     if (this->device == nullptr) return;
     this->device->muon.nsSteps = steps;
     std::cout << "LanguageModel::setCudaMuonNsSteps: " << steps << '\n';
+}
+
+void LanguageModel::setCudaPreferSpulse(bool enabled) {
+    if (this->device == nullptr) this->enableCuda();
+    if (this->device == nullptr) return;
+    this->device->setPreferSpulse(enabled);
+    if (this->deviceTrainEnabled) {
+        this->device->trainStateReady = false;
+        this->device->ensureTrainState();
+    }
+    std::cout << "LanguageModel::setCudaPreferSpulse: " << (enabled ? "on" : "off")
+              << "  coverage=" << CudaSpulse::coverageName(this->device->spulse.coverage) << '\n';
+}
+
+void LanguageModel::setCudaSpulseCoverage(SpulseCoverage coverage) {
+    if (coverage == SpulseCoverage::Full)
+        throw std::invalid_argument("LanguageModel::setCudaSpulseCoverage Full not implemented yet (use Hybrid)");
+    if (this->device == nullptr) this->enableCuda();
+    if (this->device == nullptr) return;
+    this->device->spulse.coverage = coverage;
+    std::cout << "LanguageModel::setCudaSpulseCoverage: " << CudaSpulse::coverageName(coverage) << '\n';
+}
+
+void LanguageModel::setCudaSpulseMomentumBeta(float beta) {
+    if (beta < 0.0f || beta >= 1.0f)
+        throw std::invalid_argument("LanguageModel::setCudaSpulseMomentumBeta must be in [0, 1)");
+    if (this->device == nullptr) this->enableCuda();
+    if (this->device == nullptr) return;
+    this->device->spulse.momentumBeta = beta;
+}
+
+void LanguageModel::setCudaSpulseFastBeta(float beta) {
+    if (beta < 0.0f || beta >= 1.0f)
+        throw std::invalid_argument("LanguageModel::setCudaSpulseFastBeta must be in [0, 1)");
+    if (this->device == nullptr) this->enableCuda();
+    if (this->device == nullptr) return;
+    this->device->spulse.fastBeta = beta;
+}
+
+void LanguageModel::setCudaSpulseSlowBeta(float beta) {
+    if (beta < 0.0f || beta >= 1.0f)
+        throw std::invalid_argument("LanguageModel::setCudaSpulseSlowBeta must be in [0, 1)");
+    if (this->device == nullptr) this->enableCuda();
+    if (this->device == nullptr) return;
+    this->device->spulse.slowBeta = beta;
+}
+
+void LanguageModel::setCudaSpulseScaleClip(float scaleMin, float scaleMax) {
+    if (scaleMin <= 0.0f || scaleMax < scaleMin)
+        throw std::invalid_argument("LanguageModel::setCudaSpulseScaleClip invalid range");
+    if (this->device == nullptr) this->enableCuda();
+    if (this->device == nullptr) return;
+    this->device->spulse.scaleMin = scaleMin;
+    this->device->spulse.scaleMax = scaleMax;
 }
 
 void LanguageModel::setCudaPreferFlashAttention(bool enabled) {

@@ -57,6 +57,7 @@
     <CudaCompile Include="NeuralNet\Cuda\CudaAdam.cu" />
     <CudaCompile Include="NeuralNet\Cuda\CudaSbao.cu" />
     <CudaCompile Include="NeuralNet\Cuda\CudaMuon.cu" />
+    <CudaCompile Include="NeuralNet\Cuda\CudaSPULSE.cu" />
     <CudaCompile Include="NeuralNet\Cuda\CudaKvCache.cu" />
     <CudaCompile Include="NeuralNet\Cuda\CudaTransformerBlock.cu" />
     <CudaCompile Include="NeuralNet\Cuda\CudaLanguageModel.cu" />
@@ -64,6 +65,7 @@
     <ClCompile Include="NeuralNet\Network\Sequential.cpp" />
     <ClCompile Include="NeuralNet\Optimizers\Adam.cpp" />
     <ClCompile Include="NeuralNet\Optimizers\SGD.cpp" />
+    <ClCompile Include="NeuralNet\Optimizers\Spulse.cpp" />
     <ClCompile Include="NeuralNet\Tokenizer\BPETokenizer.cpp" />
     <ClCompile Include="NeuralNet\Tokenizer\HfTokenizer.cpp" />
   </ItemGroup>
@@ -104,6 +106,7 @@
     <ClInclude Include="NeuralNet\Cuda\CudaAdam.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaSbao.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaMuon.hpp" />
+    <ClInclude Include="NeuralNet\Cuda\CudaSPULSE.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaKvCache.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaTransformerBlock.hpp" />
     <ClInclude Include="NeuralNet\Cuda\CudaLanguageModel.hpp" />
@@ -111,6 +114,7 @@
     <ClInclude Include="NeuralNet\Network\Sequential.hpp" />
     <ClInclude Include="NeuralNet\Optimizers\Adam.hpp" />
     <ClInclude Include="NeuralNet\Optimizers\SGD.hpp" />
+    <ClInclude Include="NeuralNet\Optimizers\Spulse.hpp" />
     <ClInclude Include="NeuralNet\Tokenizer\BPETokenizer.hpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">

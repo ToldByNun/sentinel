@@ -9,6 +9,7 @@
 #include "../Layers/TransformerBlock.hpp"
 #include "../Math/Matrix.hpp"
 #include "../Cuda/CudaSbao.hpp"
+#include "../Optimizers/Spulse.hpp"
 #include "../IO/SafeTensors.hpp"
 #include "../Optimizers/Adam.hpp"
 
@@ -153,6 +154,21 @@ public:
 
     /// <summary>set Newton-Schulz iterations for Muon hidden-weight updates</summary>
     void setCudaMuonNsSteps(int steps);
+
+    /// <summary>
+    /// SPULSE hybrid: dual-horizon energy-scaled momentum on hidden 2D weights + Adam on embed/norms/biases/head.
+    /// Mutex with Muon. Opt-in; works on GPU-resident and host fused-half SBAO paths.
+    /// </summary>
+    void setCudaPreferSpulse(bool enabled);
+
+    /// <summary>Hybrid (default) or Full (planned; Full owns all params when implemented)</summary>
+    void setCudaSpulseCoverage(SpulseCoverage coverage);
+
+    /// <summary>SPULSE momentum / energy EMA betas</summary>
+    void setCudaSpulseMomentumBeta(float beta);
+    void setCudaSpulseFastBeta(float beta);
+    void setCudaSpulseSlowBeta(float beta);
+    void setCudaSpulseScaleClip(float scaleMin, float scaleMax);
 
     /// <summary>ZeRO-Offload Stage-1: keep Adam m/v on host RAM (disables int8 device moments)</summary>
     void setCudaPreferCpuAdamOffload(bool enabled);

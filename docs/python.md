@@ -48,6 +48,15 @@ Sentinel Backend Adaptive Optimization residency policy.
 | `HostFusedHalfAdam` | FP16 GPU weights; fused FP16 grad D2H + async host Adam |
 | `HostFusedHalfSgd` | Same D2H path with host SGD (no Adam `m`/`v`; ~4B path) |
 
+### `SpulseCoverage`
+
+SPULSE tensor ownership (optimizer, not SBAO).
+
+| Value | Meaning |
+| ----- | ------- |
+| `Hybrid` | Hidden 2D block weights (default v1); Adam keeps embed/norms/biases/head |
+| `Full` | Planned — all params (not implemented yet) |
+
 ---
 
 ## `BPETokenizer`
@@ -175,6 +184,10 @@ if S.cuda_available():
 | `cuda_train_enabled` | `bool` (ro) | |
 | `set_prefer_flash_attention` | `(enabled: bool) -> None` | |
 | `set_prefer_muon` | `(enabled: bool) -> None` | Muon on hidden 2D weights |
+| `set_prefer_spulse` | `(enabled: bool) -> None` | SPULSE hybrid (mutex with Muon); GPU + host fused-half |
+| `set_spulse_coverage` | `(coverage: SpulseCoverage) -> None` | Hybrid only for now |
+| `set_spulse_momentum_beta` / `set_spulse_fast_beta` / `set_spulse_slow_beta` | `(beta: float) -> None` | SPULSE EMA knobs |
+| `set_spulse_scale_clip` | `(scale_min, scale_max) -> None` | Clip dual-horizon scale |
 | `set_prefer_int8_adam_moments` | `(enabled: bool) -> None` | |
 | `set_prefer_cpu_adam_offload` | `(enabled: bool) -> None` | Host Adam moments / HostFusedHalfAdam path |
 | `set_prefer_host_sgd` | `(enabled: bool) -> None` | HostSGD masters (4B-style) |

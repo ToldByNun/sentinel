@@ -52,6 +52,7 @@ CudaLanguageModel::CudaLanguageModel()
       selectiveLayerStart((std::numeric_limits<int>::max)()),
       preferTrainGraph(true),
       preferMuon(false),
+      preferSpulse(false),
       preferTrainMemTrace(false),
       preferTrainPhaseTrace(false),
       preferTrainProgress(true),
@@ -61,6 +62,7 @@ CudaLanguageModel::CudaLanguageModel()
       trainProgressStepTotal(0),
       adam(0.001f),
       muon(0.001f),
+      spulse(0.001f),
       trainStateReady(false),
       trainStream(nullptr),
       hostGradCopyStream(nullptr),
@@ -145,10 +147,35 @@ void CudaLanguageModel::setPreferMuon(bool enabled) {
     if (this->preferMuon == enabled) return;
     this->preferMuon = enabled;
     this->trainStateReady = false;
+    if (enabled && this->preferSpulse) {
+        this->preferSpulse = false;
+        for (CudaTransformerBlockSpulseStates& blockStates : this->blockSpulseStates)
+            blockStates.free();
+        this->blockSpulseStates.clear();
+        this->hostBlockSpulseStates.clear();
+    }
     if (!enabled) {
         for (CudaTransformerBlockMuonStates& blockStates : this->blockMuonStates)
             blockStates.free();
         this->blockMuonStates.clear();
+    }
+}
+
+void CudaLanguageModel::setPreferSpulse(bool enabled) {
+    if (this->preferSpulse == enabled) return;
+    this->preferSpulse = enabled;
+    this->trainStateReady = false;
+    if (enabled && this->preferMuon) {
+        this->preferMuon = false;
+        for (CudaTransformerBlockMuonStates& blockStates : this->blockMuonStates)
+            blockStates.free();
+        this->blockMuonStates.clear();
+    }
+    if (!enabled) {
+        for (CudaTransformerBlockSpulseStates& blockStates : this->blockSpulseStates)
+            blockStates.free();
+        this->blockSpulseStates.clear();
+        this->hostBlockSpulseStates.clear();
     }
 }
 
@@ -327,7 +354,8 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
     const bool phaseTrace = this->preferTrainPhaseTrace;
     const bool hostLarge = CudaAdam::preferHostGradients;
     const bool pipelineHostUpdate = hostLarge && CudaSbao::pipelineHostWeightUpdate();
-    const bool pipelineHostAdam = pipelineHostUpdate && CudaSbao::pipelineHostAdam();
+    const bool pipelineHostAdam = pipelineHostUpdate && CudaSbao::pipelineHostAdam() && !this->preferSpulse;
+    const bool pipelineHostSpulse = pipelineHostUpdate && this->preferSpulse;
     if (phaseTrace) {
         this->trainPhaseTimers.reset();
         // Pipeline times D2H wait in flushPendingHostUpdate; avoid double-count via download sink.
@@ -436,7 +464,42 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
 
         const int blockToUpdate = pendingHostUpdateBlock;
         pendingHostUpdateBlock = -1;
-        if (pipelineHostAdam) {
+        if (pipelineHostSpulse) {
+            this->spulse.learningRate = this->adam.learningRate;
+            const float gradScale = hostAdamGradScale();
+            const float lr = this->spulse.learningRate;
+            const float mom = this->spulse.momentumBeta;
+            const float fast = this->spulse.fastBeta;
+            const float slow = this->spulse.slowBeta;
+            const float eps = this->spulse.epsilon;
+            const float sMin = this->spulse.scaleMin;
+            const float sMax = this->spulse.scaleMax;
+            const float wd = this->spulse.weightDecay;
+            const SpulseCoverage coverage = this->spulse.coverage;
+            asyncHostUpdateJobs.push_back(AsyncHostUpdateJob{
+                blockToUpdate,
+                std::async(std::launch::async, [lr, mom, fast, slow, eps, sMin, sMax, wd, coverage, gradScale]() {
+                    CudaSpulse local(lr, mom, fast, slow, eps, sMin, sMax, wd, coverage);
+                    std::vector<SbaoFusedHalfHostPiece> views;
+                    std::uint16_t* hostPin = nullptr;
+                    if (!CudaSbao::takeReadyFusedHalfHostBatch(views, hostPin))
+                        return;
+                    std::vector<SpulseFusedHalfHostPiece> pieces;
+                    pieces.reserve(views.size());
+                    for (const SbaoFusedHalfHostPiece& view : views) {
+                        SpulseFusedHalfHostPiece piece;
+                        piece.host = view.host;
+                        piece.state = view.spulseState;
+                        piece.gradHalf = view.gradHalf;
+                        piece.rows = view.rows;
+                        piece.cols = view.cols;
+                        piece.elementCount = view.elementCount;
+                        pieces.push_back(piece);
+                    }
+                    local.applyFusedHalfHostPieces(pieces, gradScale);
+                    CudaSbao::releaseFusedHalfHostPin(hostPin);
+                })});
+        } else if (pipelineHostAdam) {
             if (!hostAdamSteppedThisMicrobatch) {
                 this->adam.step();
                 hostAdamSteppedThisMicrobatch = true;
@@ -488,7 +551,19 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
                 hostGrads.feedForwardGateWeight = &hosts.feedForwardGateWeightMaster;
                 hostGrads.feedForwardUpWeight = &hosts.feedForwardUpWeightMaster;
                 hostGrads.feedForwardDownWeight = &hosts.feedForwardDownWeightMaster;
-                if (pipelineHostAdam) {
+                if (pipelineHostSpulse) {
+                    if (this->hostBlockSpulseStates.size() != this->blocks.size())
+                        this->hostBlockSpulseStates.resize(this->blocks.size());
+                    CudaTransformerBlockHostSpulseStates& spulseHosts =
+                        this->hostBlockSpulseStates[static_cast<size_t>(blockIndex)];
+                    hostGrads.queryWeightSpulse = &spulseHosts.queryWeight;
+                    hostGrads.keyWeightSpulse = &spulseHosts.keyWeight;
+                    hostGrads.valueWeightSpulse = &spulseHosts.valueWeight;
+                    hostGrads.attentionOutputWeightSpulse = &spulseHosts.attentionOutputWeight;
+                    hostGrads.feedForwardGateWeightSpulse = &spulseHosts.feedForwardGateWeight;
+                    hostGrads.feedForwardUpWeightSpulse = &spulseHosts.feedForwardUpWeight;
+                    hostGrads.feedForwardDownWeightSpulse = &spulseHosts.feedForwardDownWeight;
+                } else if (pipelineHostAdam) {
                     hostGrads.queryWeightState = &hosts.queryWeight;
                     hostGrads.keyWeightState = &hosts.keyWeight;
                     hostGrads.valueWeightState = &hosts.valueWeight;
@@ -797,6 +872,7 @@ void CudaLanguageModel::ensureTrainState() {
     this->trainGradients.ensureFrom(*this);
     this->trainGradients.zeroInPlace();
     this->muon.learningRate = this->adam.learningRate;
+    this->spulse.learningRate = this->adam.learningRate;
 
     if (CudaAdam::preferCpuOffload) {
         // moments live on host; free any leftover device Adam buffers
@@ -835,6 +911,33 @@ void CudaLanguageModel::ensureTrainState() {
         for (CudaTransformerBlockMuonStates& blockStates : this->blockMuonStates)
             blockStates.free();
         this->blockMuonStates.clear();
+    }
+
+    if (this->preferSpulse) {
+        if (CudaAdam::preferFp16GpuWeights && CudaSbao::pipelineHostWeightUpdate()) {
+            // Host fused-half path: SPULSE state on host masters (per Q/K/V/…).
+            for (CudaTransformerBlockSpulseStates& blockStates : this->blockSpulseStates)
+                blockStates.free();
+            this->blockSpulseStates.clear();
+            this->hostBlockSpulseStates.resize(this->blocks.size());
+        } else if (CudaAdam::preferFp16GpuWeights) {
+            throw std::logic_error("CudaLanguageModel::ensureTrainState SPULSE with FP16 GPU weights requires host pipeline update");
+        } else {
+            this->hostBlockSpulseStates.clear();
+            this->blockSpulseStates.resize(this->blocks.size());
+            for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+                this->blocks[blockIndex].attention.syncFusedQkvWeight();
+                this->blocks[blockIndex].feedForward.syncFusedGateUpWeight();
+                this->blockSpulseStates[blockIndex].ensureFrom(this->blocks[blockIndex]);
+                if (blockIndex < this->blockAdamStates.size())
+                    this->blockAdamStates[blockIndex].freeMuonManagedWeights();
+            }
+        }
+    } else {
+        for (CudaTransformerBlockSpulseStates& blockStates : this->blockSpulseStates)
+            blockStates.free();
+        this->blockSpulseStates.clear();
+        this->hostBlockSpulseStates.clear();
     }
 
     this->finalNormGammaGradient.ensureSize(this->finalNorm.gamma.rows, this->finalNorm.gamma.cols);
@@ -1185,6 +1288,10 @@ size_t CudaLanguageModel::estimatePendingTrainStaticBytes() const {
             + matrixBytes(block.feedForward.upBias)
             + matrixBytes(block.feedForward.downBias);
         if (this->preferMuon) {
+            muonWeightBytes += hiddenWeightBytes;
+            adamWeightBytes += auxWeightBytes;
+        } else if (this->preferSpulse) {
+            // SPULSE: 1× momentum (same bucket as muon moments for estimate)
             muonWeightBytes += hiddenWeightBytes;
             adamWeightBytes += auxWeightBytes;
         } else {
@@ -2556,6 +2663,7 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
 
     this->adam.step();
     this->muon.learningRate = this->adam.learningRate;
+    this->spulse.learningRate = this->adam.learningRate;
 
     auto syncFusedMirrors = [this]() {
         if (CudaAdam::preferFp16GpuWeights && CudaSbao::pipelineHostWeightUpdate()) {
@@ -2638,6 +2746,22 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
         }
     };
 
+    auto applySpulseBlockWeights = [this, &gradients, effectiveGradientScale]() {
+        if (!this->preferSpulse) return;
+        if (CudaSbao::pipelineHostWeightUpdate()) return; // already applied during bwd
+        if (this->blockSpulseStates.size() != this->blocks.size())
+            throw std::logic_error("CudaLanguageModel::applyGradients SPULSE states not ready");
+        for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+            this->spulse.applyHybridBlockWeights(
+                this->blocks[blockIndex],
+                gradients.blocks[blockIndex],
+                this->blockSpulseStates[blockIndex],
+                effectiveGradientScale);
+        }
+    };
+
+    const bool skipLargeAdam = this->preferMuon || this->preferSpulse;
+
     if (CudaAdam::preferCpuOffload) {
         if (this->hostBlockAdamStates.size() != this->blocks.size())
             this->hostBlockAdamStates.resize(this->blocks.size());
@@ -2678,7 +2802,7 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
             const bool hostLarge = CudaAdam::preferHostGradients;
             const bool largeAlreadyApplied = CudaSbao::pipelineHostWeightUpdate();
 
-            if (!this->preferMuon && !largeAlreadyApplied) {
+            if (!skipLargeAdam && !largeAlreadyApplied) {
                 pushOffload(block.attention.queryWeight, blockStates.queryWeight, hostLarge ? nullptr : &blockGradients.queryWeight, &blockStates.queryWeightMaster, hostLarge ? &blockStates.queryWeightGrad : nullptr);
                 pushOffload(block.attention.keyWeight, blockStates.keyWeight, hostLarge ? nullptr : &blockGradients.keyWeight, &blockStates.keyWeightMaster, hostLarge ? &blockStates.keyWeightGrad : nullptr);
                 pushOffload(block.attention.valueWeight, blockStates.valueWeight, hostLarge ? nullptr : &blockGradients.valueWeight, &blockStates.valueWeightMaster, hostLarge ? &blockStates.valueWeightGrad : nullptr);
@@ -2698,6 +2822,7 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
 
         pushOffload(this->tokenEmbeddingWeight, this->hostTokenEmbeddingState, &gradients.tokenEmbedding, &this->hostTokenEmbeddingMaster, nullptr);
         applyMuonBlockWeights();
+        applySpulseBlockWeights();
         {
             const auto t0 = std::chrono::steady_clock::now();
             this->adam.updateCpuOffloadedMany(offloadItems.data(), static_cast<int>(offloadItems.size()), effectiveGradientScale);
@@ -2781,7 +2906,7 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
         CudaTransformerBlockGradients& blockGradients = gradients.blocks[blockIndex];
         CudaTransformerBlockAdamStates& blockStates = this->blockAdamStates[blockIndex];
 
-        if (!this->preferMuon) {
+        if (!skipLargeAdam) {
             pushItem(block.attention.queryWeight, blockStates.queryWeight, blockGradients.queryWeight);
             pushItem(block.attention.keyWeight, blockStates.keyWeight, blockGradients.keyWeight);
             pushItem(block.attention.valueWeight, blockStates.valueWeight, blockGradients.valueWeight);
@@ -2801,7 +2926,7 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
 
     pushItem(this->tokenEmbeddingWeight, this->tokenEmbeddingState, gradients.tokenEmbedding);
 
-    // Overlap Muon NS (often dominant) with Adam aux updates on a second stream.
+    // Overlap Muon/SPULSE with Adam aux updates on a second stream when useful.
     if (this->preferMuon) {
         this->ensureTrainStream();
         const cudaStream_t previous = CudaMatmul::setActiveStream(this->trainStream);
@@ -2809,6 +2934,9 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
         CudaMatmul::setActiveStream(previous);
         this->adam.updateMany(items.data(), static_cast<int>(items.size()), effectiveGradientScale);
         CudaMatmul::throwIfCudaFailed(cudaStreamSynchronize(this->trainStream), "applyGradients muon stream sync");
+    } else if (this->preferSpulse) {
+        applySpulseBlockWeights();
+        this->adam.updateMany(items.data(), static_cast<int>(items.size()), effectiveGradientScale);
     } else {
         this->adam.updateMany(items.data(), static_cast<int>(items.size()), effectiveGradientScale);
     }
@@ -3380,6 +3508,105 @@ void CudaLanguageModel::runMuonTrainSmokeDemo(int vocabularySize, int embeddingD
         lossAfter,
         anyNonFinite ? "no" : "yes",
         device->preferMuon ? "on" : "off");
+
+    CudaAmp::preferMixedPrecision = previousAmp;
+    CudaAmp::useLossScaling = previousLossScale;
+    CudaAdam::preferInt8Moments = previousInt8;
+}
+
+void CudaLanguageModel::runSpulseTrainSmokeDemo(int vocabularySize, int embeddingDim, int sequenceLength, int blockCount, int headCount) {
+    if (!CudaMatmul::isAvailable()) {
+        SmokeLog::skip("SPULSE train");
+        return;
+    }
+    if (vocabularySize <= 0 || embeddingDim <= 0 || sequenceLength <= 0 || blockCount <= 0 || headCount <= 0)
+        throw std::invalid_argument("CudaLanguageModel::runSpulseTrainSmokeDemo invalid dims");
+    if (embeddingDim % headCount != 0)
+        throw std::invalid_argument("CudaLanguageModel::runSpulseTrainSmokeDemo embed must divide heads");
+
+    const bool previousAmp = CudaAmp::preferMixedPrecision;
+    const bool previousLossScale = CudaAmp::useLossScaling;
+    const bool previousInt8 = CudaAdam::preferInt8Moments;
+    CudaAmp::preferMixedPrecision = false;
+    CudaAmp::useLossScaling = false;
+    CudaAdam::preferInt8Moments = false;
+
+    LanguageModel host(vocabularySize, embeddingDim, sequenceLength, Adam(0.001f), blockCount, headCount);
+    auto device = std::make_unique<CudaLanguageModel>();
+    device->uploadFrom(host);
+    device->adam = CudaAdam(0.001f);
+    device->spulse.learningRate = 0.001f;
+    device->preferTrainGraph = false;
+    device->setPreferSpulse(true);
+    device->setActivationCheckpointMode(ActivationCheckpointMode::Selective);
+    for (CudaTransformerBlock& block : device->blocks)
+        block.attention.preferFlashAttention = false;
+
+    device->maxPackedColumns = (std::max)(sequenceLength * 8, sequenceLength);
+    device->ensureTrainState();
+
+    const int packBatchSize = (std::max)(1, (std::min)(4, device->maxPackedColumns / sequenceLength));
+    std::vector<LanguageModelExample> examples(static_cast<size_t>(packBatchSize));
+    unsigned rng = 733u;
+    for (int exampleIndex = 0; exampleIndex < packBatchSize; ++exampleIndex) {
+        examples[static_cast<size_t>(exampleIndex)].inputTokenIds.resize(static_cast<size_t>(sequenceLength));
+        examples[static_cast<size_t>(exampleIndex)].targetTokenIds.resize(static_cast<size_t>(sequenceLength));
+        for (size_t index = 0; index < static_cast<size_t>(sequenceLength); ++index) {
+            rng = rng * 1664525u + 1013904223u;
+            examples[static_cast<size_t>(exampleIndex)].inputTokenIds[index] = static_cast<int>(rng % static_cast<unsigned>(vocabularySize));
+            rng = rng * 1664525u + 1013904223u;
+            examples[static_cast<size_t>(exampleIndex)].targetTokenIds[index] = static_cast<int>(rng % static_cast<unsigned>(vocabularySize));
+        }
+    }
+    std::vector<const LanguageModelExample*> packPointers(static_cast<size_t>(packBatchSize));
+    for (int exampleIndex = 0; exampleIndex < packBatchSize; ++exampleIndex)
+        packPointers[static_cast<size_t>(exampleIndex)] = &examples[static_cast<size_t>(exampleIndex)];
+
+    auto runLoss = [&]() -> float {
+        device->epochLossSum.ensureSize(1, 1);
+        CudaOps::zeroInPlace(device->epochLossSum);
+        device->trainGradients.zeroInPlace();
+        device->accumulatePackedExamples(packPointers.data(), packBatchSize, device->trainGradients);
+        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "SPULSE train smoke loss sync");
+        return device->epochLossSum.download().at(0, 0) / static_cast<float>(packBatchSize);
+    };
+
+    const float lossBefore = runLoss();
+    const int stepCount = 8;
+    for (int step = 0; step < stepCount; ++step) {
+        device->trainGradients.zeroInPlace();
+        device->accumulatePackedExamples(packPointers.data(), packBatchSize, device->trainGradients);
+        device->applyGradients(device->trainGradients, 1.0f / static_cast<float>(packBatchSize));
+    }
+    CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "SPULSE train smoke step sync");
+    const float lossAfter = runLoss();
+
+    bool anyNonFinite = !std::isfinite(lossBefore) || !std::isfinite(lossAfter);
+    Matrix embed = device->tokenEmbeddingWeight.download();
+    for (float value : embed.data) {
+        if (!std::isfinite(value)) {
+            anyNonFinite = true;
+            break;
+        }
+    }
+
+    SmokeLog::result(
+        "SPULSE train",
+        "vocab=%d embed=%d seq=%d blocks=%d pack=%d steps=%d  loss0=%.4f lossN=%.4f  finite=%s spulse=%s coverage=%s",
+        vocabularySize,
+        embeddingDim,
+        sequenceLength,
+        blockCount,
+        packBatchSize,
+        stepCount,
+        lossBefore,
+        lossAfter,
+        anyNonFinite ? "no" : "yes",
+        device->preferSpulse ? "on" : "off",
+        CudaSpulse::coverageName(device->spulse.coverage));
+
+    if (anyNonFinite)
+        throw std::runtime_error("CudaLanguageModel::runSpulseTrainSmokeDemo non-finite loss/weights");
 
     CudaAmp::preferMixedPrecision = previousAmp;
     CudaAmp::useLossScaling = previousLossScale;

@@ -78,6 +78,9 @@
     <CudaCompile Include="NeuralNet\Cuda\CudaMuon.cu">
       <Filter>Quelldateien</Filter>
     </CudaCompile>
+    <CudaCompile Include="NeuralNet\Cuda\CudaSPULSE.cu">
+      <Filter>Quelldateien</Filter>
+    </CudaCompile>
     <CudaCompile Include="NeuralNet\Cuda\CudaKvCache.cu">
       <Filter>Quelldateien</Filter>
     </CudaCompile>
@@ -97,6 +100,9 @@
       <Filter>Quelldateien</Filter>
     </ClCompile>
     <ClCompile Include="NeuralNet\Optimizers\SGD.cpp">
+      <Filter>Quelldateien</Filter>
+    </ClCompile>
+    <ClCompile Include="NeuralNet\Optimizers\Spulse.cpp">
       <Filter>Quelldateien</Filter>
     </ClCompile>
     <ClCompile Include="main.cpp">
@@ -212,6 +218,9 @@
     <ClInclude Include="NeuralNet\Cuda\CudaMuon.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
+    <ClInclude Include="NeuralNet\Cuda\CudaSPULSE.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
     <ClInclude Include="NeuralNet\Cuda\CudaKvCache.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
@@ -231,6 +240,9 @@
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Optimizers\SGD.hpp">
+      <Filter>Headerdateien</Filter>
+    </ClInclude>
+    <ClInclude Include="NeuralNet\Optimizers\Spulse.hpp">
       <Filter>Headerdateien</Filter>
     </ClInclude>
     <ClInclude Include="NeuralNet\Tokenizer\BPETokenizer.hpp">
