@@ -24,13 +24,16 @@ enum class SpulseMomentumStorage : std::int32_t {
     Int8 = 2
 };
 
-/// <summary>host momentum + dual-horizon energy scalars for one parameter</summary>
+/// <summary>
+/// Host + device momentum and <b>one</b> dual-horizon energy triple per weight tensor
+/// (never per-row / per-element). <c>scale</c> is the lagged step multiplier.
+/// </summary>
 class SpulseState {
 public:
     Matrix momentum;
     float energyFast = 0.0f;
     float energySlow = 0.0f;
-    /// <summary>lagged step scale (init 1); updated after each step from dual-horizon energy</summary>
+    /// <summary>lagged step scale (init 1); updated after each energy sample from dual-horizon EMA</summary>
     float scale = 1.0f;
 
     static SpulseState zerosLike(const Matrix& parameter);

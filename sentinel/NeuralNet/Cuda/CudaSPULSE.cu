@@ -131,7 +131,8 @@ __global__ void spulseFusedStep(
     float energyCorrection,
     float epsilon,
     float scaleMin,
-    float scaleMax
+    float scaleMax,
+    int updateEnergy
 ) {
     __shared__ float shared[256];
     const float stepScale = energy[2] * momCorrection;
@@ -155,28 +156,28 @@ __global__ void spulseFusedStep(
         m4.x = m;
         if (keep != 1.0f) p4.x *= keep;
         p4.x -= lrStep * m;
-        local += g * g;
+        if (updateEnergy) local += g * g;
 
         g = g4.y * gradientScale;
         m = momentumBeta * m4.y + oneMinusMom * g;
         m4.y = m;
         if (keep != 1.0f) p4.y *= keep;
         p4.y -= lrStep * m;
-        local += g * g;
+        if (updateEnergy) local += g * g;
 
         g = g4.z * gradientScale;
         m = momentumBeta * m4.z + oneMinusMom * g;
         m4.z = m;
         if (keep != 1.0f) p4.z *= keep;
         p4.z -= lrStep * m;
-        local += g * g;
+        if (updateEnergy) local += g * g;
 
         g = g4.w * gradientScale;
         m = momentumBeta * m4.w + oneMinusMom * g;
         m4.w = m;
         if (keep != 1.0f) p4.w *= keep;
         p4.w -= lrStep * m;
-        local += g * g;
+        if (updateEnergy) local += g * g;
 
         mom4[v] = m4;
         param4[v] = p4;
@@ -192,9 +193,10 @@ __global__ void spulseFusedStep(
         if (keep != 1.0f)
             value *= keep;
         parameter[index] = value - lrStep * m;
-        local += g * g;
+        if (updateEnergy) local += g * g;
     }
 
+    if (!updateEnergy) return;
     shared[threadIdx.x] = local;
     spulseFinishEnergy(
         shared, sumSquares, blocksDone, energy,
@@ -220,7 +222,8 @@ __global__ void spulsePrepareHostDelta(
     float energyCorrection,
     float epsilon,
     float scaleMin,
-    float scaleMax
+    float scaleMax,
+    int updateEnergy
 ) {
     __shared__ float shared[256];
     const float stepScale = energy[2] * momCorrection;
@@ -241,25 +244,25 @@ __global__ void spulsePrepareHostDelta(
         float m = momentumBeta * m4.x + oneMinusMom * g;
         m4.x = m;
         g4.x = lrStep * m;
-        local += g * g;
+        if (updateEnergy) local += g * g;
 
         g = g4.y * gradientScale;
         m = momentumBeta * m4.y + oneMinusMom * g;
         m4.y = m;
         g4.y = lrStep * m;
-        local += g * g;
+        if (updateEnergy) local += g * g;
 
         g = g4.z * gradientScale;
         m = momentumBeta * m4.z + oneMinusMom * g;
         m4.z = m;
         g4.z = lrStep * m;
-        local += g * g;
+        if (updateEnergy) local += g * g;
 
         g = g4.w * gradientScale;
         m = momentumBeta * m4.w + oneMinusMom * g;
         m4.w = m;
         g4.w = lrStep * m;
-        local += g * g;
+        if (updateEnergy) local += g * g;
 
         mom4[v] = m4;
         delta4[v] = g4;
@@ -272,9 +275,10 @@ __global__ void spulsePrepareHostDelta(
         const float m = momentumBeta * momentum[index] + oneMinusMom * g;
         momentum[index] = m;
         gradientOrDelta[index] = lrStep * m;
-        local += g * g;
+        if (updateEnergy) local += g * g;
     }
 
+    if (!updateEnergy) return;
     shared[threadIdx.x] = local;
     spulseFinishEnergy(
         shared, sumSquares, blocksDone, energy,
@@ -292,7 +296,8 @@ struct SpulseHostDeltaPiece {
 
 /// <summary>
 /// All Hybrid pieces in one launch: grid (blocksX, pieceCount).
-/// No per-block threadfence — energy committed by a tiny follow-up kernel.
+/// Energy ||g||² reduce is optional (updateEnergy); commit is a tiny follow-up kernel.
+/// Per-tensor energy only — one (e_fast, e_slow, s) triple per weight, never per-row.
 /// </summary>
 __global__ void spulsePrepareHostDeltaBatched(
     const SpulseHostDeltaPiece* pieces,
@@ -301,7 +306,8 @@ __global__ void spulsePrepareHostDeltaBatched(
     float oneMinusMom,
     float gradientScale,
     float learningRate,
-    float momCorrection
+    float momCorrection,
+    int updateEnergy
 ) {
     const int pieceIndex = static_cast<int>(blockIdx.y);
     if (pieceIndex >= pieceCount) return;
@@ -336,25 +342,25 @@ __global__ void spulsePrepareHostDeltaBatched(
             float m = momentumBeta * m4.x + oneMinusMom * g;
             m4.x = m;
             g4.x = lrStep * m;
-            local += g * g;
+            if (updateEnergy) local += g * g;
 
             g = g4.y * gradientScale;
             m = momentumBeta * m4.y + oneMinusMom * g;
             m4.y = m;
             g4.y = lrStep * m;
-            local += g * g;
+            if (updateEnergy) local += g * g;
 
             g = g4.z * gradientScale;
             m = momentumBeta * m4.z + oneMinusMom * g;
             m4.z = m;
             g4.z = lrStep * m;
-            local += g * g;
+            if (updateEnergy) local += g * g;
 
             g = g4.w * gradientScale;
             m = momentumBeta * m4.w + oneMinusMom * g;
             m4.w = m;
             g4.w = lrStep * m;
-            local += g * g;
+            if (updateEnergy) local += g * g;
 
             mom4[v] = m4;
             delta4[v] = g4;
@@ -366,7 +372,7 @@ __global__ void spulsePrepareHostDeltaBatched(
             const float m = momentumBeta * piece.momentum[index] + oneMinusMom * g;
             piece.momentum[index] = m;
             piece.gradOrDelta[index] = lrStep * m;
-            local += g * g;
+            if (updateEnergy) local += g * g;
         }
     } else {
         for (int index = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
@@ -376,10 +382,11 @@ __global__ void spulsePrepareHostDeltaBatched(
             const float m = momentumBeta * piece.momentum[index] + oneMinusMom * g;
             piece.momentum[index] = m;
             piece.gradOrDelta[index] = lrStep * m;
-            local += g * g;
+            if (updateEnergy) local += g * g;
         }
     }
 
+    if (!updateEnergy) return;
     shared[threadIdx.x] = local;
     __syncthreads();
     for (int stride = static_cast<int>(blockDim.x) / 2; stride > 0; stride >>= 1) {
@@ -441,7 +448,8 @@ __global__ void spulseFusedStepHalf(
     float energyCorrection,
     float epsilon,
     float scaleMin,
-    float scaleMax
+    float scaleMax,
+    int updateEnergy
 ) {
     __shared__ float shared[256];
     const float stepScale = energy[2] * momCorrection;
@@ -514,6 +522,7 @@ __global__ void spulseFusedStepHalf(
         local += g * g;
     }
 
+    if (!updateEnergy) return;
     shared[threadIdx.x] = local;
     spulseFinishEnergy(
         shared, sumSquares, blocksDone, energy,
@@ -539,7 +548,8 @@ __global__ void spulsePrepareHostDeltaHalf(
     float energyCorrection,
     float epsilon,
     float scaleMin,
-    float scaleMax
+    float scaleMax,
+    int updateEnergy
 ) {
     __shared__ float shared[256];
     const float stepScale = energy[2] * momCorrection;
@@ -603,6 +613,7 @@ __global__ void spulsePrepareHostDeltaHalf(
         local += g * g;
     }
 
+    if (!updateEnergy) return;
     shared[threadIdx.x] = local;
     spulseFinishEnergy(
         shared, sumSquares, blocksDone, energy,
@@ -634,7 +645,8 @@ __global__ void spulseStepInt8(
     float energyCorrection,
     float epsilon,
     float scaleMin,
-    float scaleMax
+    float scaleMax,
+    int updateEnergy
 ) {
     const int quantBlock = static_cast<int>(blockIdx.x);
     const int start = quantBlock * blockSize;
@@ -687,24 +699,27 @@ __global__ void spulseStepInt8(
     }
 
     if (threadIdx.x == 0) {
-        atomicAdd(sumSquares, reduceSum[0]);
+        if (updateEnergy)
+            atomicAdd(sumSquares, reduceSum[0]);
         const float absmax = reduceMax[0];
         const float newScale = (absmax > 0.0f) ? (absmax / 127.0f) : 0.0f;
         momentumScales[quantBlock] = newScale;
-        __threadfence();
-        const int done = atomicAdd(blocksDone, 1);
-        if (done == static_cast<int>(gridDim.x) - 1) {
-            spulseCommitEnergyDevice(
-                energy,
-                *sumSquares,
-                fastBeta,
-                slowBeta,
-                oneMinusFast,
-                oneMinusSlow,
-                energyCorrection,
-                epsilon,
-                scaleMin,
-                scaleMax);
+        if (updateEnergy) {
+            __threadfence();
+            const int done = atomicAdd(blocksDone, 1);
+            if (done == static_cast<int>(gridDim.x) - 1) {
+                spulseCommitEnergyDevice(
+                    energy,
+                    *sumSquares,
+                    fastBeta,
+                    slowBeta,
+                    oneMinusFast,
+                    oneMinusSlow,
+                    energyCorrection,
+                    epsilon,
+                    scaleMin,
+                    scaleMax);
+            }
         }
     }
     __syncthreads();
@@ -736,7 +751,8 @@ void hostUpdateCore(
     float weightDecay,
     float gradientScale,
     float momCorrection,
-    float energyCorrection
+    float energyCorrection,
+    bool updateEnergy
 ) {
     const float oneMinusMom = 1.0f - momentumBeta;
     const float oneMinusFast = 1.0f - fastBeta;
@@ -748,15 +764,17 @@ void hostUpdateCore(
     for (size_t i = 0; i < elementCount; ++i) {
         const float g = gradient[i] * gradientScale;
         momentum[i] = momentumBeta * momentum[i] + oneMinusMom * g;
-        sumSquares += g * g;
+        if (updateEnergy) sumSquares += g * g;
         float value = parameter[i];
         if (keep != 1.0f)
             value *= keep;
         parameter[i] = value - step * momentum[i];
     }
-    energyFast = fastBeta * energyFast + oneMinusFast * sumSquares;
-    energySlow = slowBeta * energySlow + oneMinusSlow * sumSquares;
-    scale = computeScale(energyFast, energySlow, energyCorrection, epsilon, scaleMin, scaleMax);
+    if (updateEnergy) {
+        energyFast = fastBeta * energyFast + oneMinusFast * sumSquares;
+        energySlow = slowBeta * energySlow + oneMinusSlow * sumSquares;
+        scale = computeScale(energyFast, energySlow, energyCorrection, epsilon, scaleMin, scaleMax);
+    }
 }
 
 void hostUpdateFromHalfCore(
@@ -777,7 +795,8 @@ void hostUpdateFromHalfCore(
     float weightDecay,
     float gradientScale,
     float momCorrection,
-    float energyCorrection
+    float energyCorrection,
+    bool updateEnergy
 ) {
     const float oneMinusMom = 1.0f - momentumBeta;
     const float oneMinusFast = 1.0f - fastBeta;
@@ -789,15 +808,17 @@ void hostUpdateFromHalfCore(
     for (size_t i = 0; i < elementCount; ++i) {
         const float g = gradientScale * __half2float(gradHalf[i]);
         momentum[i] = momentumBeta * momentum[i] + oneMinusMom * g;
-        sumSquares += g * g;
+        if (updateEnergy) sumSquares += g * g;
         float value = parameter[i];
         if (keep != 1.0f)
             value *= keep;
         parameter[i] = value - step * momentum[i];
     }
-    energyFast = fastBeta * energyFast + oneMinusFast * sumSquares;
-    energySlow = slowBeta * energySlow + oneMinusSlow * sumSquares;
-    scale = computeScale(energyFast, energySlow, energyCorrection, epsilon, scaleMin, scaleMax);
+    if (updateEnergy) {
+        energyFast = fastBeta * energyFast + oneMinusFast * sumSquares;
+        energySlow = slowBeta * energySlow + oneMinusSlow * sumSquares;
+        scale = computeScale(energyFast, energySlow, energyCorrection, epsilon, scaleMin, scaleMax);
+    }
 }
 
 /// <summary>
@@ -819,7 +840,8 @@ void hostUpdateFromHalfLite(
     float scaleMax,
     float weightDecay,
     float gradientScale,
-    float energyCorrection
+    float energyCorrection,
+    bool updateEnergy
 ) {
     const float oneMinusFast = 1.0f - fastBeta;
     const float oneMinusSlow = 1.0f - slowBeta;
@@ -828,15 +850,17 @@ void hostUpdateFromHalfLite(
     float sumSquares = 0.0f;
     for (size_t i = 0; i < elementCount; ++i) {
         const float g = gradientScale * __half2float(gradHalf[i]);
-        sumSquares += g * g;
+        if (updateEnergy) sumSquares += g * g;
         float value = parameter[i];
         if (keep != 1.0f)
             value *= keep;
         parameter[i] = value - step * g;
     }
-    energyFast = fastBeta * energyFast + oneMinusFast * sumSquares;
-    energySlow = slowBeta * energySlow + oneMinusSlow * sumSquares;
-    scale = computeScale(energyFast, energySlow, energyCorrection, epsilon, scaleMin, scaleMax);
+    if (updateEnergy) {
+        energyFast = fastBeta * energyFast + oneMinusFast * sumSquares;
+        energySlow = slowBeta * energySlow + oneMinusSlow * sumSquares;
+        scale = computeScale(energyFast, energySlow, energyCorrection, epsilon, scaleMin, scaleMax);
+    }
 }
 
 } // namespace
@@ -1066,7 +1090,10 @@ CudaSpulse::CudaSpulse(
       hostLightweight(hostLightweight),
       momentumStorage(momentumStorage),
       int8BlockSize(int8BlockSize),
-      timeStep(0) {
+      timeStep(0),
+      energyUpdateEvery(4),
+      energyStep(0),
+      energyUpdateThisStep(false) {
     if (learningRate <= 0.0f) throw std::invalid_argument("CudaSpulse learningRate must be > 0");
     if (momentumBeta < 0.0f || momentumBeta >= 1.0f) throw std::invalid_argument("CudaSpulse momentumBeta must be in [0, 1)");
     if (fastBeta < 0.0f || fastBeta >= 1.0f) throw std::invalid_argument("CudaSpulse fastBeta must be in [0, 1)");
@@ -1080,6 +1107,12 @@ CudaSpulse::CudaSpulse(
 
 void CudaSpulse::step() {
     ++this->timeStep;
+    // Sample energy on step 1, 1+N, 1+2N, ... so the first step always gets a reading.
+    this->energyUpdateThisStep =
+        this->energyUpdateEvery <= 1
+        || ((this->timeStep - 1) % this->energyUpdateEvery) == 0;
+    if (this->energyUpdateThisStep)
+        ++this->energyStep;
 }
 
 float CudaSpulse::momentumBiasCorrection() const {
@@ -1090,10 +1123,10 @@ float CudaSpulse::momentumBiasCorrection() const {
 }
 
 float CudaSpulse::energyBiasCorrection() const {
-    if (this->timeStep <= 0) return 1.0f;
-    const float t = static_cast<float>(this->timeStep);
-    const float fastWarm = 1.0f - std::pow(this->fastBeta, t);
-    const float slowWarm = 1.0f - std::pow(this->slowBeta, t);
+    if (this->energyStep <= 0) return 1.0f;
+    const float k = static_cast<float>(this->energyStep);
+    const float fastWarm = 1.0f - std::pow(this->fastBeta, k);
+    const float slowWarm = 1.0f - std::pow(this->slowBeta, k);
     if (!(fastWarm > 0.0f) || !(slowWarm > 0.0f)) return 1.0f;
     return std::sqrt(fastWarm / slowWarm);
 }
@@ -1138,11 +1171,15 @@ void CudaSpulse::update(CudaMatrix& parameter, CudaSpulseState& state, const Cud
     const float oneMinusSlow = 1.0f - this->slowBeta;
     cudaStream_t stream = CudaMatmul::activeStream();
 
-    // [0]=sumSquares (float), [1]=blocksDone (int) — zero both each launch.
-    this->sumSquaresScratch.ensureCapacity(sizeof(float) + sizeof(int));
-    float* sumSquares = this->sumSquaresScratch.deviceData;
-    int* blocksDone = reinterpret_cast<int*>(sumSquares + 1);
-    CudaMatmul::memsetDevice(sumSquares, 0, sizeof(float) + sizeof(int));
+    // [0]=sumSquares (float), [1]=blocksDone (int) — only needed when sampling energy.
+    float* sumSquares = nullptr;
+    int* blocksDone = nullptr;
+    if (this->energyUpdateThisStep) {
+        this->sumSquaresScratch.ensureCapacity(sizeof(float) + sizeof(int));
+        sumSquares = this->sumSquaresScratch.deviceData;
+        blocksDone = reinterpret_cast<int*>(sumSquares + 1);
+        CudaMatmul::memsetDevice(sumSquares, 0, sizeof(float) + sizeof(int));
+    }
 
     if (state.storage == SpulseMomentumStorage::Fp32) {
         const int threads = 256;
@@ -1168,7 +1205,8 @@ void CudaSpulse::update(CudaMatrix& parameter, CudaSpulseState& state, const Cud
             energyCorrection,
             this->epsilon,
             this->scaleMin,
-            this->scaleMax);
+            this->scaleMax,
+            this->energyUpdateThisStep ? 1 : 0);
         throwIfFailed(cudaGetLastError(), "spulseFusedStep");
     } else if (state.storage == SpulseMomentumStorage::Fp16) {
         const int threads = 256;
@@ -1194,7 +1232,8 @@ void CudaSpulse::update(CudaMatrix& parameter, CudaSpulseState& state, const Cud
             energyCorrection,
             this->epsilon,
             this->scaleMin,
-            this->scaleMax);
+            this->scaleMax,
+            this->energyUpdateThisStep ? 1 : 0);
         throwIfFailed(cudaGetLastError(), "spulseFusedStepHalf");
     } else {
         const int blockSize = state.int8BlockSize;
@@ -1225,7 +1264,8 @@ void CudaSpulse::update(CudaMatrix& parameter, CudaSpulseState& state, const Cud
             energyCorrection,
             this->epsilon,
             this->scaleMin,
-            this->scaleMax);
+            this->scaleMax,
+            this->energyUpdateThisStep ? 1 : 0);
         throwIfFailed(cudaGetLastError(), "spulseStepInt8");
     }
 }
@@ -1249,10 +1289,14 @@ void CudaSpulse::prepareHostDeltaInPlace(
     const float oneMinusSlow = 1.0f - this->slowBeta;
     cudaStream_t stream = CudaMatmul::activeStream();
 
-    this->sumSquaresScratch.ensureCapacity(sizeof(float) + sizeof(int));
-    float* sumSquares = this->sumSquaresScratch.deviceData;
-    int* blocksDone = reinterpret_cast<int*>(sumSquares + 1);
-    CudaMatmul::memsetDevice(sumSquares, 0, sizeof(float) + sizeof(int));
+    float* sumSquares = nullptr;
+    int* blocksDone = nullptr;
+    if (this->energyUpdateThisStep) {
+        this->sumSquaresScratch.ensureCapacity(sizeof(float) + sizeof(int));
+        sumSquares = this->sumSquaresScratch.deviceData;
+        blocksDone = reinterpret_cast<int*>(sumSquares + 1);
+        CudaMatmul::memsetDevice(sumSquares, 0, sizeof(float) + sizeof(int));
+    }
 
     if (state.storage == SpulseMomentumStorage::Fp32) {
         const int threads = 256;
@@ -1276,7 +1320,8 @@ void CudaSpulse::prepareHostDeltaInPlace(
             energyCorrection,
             this->epsilon,
             this->scaleMin,
-            this->scaleMax);
+            this->scaleMax,
+            this->energyUpdateThisStep ? 1 : 0);
         throwIfFailed(cudaGetLastError(), "spulsePrepareHostDelta");
     } else if (state.storage == SpulseMomentumStorage::Fp16) {
         const int threads = 256;
@@ -1300,7 +1345,8 @@ void CudaSpulse::prepareHostDeltaInPlace(
             energyCorrection,
             this->epsilon,
             this->scaleMin,
-            this->scaleMax);
+            this->scaleMax,
+            this->energyUpdateThisStep ? 1 : 0);
         throwIfFailed(cudaGetLastError(), "spulsePrepareHostDeltaHalf");
     } else {
         const int blockSize = state.int8BlockSize;
@@ -1331,7 +1377,8 @@ void CudaSpulse::prepareHostDeltaInPlace(
             energyCorrection,
             this->epsilon,
             this->scaleMin,
-            this->scaleMax);
+            this->scaleMax,
+            this->energyUpdateThisStep ? 1 : 0);
         throwIfFailed(cudaGetLastError(), "spulseStepInt8 (host delta)");
     }
 }
@@ -1503,13 +1550,17 @@ void CudaSpulse::prepareHybridBlockHostDeltas(
     }
 
     cudaStream_t stream = CudaMatmul::activeStream();
-    this->sumSquaresScratch.ensureCapacity(static_cast<size_t>(pieceCount) * sizeof(float));
-    float* sumSquaresBase = this->sumSquaresScratch.deviceData;
-    CudaMatmul::memsetDevice(sumSquaresBase, 0, static_cast<size_t>(pieceCount) * sizeof(float));
+    const int updateEnergy = this->energyUpdateThisStep ? 1 : 0;
+    float* sumSquaresBase = nullptr;
+    if (updateEnergy) {
+        this->sumSquaresScratch.ensureCapacity(static_cast<size_t>(pieceCount) * sizeof(float));
+        sumSquaresBase = this->sumSquaresScratch.deviceData;
+        CudaMatmul::memsetDevice(sumSquaresBase, 0, static_cast<size_t>(pieceCount) * sizeof(float));
+    }
 
     int maxElements = 1;
     for (int i = 0; i < pieceCount; ++i) {
-        hostPieces[i].sumSquares = sumSquaresBase + i;
+        hostPieces[i].sumSquares = updateEnergy ? (sumSquaresBase + i) : nullptr;
         maxElements = (std::max)(maxElements, hostPieces[i].elementCount);
     }
 
@@ -1534,11 +1585,12 @@ void CudaSpulse::prepareHybridBlockHostDeltas(
         1.0f - this->momentumBeta,
         gradientScale,
         this->learningRate,
-        momCorrection);
+        momCorrection,
+        updateEnergy);
     throwIfFailed(cudaGetLastError(), "spulsePrepareHostDeltaBatched");
 
     // Defer energy commit so the caller can record the host-grad event and start D2H first.
-    this->pendingHostEnergyPieceCount = pieceCount;
+    this->pendingHostEnergyPieceCount = updateEnergy ? pieceCount : 0;
 }
 
 void CudaSpulse::commitPendingHybridHostEnergies() {
@@ -1584,7 +1636,8 @@ void CudaSpulse::updateHost(Matrix& parameter, SpulseState& state, const Matrix&
         this->weightDecay,
         gradientScale,
         this->momentumBiasCorrection(),
-        this->energyBiasCorrection());
+        this->energyBiasCorrection(),
+        this->energyUpdateThisStep);
 }
 
 void CudaSpulse::updateHostFromHalf(
@@ -1618,7 +1671,8 @@ void CudaSpulse::updateHostFromHalf(
             this->scaleMax,
             this->weightDecay,
             gradientScale,
-            this->energyBiasCorrection());
+            this->energyBiasCorrection(),
+            this->energyUpdateThisStep);
         return;
     }
 
@@ -1641,7 +1695,8 @@ void CudaSpulse::updateHostFromHalf(
         this->weightDecay,
         gradientScale,
         this->momentumBiasCorrection(),
-        this->energyBiasCorrection());
+        this->energyBiasCorrection(),
+        this->energyUpdateThisStep);
 }
 
 void CudaSpulse::applyFusedHalfHostPieces(const std::vector<SpulseFusedHalfHostPiece>& pieces, float gradientScale) const {

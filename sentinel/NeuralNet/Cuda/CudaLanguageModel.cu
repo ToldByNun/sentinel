@@ -485,11 +485,18 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
                 const SpulseCoverage coverage = this->spulse.coverage;
                 // Worker runs its own CudaSpulse; carry t so energy bias correction matches.
                 const int spulseTimeStep = this->spulse.timeStep;
+                const int spulseEnergyStep = this->spulse.energyStep;
+                const int spulseEnergyEvery = this->spulse.energyUpdateEvery;
+                const bool spulseEnergyNow = this->spulse.energyUpdateThisStep;
                 asyncHostUpdateJobs.push_back(AsyncHostUpdateJob{
                     blockToUpdate,
-                    std::async(std::launch::async, [lr, mom, fast, slow, eps, sMin, sMax, wd, coverage, gradScale, spulseTimeStep]() {
+                    std::async(std::launch::async, [lr, mom, fast, slow, eps, sMin, sMax, wd, coverage, gradScale,
+                                                    spulseTimeStep, spulseEnergyStep, spulseEnergyEvery, spulseEnergyNow]() {
                         CudaSpulse local(lr, mom, fast, slow, eps, sMin, sMax, wd, coverage, true);
                         local.timeStep = spulseTimeStep;
+                        local.energyStep = spulseEnergyStep;
+                        local.energyUpdateEvery = spulseEnergyEvery;
+                        local.energyUpdateThisStep = spulseEnergyNow;
                         std::vector<SbaoFusedHalfHostPiece> views;
                         std::uint16_t* hostPin = nullptr;
                         if (!CudaSbao::takeReadyFusedHalfHostBatch(views, hostPin))

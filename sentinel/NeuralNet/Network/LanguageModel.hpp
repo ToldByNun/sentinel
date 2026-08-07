@@ -169,6 +169,8 @@ public:
     void setCudaSpulseFastBeta(float beta);
     void setCudaSpulseSlowBeta(float beta);
     void setCudaSpulseScaleClip(float scaleMin, float scaleMax);
+    /// <summary>sample per-tensor dual-horizon energy every N steps (default 4; 1 = every step)</summary>
+    void setCudaSpulseEnergyUpdateEvery(int every);
 
     /// <summary>device <c>u</c> storage: Fp32 (default), Fp16, or Int8 (VRAM experiments)</summary>
     void setCudaSpulseMomentumStorage(SpulseMomentumStorage storage);

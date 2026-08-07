@@ -890,6 +890,14 @@ void LanguageModel::setCudaSpulseScaleClip(float scaleMin, float scaleMax) {
     this->device->spulse.scaleMax = scaleMax;
 }
 
+void LanguageModel::setCudaSpulseEnergyUpdateEvery(int every) {
+    if (every < 1)
+        throw std::invalid_argument("LanguageModel::setCudaSpulseEnergyUpdateEvery must be >= 1");
+    if (this->device == nullptr) this->enableCuda();
+    if (this->device == nullptr) return;
+    this->device->spulse.energyUpdateEvery = every;
+}
+
 void LanguageModel::setCudaSpulseMomentumStorage(SpulseMomentumStorage storage) {
     if (this->device == nullptr) this->enableCuda();
     if (this->device == nullptr) return;

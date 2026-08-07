@@ -198,6 +198,7 @@ if S.cuda_available():
 | `set_spulse_coverage` | `(coverage: SpulseCoverage) -> None` | Hybrid only for now |
 | `set_spulse_momentum_beta` / `set_spulse_fast_beta` / `set_spulse_slow_beta` | `(beta: float) -> None` | SPULSE EMA knobs |
 | `set_spulse_scale_clip` | `(scale_min, scale_max) -> None` | Clip dual-horizon scale |
+| `set_spulse_energy_update_every` | `(every: int) -> None` | Sample per-tensor energy every N steps (default 4; 1 = every step) |
 | `set_spulse_momentum_storage` | `(SpulseMomentumStorage) -> None` | Device `u` as Fp32 / Fp16 / Int8 |
 | `set_prefer_int8_adam_moments` | `(enabled: bool) -> None` | |
 | `set_prefer_cpu_adam_offload` | `(enabled: bool) -> None` | Host Adam moments / HostFusedHalfAdam path |

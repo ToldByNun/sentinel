@@ -11,7 +11,10 @@ class CudaMatrix;
 class CudaTransformerBlock;
 class CudaTransformerBlockGradients;
 
-/// <summary>device momentum + energy pair (e_fast, e_slow) for one parameter</summary>
+/// <summary>
+/// Device momentum + <b>one</b> energy triple per weight tensor (not per-row):
+/// <c>energy[0]=e_fast</c>, <c>[1]=e_slow</c>, <c>[2]=lagged scale</c>.
+/// </summary>
 class CudaSpulseState {
 public:
     size_t rows = 0;
@@ -28,7 +31,7 @@ public:
     CudaByteBuffer momentumQ;
     /// <summary>per-block absmax scales for int8 (storage == Int8)</summary>
     CudaDeviceBuffer momentumScales;
-    /// <summary>device buffer: [0]=e_fast, [1]=e_slow, [2]=lagged scale</summary>
+    /// <summary>per-tensor energy: [0]=e_fast, [1]=e_slow, [2]=lagged scale</summary>
     CudaDeviceBuffer energy;
 
     CudaSpulseState() = default;
@@ -119,6 +122,16 @@ public:
     int int8BlockSize;
     /// <summary>optimizer step count for momentum bias correction (Adam-style)</summary>
     int timeStep;
+    /// <summary>
+    /// Update per-tensor dual-horizon energy every N optimizer steps (1 = every step).
+    /// Skipping the ||g||² reduce on intervening steps is free speed; the scale is lagged
+    /// and e_slow is already a long horizon, so N=4–8 is the intended default.
+    /// </summary>
+    int energyUpdateEvery;
+    /// <summary>count of energy commits (bias correction uses this, not timeStep)</summary>
+    int energyStep;
+    /// <summary>set by <c>step()</c>: whether this optimizer step samples energy</summary>
+    bool energyUpdateThisStep;
 
     /// <summary>scratch for ||g||² reduction (device); reused across updates</summary>
     CudaDeviceBuffer sumSquaresScratch;
@@ -144,17 +157,15 @@ public:
         SpulseMomentumStorage momentumStorage = SpulseMomentumStorage::Fp32,
         int int8BlockSize = 256);
 
-    /// <summary>advance timeStep (call once per optimizer step before updates)</summary>
+    /// <summary>advance timeStep; decide whether this step samples per-tensor energy</summary>
     void step();
 
     /// <summary>1 / (1 - β^t); 1 when timeStep==0</summary>
     float momentumBiasCorrection() const;
 
     /// <summary>
-    /// Cold-start correction for the dual-horizon ratio: <c>sqrt((1-βfast^t)/(1-βslow^t))</c>.
-    /// Both energies start at 0, but the slow horizon warms up ~1000x slower, so the raw ratio
-    /// reads far below 1 for thousands of steps and pins the step scale at <c>scaleMin</c>.
-    /// Multiplying by this is the same bias removal Adam applies to its moments.
+    /// Cold-start correction for the dual-horizon ratio: <c>sqrt((1-βfast^k)/(1-βslow^k))</c>
+    /// where <c>k = energyStep</c> (number of energy samples, not optimizer steps).
     /// </summary>
     float energyBiasCorrection() const;
 

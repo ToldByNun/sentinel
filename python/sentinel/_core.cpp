@@ -201,6 +201,11 @@ NB_MODULE(_core, m) {
             nb::arg("scale_min"),
             nb::arg("scale_max"))
         .def(
+            "set_spulse_energy_update_every",
+            &LanguageModel::setCudaSpulseEnergyUpdateEvery,
+            nb::arg("every"),
+            "Sample per-tensor dual-horizon energy every N optimizer steps (default 4).")
+        .def(
             "set_spulse_momentum_storage",
             &LanguageModel::setCudaSpulseMomentumStorage,
             nb::arg("storage"),
