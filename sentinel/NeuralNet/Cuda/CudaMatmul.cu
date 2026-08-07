@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cuda_runtime.h>
 #include <cublasLt.h>
 #include <stdexcept>
@@ -29,10 +30,13 @@ struct CublasLtGemmState {
         int sharedCount = 0;
         bool transposeLeft = false;
         bool transposeRight = false;
+        bool hasBias = false;
         cublasLtMatmulDesc_t matmulDesc = nullptr;
         cublasLtMatrixLayout_t layoutLeft = nullptr;
         cublasLtMatrixLayout_t layoutRight = nullptr;
         cublasLtMatrixLayout_t layoutOut = nullptr;
+        cublasLtMatmulAlgo_t algo{};
+        bool algoValid = false;
         bool valid = false;
         unsigned lastUsed = 0;
     };
@@ -62,6 +66,17 @@ struct CublasLtGemmState {
 static CublasLtGemmState& cublasLtGemmState() {
     static CublasLtGemmState state;
     return state;
+}
+
+// L1 (perf lever): opt-in cache for bias-epilogue GEMMs. Off by default so the
+// shipped behavior is unchanged and can be A/B measured. Enable with
+// SENTINEL_BIAS_GEMM_CACHE=1. See benchmarks/perf_4b_plan.md.
+static bool biasGemmCacheEnabled() {
+    static const bool enabled = []() {
+        const char* value = std::getenv("SENTINEL_BIAS_GEMM_CACHE");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
 }
 
 namespace {
@@ -599,13 +614,158 @@ bool CudaMatmul::launchCublasLtMatmul(const float* deviceLeft, const float* devi
         return false;
     }
 
+    // L1 (perf lever, opt-in): cache the bias-epilogue GEMM the same way the
+    // no-bias path is cached. The legacy path below recreates descriptors and
+    // runs cublasLtMatmulAlgoGetHeuristic on every call; the FFN gate+up / down
+    // GEMMs repeat the same shapes each step. On any cuBLASLt failure we return
+    // false, so the caller falls back to its correct path (no silent wrong math).
+    if (deviceBiasOrNull != nullptr && kernelMilliseconds == nullptr && biasGemmCacheEnabled()) {
+        CublasLtGemmState::DescCacheEntry* cacheEntry = nullptr;
+        for (int index = 0; index < CublasLtGemmState::descCacheSize; ++index) {
+            CublasLtGemmState::DescCacheEntry& entry = state.descCache[index];
+            if (!entry.valid || !entry.hasBias) continue;
+            if (entry.rowCount != rowCount || entry.columnCount != columnCount || entry.sharedCount != sharedCount)
+                continue;
+            if (entry.transposeLeft != transposeLeft || entry.transposeRight != transposeRight)
+                continue;
+            cacheEntry = &entry;
+            break;
+        }
+
+        if (cacheEntry == nullptr) {
+            int victim = 0;
+            for (int index = 1; index < CublasLtGemmState::descCacheSize; ++index) {
+                if (!state.descCache[index].valid) {
+                    victim = index;
+                    break;
+                }
+                if (state.descCache[index].lastUsed < state.descCache[victim].lastUsed)
+                    victim = index;
+            }
+            cacheEntry = &state.descCache[victim];
+            state.destroyDescEntry(*cacheEntry);
+
+            if (cublasLtMatmulDescCreate(&cacheEntry->matmulDesc, CUBLAS_COMPUTE_32F_FAST_TF32, CUDA_R_32F) != CUBLAS_STATUS_SUCCESS)
+                return false;
+
+            const cublasOperation_t transLeftCached = transposeLeft ? CUBLAS_OP_T : CUBLAS_OP_N;
+            const cublasOperation_t transRightCached = transposeRight ? CUBLAS_OP_T : CUBLAS_OP_N;
+            const cublasLtEpilogue_t epilogue = CUBLASLT_EPILOGUE_BIAS;
+            const cudaDataType_t biasType = CUDA_R_32F;
+            if (cublasLtMatmulDescSetAttribute(cacheEntry->matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transLeftCached, sizeof(transLeftCached)) != CUBLAS_STATUS_SUCCESS
+                || cublasLtMatmulDescSetAttribute(cacheEntry->matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transRightCached, sizeof(transRightCached)) != CUBLAS_STATUS_SUCCESS
+                || cublasLtMatmulDescSetAttribute(cacheEntry->matmulDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &epilogue, sizeof(epilogue)) != CUBLAS_STATUS_SUCCESS
+                || cublasLtMatmulDescSetAttribute(cacheEntry->matmulDesc, CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &biasType, sizeof(biasType)) != CUBLAS_STATUS_SUCCESS) {
+                state.destroyDescEntry(*cacheEntry);
+                return false;
+            }
+
+            const int leftRows = transposeLeft ? sharedCount : rowCount;
+            const int leftCols = transposeLeft ? rowCount : sharedCount;
+            const int rightRows = transposeRight ? columnCount : sharedCount;
+            const int rightCols = transposeRight ? sharedCount : columnCount;
+            const cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;
+            if (cublasLtMatrixLayoutCreate(&cacheEntry->layoutLeft, CUDA_R_32F, leftRows, leftCols, leftCols) != CUBLAS_STATUS_SUCCESS
+                || cublasLtMatrixLayoutCreate(&cacheEntry->layoutRight, CUDA_R_32F, rightRows, rightCols, rightCols) != CUBLAS_STATUS_SUCCESS
+                || cublasLtMatrixLayoutCreate(&cacheEntry->layoutOut, CUDA_R_32F, rowCount, columnCount, columnCount) != CUBLAS_STATUS_SUCCESS
+                || cublasLtMatrixLayoutSetAttribute(cacheEntry->layoutLeft, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)) != CUBLAS_STATUS_SUCCESS
+                || cublasLtMatrixLayoutSetAttribute(cacheEntry->layoutRight, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)) != CUBLAS_STATUS_SUCCESS
+                || cublasLtMatrixLayoutSetAttribute(cacheEntry->layoutOut, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)) != CUBLAS_STATUS_SUCCESS) {
+                state.destroyDescEntry(*cacheEntry);
+                return false;
+            }
+
+            // One-time heuristic for this shape; store the chosen algo for reuse.
+            cublasLtMatmulPreference_t preference = nullptr;
+            if (cublasLtMatmulPreferenceCreate(&preference) != CUBLAS_STATUS_SUCCESS) {
+                state.destroyDescEntry(*cacheEntry);
+                return false;
+            }
+            const size_t preferenceWorkspace = state.workspace.capacityBytes;
+            if (cublasLtMatmulPreferenceSetAttribute(
+                    preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &preferenceWorkspace, sizeof(preferenceWorkspace)) != CUBLAS_STATUS_SUCCESS) {
+                cublasLtMatmulPreferenceDestroy(preference);
+                state.destroyDescEntry(*cacheEntry);
+                return false;
+            }
+            cublasLtMatmulHeuristicResult_t heuristicResults[8]{};
+            int returnedResults = 0;
+            if (cublasLtMatmulAlgoGetHeuristic(
+                    state.handle, cacheEntry->matmulDesc, cacheEntry->layoutLeft, cacheEntry->layoutRight, cacheEntry->layoutOut, cacheEntry->layoutOut,
+                    preference, 8, heuristicResults, &returnedResults) != CUBLAS_STATUS_SUCCESS
+                || returnedResults <= 0) {
+                cublasLtMatmulPreferenceDestroy(preference);
+                state.destroyDescEntry(*cacheEntry);
+                return false;
+            }
+            cublasLtMatmulPreferenceDestroy(preference);
+            int chosen = -1;
+            for (int index = 0; index < returnedResults; ++index) {
+                if (heuristicResults[index].state == CUBLAS_STATUS_SUCCESS
+                    && heuristicResults[index].workspaceSize <= preferenceWorkspace) {
+                    chosen = index;
+                    break;
+                }
+            }
+            if (chosen < 0) {
+                state.destroyDescEntry(*cacheEntry);
+                return false;
+            }
+            cacheEntry->algo = heuristicResults[chosen].algo;
+            cacheEntry->algoValid = true;
+
+            cacheEntry->rowCount = rowCount;
+            cacheEntry->columnCount = columnCount;
+            cacheEntry->sharedCount = sharedCount;
+            cacheEntry->transposeLeft = transposeLeft;
+            cacheEntry->transposeRight = transposeRight;
+            cacheEntry->hasBias = true;
+            cacheEntry->valid = true;
+        }
+
+        // Bias pointer varies per call (tensors sharing a shape); set it each time.
+        if (cublasLtMatmulDescSetAttribute(cacheEntry->matmulDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &deviceBiasOrNull, sizeof(deviceBiasOrNull)) != CUBLAS_STATUS_SUCCESS) {
+            state.destroyDescEntry(*cacheEntry);
+            return false;
+        }
+
+        ++state.descCacheClock;
+        cacheEntry->lastUsed = state.descCacheClock;
+
+        const float alpha = 1.0f;
+        const float cublasBeta = beta;
+        const cublasLtMatmulAlgo_t* cachedAlgo = cacheEntry->algoValid ? &cacheEntry->algo : nullptr;
+        const cublasStatus_t cachedStatus = cublasLtMatmul(
+            state.handle,
+            cacheEntry->matmulDesc,
+            &alpha,
+            deviceLeft,
+            cacheEntry->layoutLeft,
+            deviceRight,
+            cacheEntry->layoutRight,
+            &cublasBeta,
+            deviceOut,
+            cacheEntry->layoutOut,
+            deviceOut,
+            cacheEntry->layoutOut,
+            cachedAlgo,
+            state.workspace.deviceData,
+            state.workspace.capacityBytes,
+            CudaMatmul::activeStream());
+        if (cachedStatus != CUBLAS_STATUS_SUCCESS) {
+            state.destroyDescEntry(*cacheEntry);
+            return false;
+        }
+        return true;
+    }
+
     // Hot path: Muon NS / plain GEMMs recreate the same TF32 descriptors hundreds of times
     // per step. Cache layouts by shape and skip heuristic/create overhead.
     if (deviceBiasOrNull == nullptr && kernelMilliseconds == nullptr) {
         CublasLtGemmState::DescCacheEntry* cacheEntry = nullptr;
         for (int index = 0; index < CublasLtGemmState::descCacheSize; ++index) {
             CublasLtGemmState::DescCacheEntry& entry = state.descCache[index];
-            if (!entry.valid) continue;
+            if (!entry.valid || entry.hasBias) continue;
             if (entry.rowCount != rowCount || entry.columnCount != columnCount || entry.sharedCount != sharedCount)
                 continue;
             if (entry.transposeLeft != transposeLeft || entry.transposeRight != transposeRight)
