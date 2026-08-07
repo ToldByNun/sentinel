@@ -50,7 +50,7 @@ Sentinel Backend Adaptive Optimization residency policy.
 
 ### `SpulseCoverage`
 
-SPULSE tensor ownership (optimizer, not SBAO).
+SPULSE tensor ownership (optimizer, not SBAO). Host fused-half keeps momentum on GPU by default (half-delta D2H); same PCIe volume as HostSGD.
 
 | Value | Meaning |
 | ----- | ------- |

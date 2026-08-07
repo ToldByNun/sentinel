@@ -310,8 +310,8 @@ int main() {
                     model.setCudaSbaoMode(SbaoMode::HostFusedHalfAdam);
                     model.setCudaPreferSpulse(false);
                     break;
-                case HostOptKind::SpulseHost:
-                    // Same residency/pack path as HostSGD; lite host apply (no momentum buffer).
+                    case HostOptKind::SpulseHost:
+                    // Same residency as HostSGD; GPU-u + half-delta D2H (HostSGD-shaped host axpy).
                     model.setCudaSbaoMode(SbaoMode::HostFusedHalfSgd);
                     model.setCudaPreferSpulse(true);
                     break;

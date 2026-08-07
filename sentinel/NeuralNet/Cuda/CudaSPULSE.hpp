@@ -22,6 +22,7 @@ public:
 
     bool empty() const;
     void ensure(const CudaMatrix& parameter);
+    void ensure(size_t rows, size_t cols);
     void free();
 
     void downloadInto(SpulseState& host) const;
@@ -84,8 +85,9 @@ public:
     float weightDecay;
     SpulseCoverage coverage;
     /// <summary>
-    /// Host fused-half path: skip per-element momentum (dual-horizon scale × grad only).
-    /// Matches HostSGD memory traffic so SPULSE-Host can compete on tok/s; GPU keeps full momentum.
+    /// Host fused-half VRAM fallback: skip device momentum; host apply = dual-horizon scale × grad.
+    /// Default false: keep <c>u</c> on GPU, bake <c>delta = lr·s·u</c> into the grad buffer before
+    /// fused-half D2H, then HostSGD-shaped host axpy (same PCIe volume as HostSGD).
     /// </summary>
     bool hostLightweight;
 
@@ -102,7 +104,7 @@ public:
         float scaleMax = 4.0f,
         float weightDecay = 0.0f,
         SpulseCoverage coverage = SpulseCoverage::Hybrid,
-        bool hostLightweight = true);
+        bool hostLightweight = false);
 
     /// <summary>true when this tensor class is owned by SPULSE under current coverage</summary>
     bool ownsHybridBlockWeights() const;
@@ -111,10 +113,30 @@ public:
     /// <summary>GPU in-place update for one parameter</summary>
     void update(CudaMatrix& parameter, CudaSpulseState& state, const CudaMatrix& gradient, float gradientScale = 1.0f);
 
+    /// <summary>
+    /// Host fused-half (GPU-<c>u</c>): update momentum/energy from device grads and overwrite the
+    /// buffer with <c>delta = lr · lagged_scale · u</c> for half D2H + host axpy. Does not touch θ.
+    /// </summary>
+    void prepareHostDeltaInPlace(
+        float* gradientOrDelta,
+        size_t rows,
+        size_t cols,
+        CudaSpulseState& state,
+        float gradientScale = 1.0f);
+
+    /// <summary>
+    /// Prepare deltas for every Hybrid host-offload weight in a block (same layout as
+    /// <c>enqueueDeferredHostWeightGradDownloads</c>).
+    /// </summary>
+    void prepareHybridBlockHostDeltas(
+        CudaTransformerBlock& block,
+        CudaTransformerBlockSpulseStates& spulseStates,
+        float gradientScale);
+
     /// <summary>host FP32 update (masters / reference)</summary>
     void updateHost(Matrix& parameter, SpulseState& state, const Matrix& gradient, float gradientScale = 1.0f) const;
 
-    /// <summary>host update from FP16 grad slab (fused-half D2H path)</summary>
+    /// <summary>host update from FP16 grad slab (fused-half D2H path; lite / legacy host-<c>u</c>)</summary>
     void updateHostFromHalf(
         Matrix& parameter,
         SpulseState& state,

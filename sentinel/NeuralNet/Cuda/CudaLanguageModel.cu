@@ -466,40 +466,49 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
         pendingHostUpdateBlock = -1;
         if (pipelineHostSpulse) {
             this->spulse.learningRate = this->adam.learningRate;
-            const float gradScale = hostAdamGradScale();
-            const float lr = this->spulse.learningRate;
-            const float mom = this->spulse.momentumBeta;
-            const float fast = this->spulse.fastBeta;
-            const float slow = this->spulse.slowBeta;
-            const float eps = this->spulse.epsilon;
-            const float sMin = this->spulse.scaleMin;
-            const float sMax = this->spulse.scaleMax;
-            const float wd = this->spulse.weightDecay;
-            const SpulseCoverage coverage = this->spulse.coverage;
-            const bool hostLite = this->spulse.hostLightweight;
-            asyncHostUpdateJobs.push_back(AsyncHostUpdateJob{
-                blockToUpdate,
-                std::async(std::launch::async, [lr, mom, fast, slow, eps, sMin, sMax, wd, coverage, hostLite, gradScale]() {
-                    CudaSpulse local(lr, mom, fast, slow, eps, sMin, sMax, wd, coverage, hostLite);
-                    std::vector<SbaoFusedHalfHostPiece> views;
-                    std::uint16_t* hostPin = nullptr;
-                    if (!CudaSbao::takeReadyFusedHalfHostBatch(views, hostPin))
-                        return;
-                    std::vector<SpulseFusedHalfHostPiece> pieces;
-                    pieces.reserve(views.size());
-                    for (const SbaoFusedHalfHostPiece& view : views) {
-                        SpulseFusedHalfHostPiece piece;
-                        piece.host = view.host;
-                        piece.state = view.spulseState;
-                        piece.gradHalf = view.gradHalf;
-                        piece.rows = view.rows;
-                        piece.cols = view.cols;
-                        piece.elementCount = view.elementCount;
-                        pieces.push_back(piece);
-                    }
-                    local.applyFusedHalfHostPieces(pieces, gradScale);
-                    CudaSbao::releaseFusedHalfHostPin(hostPin);
-                })});
+            if (this->spulse.hostLightweight) {
+                // VRAM fallback: dual-horizon × grad on host (no momentum buffer).
+                const float gradScale = hostAdamGradScale();
+                const float lr = this->spulse.learningRate;
+                const float mom = this->spulse.momentumBeta;
+                const float fast = this->spulse.fastBeta;
+                const float slow = this->spulse.slowBeta;
+                const float eps = this->spulse.epsilon;
+                const float sMin = this->spulse.scaleMin;
+                const float sMax = this->spulse.scaleMax;
+                const float wd = this->spulse.weightDecay;
+                const SpulseCoverage coverage = this->spulse.coverage;
+                asyncHostUpdateJobs.push_back(AsyncHostUpdateJob{
+                    blockToUpdate,
+                    std::async(std::launch::async, [lr, mom, fast, slow, eps, sMin, sMax, wd, coverage, gradScale]() {
+                        CudaSpulse local(lr, mom, fast, slow, eps, sMin, sMax, wd, coverage, true);
+                        std::vector<SbaoFusedHalfHostPiece> views;
+                        std::uint16_t* hostPin = nullptr;
+                        if (!CudaSbao::takeReadyFusedHalfHostBatch(views, hostPin))
+                            return;
+                        std::vector<SpulseFusedHalfHostPiece> pieces;
+                        pieces.reserve(views.size());
+                        for (const SbaoFusedHalfHostPiece& view : views) {
+                            SpulseFusedHalfHostPiece piece;
+                            piece.host = view.host;
+                            piece.state = view.spulseState;
+                            piece.gradHalf = view.gradHalf;
+                            piece.rows = view.rows;
+                            piece.cols = view.cols;
+                            piece.elementCount = view.elementCount;
+                            pieces.push_back(piece);
+                        }
+                        local.applyFusedHalfHostPieces(pieces, gradScale);
+                        CudaSbao::releaseFusedHalfHostPin(hostPin);
+                    })});
+            } else {
+                // GPU-u path: device buffer already holds delta = lr·s·u; host axpy like HostSGD.
+                asyncHostUpdateJobs.push_back(AsyncHostUpdateJob{
+                    blockToUpdate,
+                    std::async(std::launch::async, []() {
+                        CudaSbao::applyFusedHalfHostSgd(1.0f);
+                    })});
+            }
         } else if (pipelineHostAdam) {
             if (!hostAdamSteppedThisMicrobatch) {
                 this->adam.step();
@@ -552,7 +561,7 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
                 hostGrads.feedForwardGateWeight = &hosts.feedForwardGateWeightMaster;
                 hostGrads.feedForwardUpWeight = &hosts.feedForwardUpWeightMaster;
                 hostGrads.feedForwardDownWeight = &hosts.feedForwardDownWeightMaster;
-                if (pipelineHostSpulse) {
+                if (pipelineHostSpulse && this->spulse.hostLightweight) {
                     if (this->hostBlockSpulseStates.size() != this->blocks.size())
                         this->hostBlockSpulseStates.resize(this->blocks.size());
                     CudaTransformerBlockHostSpulseStates& spulseHosts =
@@ -653,6 +662,17 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
             // (Must run BEFORE recording a new hostGradD2hEvent, or we sync the wrong layer and
             // serialize cast/D2H against the next GPU bwd.)
             flushPendingHostUpdate();
+
+            if (pipelineHostSpulse && !this->spulse.hostLightweight) {
+                // Bake delta = lr·s·u into device grad buffers on the compute stream before D2H.
+                this->spulse.learningRate = this->adam.learningRate;
+                if (this->blockSpulseStates.size() != this->blocks.size())
+                    throw std::logic_error("runPackedTrainDevice SPULSE device states not ready for host delta");
+                this->spulse.prepareHybridBlockHostDeltas(
+                    block,
+                    this->blockSpulseStates[static_cast<size_t>(blockIndex)],
+                    hostAdamGradScale());
+            }
 
             CudaMatmul::throwIfCudaFailed(
                 cudaEventRecord(this->hostGradComputeEvent, CudaMatmul::activeStream()),
@@ -916,11 +936,22 @@ void CudaLanguageModel::ensureTrainState() {
 
     if (this->preferSpulse) {
         if (CudaAdam::preferFp16GpuWeights && CudaSbao::pipelineHostWeightUpdate()) {
-            // Host fused-half path: SPULSE state on host masters (per Q/K/V/…).
-            for (CudaTransformerBlockSpulseStates& blockStates : this->blockSpulseStates)
-                blockStates.free();
-            this->blockSpulseStates.clear();
-            this->hostBlockSpulseStates.resize(this->blocks.size());
+            if (this->spulse.hostLightweight) {
+                // Lite fallback: energy scalars on host; no device momentum.
+                for (CudaTransformerBlockSpulseStates& blockStates : this->blockSpulseStates)
+                    blockStates.free();
+                this->blockSpulseStates.clear();
+                this->hostBlockSpulseStates.resize(this->blocks.size());
+            } else {
+                // Default host path: keep u + energy on GPU; D2H half deltas; host SGD axpy.
+                this->hostBlockSpulseStates.clear();
+                this->blockSpulseStates.resize(this->blocks.size());
+                for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+                    this->blockSpulseStates[blockIndex].ensureFrom(this->blocks[blockIndex]);
+                    if (blockIndex < this->blockAdamStates.size())
+                        this->blockAdamStates[blockIndex].freeMuonManagedWeights();
+                }
+            }
         } else if (CudaAdam::preferFp16GpuWeights) {
             throw std::logic_error("CudaLanguageModel::ensureTrainState SPULSE with FP16 GPU weights requires host pipeline update");
         } else {
@@ -944,26 +975,12 @@ void CudaLanguageModel::ensureTrainState() {
     if (CudaAdam::preferCpuOffload && CudaAdam::preferFp16GpuWeights)
         this->materializeFp16GpuWorkingWeights();
 
-    if (this->preferSpulse && CudaAdam::preferFp16GpuWeights && CudaSbao::pipelineHostWeightUpdate()) {
+    if (this->preferSpulse && CudaAdam::preferFp16GpuWeights && CudaSbao::pipelineHostWeightUpdate()
+        && this->spulse.hostLightweight) {
         if (this->hostBlockAdamStates.size() != this->blocks.size())
             this->hostBlockAdamStates.resize(this->blocks.size());
         this->hostBlockSpulseStates.resize(this->blocks.size());
-        // hostLightweight (default): only dual-horizon scalars — no per-element momentum alloc.
-        if (!this->spulse.hostLightweight) {
-            for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
-                CudaTransformerBlockHostAdamStates& hosts = this->hostBlockAdamStates[blockIndex];
-                CudaTransformerBlockHostSpulseStates& spulseHosts = this->hostBlockSpulseStates[blockIndex];
-                if (!hosts.queryWeightMaster.empty()) {
-                    spulseHosts.queryWeight.ensure(hosts.queryWeightMaster);
-                    spulseHosts.keyWeight.ensure(hosts.keyWeightMaster);
-                    spulseHosts.valueWeight.ensure(hosts.valueWeightMaster);
-                    spulseHosts.attentionOutputWeight.ensure(hosts.attentionOutputWeightMaster);
-                    spulseHosts.feedForwardGateWeight.ensure(hosts.feedForwardGateWeightMaster);
-                    spulseHosts.feedForwardUpWeight.ensure(hosts.feedForwardUpWeightMaster);
-                    spulseHosts.feedForwardDownWeight.ensure(hosts.feedForwardDownWeightMaster);
-                }
-            }
-        }
+        // Lite: only dual-horizon scalars — no per-element host momentum.
     }
 
     if (CudaAdam::preferHostGradients) {

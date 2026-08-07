@@ -102,6 +102,44 @@ __global__ void spulseCommitEnergyAndScale(
     energy[2] = scale;
 }
 
+/// <summary>
+/// Host-offload path: update <c>u</c> / energy on device and overwrite the grad buffer with
+/// <c>delta = lr · lagged_scale · u</c> (masters live on host; θ is not updated here).
+/// </summary>
+__global__ void spulsePrepareHostDelta(
+    float* gradientOrDelta,
+    float* momentum,
+    const float* energy,
+    float* sumSquares,
+    int elementCount,
+    float momentumBeta,
+    float oneMinusMom,
+    float gradientScale,
+    float learningRate
+) {
+    __shared__ float shared[256];
+    const float stepScale = energy[2];
+    float local = 0.0f;
+    for (int index = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+         index < elementCount;
+         index += static_cast<int>(blockDim.x * gridDim.x)) {
+        const float g = gradientOrDelta[index] * gradientScale;
+        const float m = momentumBeta * momentum[index] + oneMinusMom * g;
+        momentum[index] = m;
+        gradientOrDelta[index] = learningRate * stepScale * m;
+        local += g * g;
+    }
+    shared[threadIdx.x] = local;
+    __syncthreads();
+    for (int stride = static_cast<int>(blockDim.x) / 2; stride > 0; stride >>= 1) {
+        if (static_cast<int>(threadIdx.x) < stride)
+            shared[threadIdx.x] += shared[threadIdx.x + stride];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0)
+        atomicAdd(sumSquares, shared[0]);
+}
+
 void hostUpdateCore(
     float* parameter,
     float* momentum,
@@ -224,14 +262,14 @@ bool CudaSpulseState::empty() const {
     return this->momentum.empty();
 }
 
-void CudaSpulseState::ensure(const CudaMatrix& parameter) {
-    if (parameter.empty()) throw std::invalid_argument("CudaSpulseState::ensure empty parameter");
+void CudaSpulseState::ensure(size_t rows, size_t cols) {
+    if (rows == 0 || cols == 0) throw std::invalid_argument("CudaSpulseState::ensure empty shape");
     if (!this->momentum.empty()
-        && this->momentum.rows == parameter.rows
-        && this->momentum.cols == parameter.cols
+        && this->momentum.rows == rows
+        && this->momentum.cols == cols
         && this->energy.deviceData != nullptr)
         return;
-    this->momentum.ensureSize(parameter.rows, parameter.cols);
+    this->momentum.ensureSize(rows, cols);
     CudaOps::zeroInPlace(this->momentum);
     // [0]=e_fast, [1]=e_slow, [2]=lagged scale (init 1)
     this->energy.ensureCapacity(3 * sizeof(float));
@@ -239,6 +277,11 @@ void CudaSpulseState::ensure(const CudaMatrix& parameter) {
     throwIfFailed(
         cudaMemcpy(this->energy.deviceData, init, 3 * sizeof(float), cudaMemcpyHostToDevice),
         "CudaSpulseState::ensure energy init");
+}
+
+void CudaSpulseState::ensure(const CudaMatrix& parameter) {
+    if (parameter.empty()) throw std::invalid_argument("CudaSpulseState::ensure empty parameter");
+    this->ensure(parameter.rows, parameter.cols);
 }
 
 void CudaSpulseState::free() {
@@ -396,6 +439,153 @@ void CudaSpulse::update(CudaMatrix& parameter, CudaSpulseState& state, const Cud
         this->scaleMin,
         this->scaleMax);
     throwIfFailed(cudaGetLastError(), "spulseCommitEnergyAndScale");
+}
+
+void CudaSpulse::prepareHostDeltaInPlace(
+    float* gradientOrDelta,
+    size_t rows,
+    size_t cols,
+    CudaSpulseState& state,
+    float gradientScale
+) {
+    if (gradientOrDelta == nullptr) throw std::invalid_argument("CudaSpulse::prepareHostDeltaInPlace null buffer");
+    if (rows == 0 || cols == 0) throw std::invalid_argument("CudaSpulse::prepareHostDeltaInPlace empty shape");
+    state.ensure(rows, cols);
+
+    const int elementCount = static_cast<int>(rows * cols);
+    const int threads = 256;
+    const int blocks = (std::min)(1024, elementwiseBlocks(elementCount, threads));
+    const float oneMinusMom = 1.0f - this->momentumBeta;
+    cudaStream_t stream = CudaMatmul::activeStream();
+
+    this->sumSquaresScratch.ensureCapacity(sizeof(float));
+    float* sumSquares = this->sumSquaresScratch.deviceData;
+    CudaMatmul::memsetDevice(sumSquares, 0, sizeof(float));
+
+    spulsePrepareHostDelta<<<blocks, threads, 0, stream>>>(
+        gradientOrDelta,
+        state.momentum.buffer.deviceData,
+        state.energy.deviceData,
+        sumSquares,
+        elementCount,
+        this->momentumBeta,
+        oneMinusMom,
+        gradientScale,
+        this->learningRate);
+    throwIfFailed(cudaGetLastError(), "spulsePrepareHostDelta");
+
+    spulseCommitEnergyAndScale<<<1, 1, 0, stream>>>(
+        state.energy.deviceData,
+        sumSquares,
+        this->fastBeta,
+        this->slowBeta,
+        1.0f - this->fastBeta,
+        1.0f - this->slowBeta,
+        this->epsilon,
+        this->scaleMin,
+        this->scaleMax);
+    throwIfFailed(cudaGetLastError(), "spulseCommitEnergyAndScale (host delta)");
+}
+
+void CudaSpulse::prepareHybridBlockHostDeltas(
+    CudaTransformerBlock& block,
+    CudaTransformerBlockSpulseStates& spulseStates,
+    float gradientScale
+) {
+    if (!this->ownsHybridBlockWeights()) return;
+
+    // Same source buffers as CudaTransformerBlock::enqueueDeferredHostWeightGradDownloads.
+    if (block.feedForwardDownWeightGradient.empty())
+        throw std::logic_error("CudaSpulse::prepareHybridBlockHostDeltas empty down grad");
+    this->prepareHostDeltaInPlace(
+        block.feedForwardDownWeightGradient.buffer.deviceData,
+        block.feedForwardDownWeightGradient.rows,
+        block.feedForwardDownWeightGradient.cols,
+        spulseStates.feedForwardDownWeight,
+        gradientScale);
+
+    if (!block.feedForward.gateUpWeightGradient.empty()) {
+        const size_t gRows = block.feedForward.gateWeight.rows;
+        const size_t gCols = block.feedForward.gateWeight.cols;
+        const size_t gElems = block.feedForward.gateWeight.elementCount();
+        const size_t uRows = block.feedForward.upWeight.rows;
+        const size_t uCols = block.feedForward.upWeight.cols;
+        this->prepareHostDeltaInPlace(
+            block.feedForward.gateUpWeightGradient.buffer.deviceData,
+            gRows,
+            gCols,
+            spulseStates.feedForwardGateWeight,
+            gradientScale);
+        this->prepareHostDeltaInPlace(
+            block.feedForward.gateUpWeightGradient.buffer.deviceData + gElems,
+            uRows,
+            uCols,
+            spulseStates.feedForwardUpWeight,
+            gradientScale);
+    } else {
+        this->prepareHostDeltaInPlace(
+            block.feedForwardGateWeightGradient.buffer.deviceData,
+            block.feedForwardGateWeightGradient.rows,
+            block.feedForwardGateWeightGradient.cols,
+            spulseStates.feedForwardGateWeight,
+            gradientScale);
+        this->prepareHostDeltaInPlace(
+            block.feedForwardUpWeightGradient.buffer.deviceData,
+            block.feedForwardUpWeightGradient.rows,
+            block.feedForwardUpWeightGradient.cols,
+            spulseStates.feedForwardUpWeight,
+            gradientScale);
+    }
+
+    this->prepareHostDeltaInPlace(
+        block.attentionOutputWeightGradient.buffer.deviceData,
+        block.attentionOutputWeightGradient.rows,
+        block.attentionOutputWeightGradient.cols,
+        spulseStates.attentionOutputWeight,
+        gradientScale);
+
+    if (!block.attention.qkvWeightGradient.empty()) {
+        const size_t qRows = block.attention.queryWeight.rows;
+        const size_t qCols = block.attention.queryWeight.cols;
+        const size_t qElems = block.attention.queryWeight.elementCount();
+        this->prepareHostDeltaInPlace(
+            block.attention.qkvWeightGradient.buffer.deviceData,
+            qRows,
+            qCols,
+            spulseStates.queryWeight,
+            gradientScale);
+        this->prepareHostDeltaInPlace(
+            block.attention.qkvWeightGradient.buffer.deviceData + qElems,
+            qRows,
+            qCols,
+            spulseStates.keyWeight,
+            gradientScale);
+        this->prepareHostDeltaInPlace(
+            block.attention.qkvWeightGradient.buffer.deviceData + 2ull * qElems,
+            qRows,
+            qCols,
+            spulseStates.valueWeight,
+            gradientScale);
+    } else {
+        this->prepareHostDeltaInPlace(
+            block.queryWeightGradient.buffer.deviceData,
+            block.queryWeightGradient.rows,
+            block.queryWeightGradient.cols,
+            spulseStates.queryWeight,
+            gradientScale);
+        this->prepareHostDeltaInPlace(
+            block.keyWeightGradient.buffer.deviceData,
+            block.keyWeightGradient.rows,
+            block.keyWeightGradient.cols,
+            spulseStates.keyWeight,
+            gradientScale);
+        this->prepareHostDeltaInPlace(
+            block.valueWeightGradient.buffer.deviceData,
+            block.valueWeightGradient.rows,
+            block.valueWeightGradient.cols,
+            spulseStates.valueWeight,
+            gradientScale);
+    }
 }
 
 void CudaSpulse::updateHost(Matrix& parameter, SpulseState& state, const Matrix& gradient, float gradientScale) const {

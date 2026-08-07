@@ -6,7 +6,7 @@ All notable changes to this project are documented here.
 
 ### Added
 
-- **SPULSE** optimizer (opt-in): dual-horizon energy-scaled momentum on hidden 2D weights + Adam on embed/norms/biases/head (`set_prefer_spulse` / `setCudaPreferSpulse`). Hybrid coverage v1; Full planned. Logic lives in `CudaSPULSE.*`. Works on GPU-resident and **host fused-half** SBAO paths (`spulse-host`). Distinct from SBAO (policy). Harness toggles: `runSpulseThroughputCompare` (GPU), `runSpulseHostThroughputCompare` (HostSGD vs HostAdam vs SPULSE-Host).
+- **SPULSE** optimizer (opt-in): dual-horizon energy-scaled momentum on hidden 2D weights + Adam on embed/norms/biases/head (`set_prefer_spulse` / `setCudaPreferSpulse`). Hybrid coverage v1; Full planned. Logic lives in `CudaSPULSE.*`. GPU-resident path keeps full `u` on device. **Host fused-half**: default keeps `u` on GPU, bakes `delta = lr·s·u` into the grad buffer before half D2H, then HostSGD-shaped host axpy (same PCIe volume as HostSGD). `hostLightweight` is a VRAM fallback (no device `u`). Distinct from SBAO (policy). Harness: `runSpulseThroughputCompare` (GPU), `runSpulseHostThroughputCompare` (HostSGD vs HostAdam vs SPULSE-Host).
 - `BPETokenizer` persistence: binary `.sbpe` via `save` / `load` / `loadFrom` (C++ + Python)
 - Examples write/load sibling `{stem}.sbpe` next to checkpoints
 - SafeTensors load accepts **BF16** / **F16** (converts to host F32); save remains F32
