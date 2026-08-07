@@ -32,7 +32,45 @@ The phase split decides how much of the budget below is real. The prioritization
 assumes the dominant costs are (a) Full-checkpoint recompute and (b) the LM
 head/CE, with (c) host-SGD copies partially exposed — **confirm with Step 0.**
 
-## Prioritized levers
+## Implemented in this PR (opt-in; default = current behavior)
+
+All three are gated so a plain run is byte-for-byte the shipped path — flip one
+env var at a time, run the probe twice (with/without), and keep/revert per the
+≥3 % mean gate.
+
+| Lever | Env flag (default) | What it does | Where |
+| --- | --- | --- | --- |
+| **L4/L5 recompute** | `SENTINEL_CKPT_KEEP_FREE_MIB` (2048) | Lower the reserved-VRAM floor so `enablePartialSelectiveLayers` converts **more** trailing Full-ckpt layers to the cheap selective backward → fewer full-block recomputes. This is the biggest lever. | `CudaLanguageModel.cu` `enablePartialSelectiveLayers` |
+| **L3 overlap depth** | `SENTINEL_MAX_ASYNC_HOST_UPDATE` (4) | Tune how many async host-SGD applies trail the GPU backward (deeper = more D2H/SGD/H2D hidden, if freelist slots allow). | `CudaLanguageModel.cu` backward loop |
+| **L1 bias-GEMM algo cache (TF32)** | `SENTINEL_BIAS_GEMM_CACHE` (off) | Cache descriptor+algo for TF32 bias-epilogue GEMMs instead of re-running the heuristic per call. | `CudaMatmul.cu` `launchCublasLtMatmul` |
+
+Also added: `benchmarks/_lib/autotune_pack_4b.py` — L2 pack-budget sweep that
+reports tok/s per `max_packed_columns` for the 4B host-SGD (feat) path.
+
+### Suggested A/B order on 4B_PoC feat (baseline 1.15k)
+1. `SENTINEL_CKPT_KEEP_FREE_MIB=1024` (then 768, 512) — watch for OOM/WDDM thrash; expect the largest gain.
+2. `python benchmarks/_lib/autotune_pack_4b.py --seq 256` — pick the best `max_packed_columns`.
+3. `SENTINEL_MAX_ASYNC_HOST_UPDATE=6` (then 8) — only helps if Step 0's `d2h`/`sgd`/`h2d` are exposed.
+4. `SENTINEL_BIAS_GEMM_CACHE=1` — **note:** the FP16 path (`CudaAmp.cu`) already caches the bias algo, so on the feat/AMP hot path this is expected to be ~neutral; it mainly helps non-AMP/TF32 GEMMs. Kept for completeness.
+
+Combine the winners (they stack multiplicatively). Correctness note: every added
+cuBLASLt cache path returns `false` on any failure, so the caller falls back to
+its existing correct GEMM — a bad cache degrades speed, not numerics.
+
+### Honest findings from the code (recalibration)
+- **L1 was already done where it matters.** `CudaAmp.cu` (FP16 path used by 4B
+  feat) already caches desc+algo keyed by shape+bias. The TF32 gap I closed is a
+  minor/fallback win. Don't expect L1 to move 4B feat.
+- **The recompute lever already exists** as `enablePartialSelectiveLayers`
+  (VRAM-budgeted). It was hard-capped at a 2 GiB free floor; the new env lets you
+  push it. This — plus pack budget — is where the +30 % realistically comes from.
+- **Not shipped blind:** LM head/CE fusion (L6), a bf16 path (L7), and elementwise
+  kernel fusion (L8). These are large and numerics-sensitive; writing them without
+  a GPU to run the parity smokes would risk silent training corruption, which the
+  repo's evidence-gate methodology (and basic sanity) forbids. They stay staged
+  for a GPU-in-the-loop pass — see below.
+
+## Prioritized levers (design detail / staged)
 
 Each lever: hypothesis → where → expected delta → risk. Deltas are estimates to
 be validated with the probe; keep only if the gate is met, else revert.
