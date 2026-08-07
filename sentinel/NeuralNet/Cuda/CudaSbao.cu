@@ -4,6 +4,7 @@
 #include "CudaMatmul.hpp"
 #include "../Math/Matrix.hpp"
 #include "../Optimizers/Adam.hpp"
+#include "../Optimizers/Spulse.hpp"
 
 #include <cmath>
 #include <cstddef>
@@ -149,6 +150,7 @@ __global__ void CudaSbaoCastFloatToHalfEntry(const float* source, __half* destin
 struct FusedHalfGradPiece {
     Matrix* host = nullptr;
     AdamState* adamState = nullptr;
+    SpulseState* spulseState = nullptr;
     const float* deviceFloat = nullptr;
     size_t halfOffset = 0;
     size_t elementCount = 0;
@@ -247,7 +249,8 @@ void CudaSbao::appendFusedHalfGradOffload(
     const float* deviceFloat,
     size_t rows,
     size_t cols,
-    AdamState* hostAdamState
+    AdamState* hostAdamState,
+    SpulseState* hostSpulseState
 ) {
     if (deviceFloat == nullptr) throw std::invalid_argument("appendFusedHalfGradOffload null deviceFloat");
     if (rows == 0 || cols == 0) throw std::invalid_argument("appendFusedHalfGradOffload empty shape");
@@ -256,6 +259,7 @@ void CudaSbao::appendFusedHalfGradOffload(
     FusedHalfGradPiece piece;
     piece.host = &hostOut;
     piece.adamState = hostAdamState;
+    piece.spulseState = hostSpulseState;
     piece.deviceFloat = deviceFloat;
     piece.halfOffset = g_fusedHalfOpenElements;
     piece.elementCount = elementCount;
@@ -440,4 +444,38 @@ void CudaSbao::releaseCompletedFusedHalfDevices() {
     }
     for (FusedHalfDeviceSlot* slot : toRelease)
         releaseFusedHalfDevice(slot);
+}
+
+bool CudaSbao::takeReadyFusedHalfHostBatch(std::vector<SbaoFusedHalfHostPiece>& outPieces, std::uint16_t*& hostPin) {
+    outPieces.clear();
+    hostPin = nullptr;
+    FusedHalfGradBatch batch;
+    {
+        std::lock_guard<std::mutex> lock(g_fusedHalfReadyMutex);
+        if (g_fusedHalfReadyBatches.empty()) return false;
+        batch = std::move(g_fusedHalfReadyBatches.front());
+        g_fusedHalfReadyBatches.erase(g_fusedHalfReadyBatches.begin());
+    }
+    if (batch.deviceSlot != nullptr) {
+        releaseFusedHalfDevice(batch.deviceSlot);
+        batch.deviceSlot = nullptr;
+    }
+    outPieces.reserve(batch.pieces.size());
+    for (const FusedHalfGradPiece& piece : batch.pieces) {
+        SbaoFusedHalfHostPiece view;
+        view.host = piece.host;
+        view.adamState = piece.adamState;
+        view.spulseState = piece.spulseState;
+        view.gradHalf = batch.hostHalf != nullptr ? batch.hostHalf + piece.halfOffset : nullptr;
+        view.rows = piece.rows;
+        view.cols = piece.cols;
+        view.elementCount = piece.elementCount;
+        outPieces.push_back(view);
+    }
+    hostPin = batch.hostHalf;
+    return true;
+}
+
+void CudaSbao::releaseFusedHalfHostPin(std::uint16_t* hostPin) {
+    releaseFusedHalfHost(hostPin);
 }

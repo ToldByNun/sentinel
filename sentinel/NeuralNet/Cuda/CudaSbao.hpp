@@ -3,10 +3,23 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 class AdamState;
 class Matrix;
+class SpulseState;
 typedef struct CUstream_st* cudaStream_t;
+
+/// <summary>view of one fused-half host piece after D2H (optimizer-agnostic transport)</summary>
+struct SbaoFusedHalfHostPiece {
+    Matrix* host = nullptr;
+    AdamState* adamState = nullptr;
+    SpulseState* spulseState = nullptr;
+    const std::uint16_t* gradHalf = nullptr;
+    size_t rows = 0;
+    size_t cols = 0;
+    size_t elementCount = 0;
+};
 
 /// <summary>
 /// SBAO — Sentinel Backend Adaptive Optimization: pick GPU-resident int8 Adam vs host
@@ -70,7 +83,8 @@ public:
         const float* deviceFloat,
         size_t rows,
         size_t cols,
-        AdamState* hostAdamState = nullptr);
+        AdamState* hostAdamState = nullptr,
+        SpulseState* hostSpulseState = nullptr);
     static void commitFusedHalfGradOffload(cudaStream_t stream);
 
     /// <summary>
@@ -106,6 +120,15 @@ public:
     /// (host pins stay until flushPinnedD2hToHost / applyFusedHalfHostSgd)
     /// </summary>
     static void releaseCompletedFusedHalfDevices();
+
+    /// <summary>
+    /// Pop one ready fused-half batch into optimizer-agnostic pieces.
+    /// Returns false if the queue is empty. Caller must releaseFusedHalfHostPin(hostPin).
+    /// </summary>
+    static bool takeReadyFusedHalfHostBatch(std::vector<SbaoFusedHalfHostPiece>& outPieces, std::uint16_t*& hostPin);
+
+    /// <summary>return a host pin acquired via takeReadyFusedHalfHostBatch</summary>
+    static void releaseFusedHalfHostPin(std::uint16_t* hostPin);
 };
 
 #endif // CUDASBAO_HPP

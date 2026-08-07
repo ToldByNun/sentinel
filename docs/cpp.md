@@ -70,6 +70,15 @@ Tiny binaries: [`examples/train_tiny.cpp`](../examples/train_tiny.cpp), [`exampl
 
 `CudaSbao::select` / `resolveAndApply` / `modeName` are available for policy introspection. Prefer driving policy through `LanguageModel::setCudaPreferSbao` / `setCudaSbaoMode`.
 
+### `SpulseCoverage` (`Cuda/CudaSPULSE.hpp`)
+
+| Value | Meaning |
+| ----- | ------- |
+| `Hybrid` | Hidden 2D block weights (v1) |
+| `Full` | Planned |
+
+SPULSE is an optimizer (`setCudaPreferSpulse`); SBAO remains residency policy.
+
 ---
 
 ## `BPETokenizer`

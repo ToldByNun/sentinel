@@ -15,6 +15,7 @@
 #include "CudaRMSNorm.hpp"
 
 class AdamState;
+class SpulseState;
 class CudaTransformerBlock;
 
 /// <summary>device resident gradients for one transformer block</summary>
@@ -90,6 +91,14 @@ struct CudaTransformerBlockHostWeightGrads {
     AdamState* feedForwardGateWeightState = nullptr;
     AdamState* feedForwardUpWeightState = nullptr;
     AdamState* feedForwardDownWeightState = nullptr;
+    /// <summary>optional host SPULSE state for fused-half SPULSE apply</summary>
+    SpulseState* queryWeightSpulse = nullptr;
+    SpulseState* keyWeightSpulse = nullptr;
+    SpulseState* valueWeightSpulse = nullptr;
+    SpulseState* attentionOutputWeightSpulse = nullptr;
+    SpulseState* feedForwardGateWeightSpulse = nullptr;
+    SpulseState* feedForwardUpWeightSpulse = nullptr;
+    SpulseState* feedForwardDownWeightSpulse = nullptr;
 };
 
 

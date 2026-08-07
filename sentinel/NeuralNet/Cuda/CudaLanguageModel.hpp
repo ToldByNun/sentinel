@@ -18,6 +18,8 @@
 
 #include "CudaMuon.hpp"
 
+#include "CudaSPULSE.hpp"
+
 #include "CudaOps.hpp"
 
 #include "CudaRMSNorm.hpp"
@@ -248,6 +250,9 @@ public:
     /// <summary>Muon on hidden 2D weights; Adam on embed/norms/biases/head</summary>
     bool preferMuon;
 
+    /// <summary>SPULSE on hidden 2D weights (Hybrid); Adam on embed/norms/biases/head. Mutex with Muon.</summary>
+    bool preferSpulse;
+
     /// <summary>log cudaMemGetInfo during packed train (4B probe)</summary>
     bool preferTrainMemTrace;
 
@@ -294,6 +299,9 @@ public:
     /// <summary>enable/disable Muon hybrid; marks train state stale</summary>
     void setPreferMuon(bool enabled);
 
+    /// <summary>enable/disable SPULSE hybrid; marks train state stale; disables Muon when enabling</summary>
+    void setPreferSpulse(bool enabled);
+
     /// <summary>log label for mode</summary>
     static const char* activationCheckpointModeName(ActivationCheckpointMode mode);
 
@@ -304,6 +312,8 @@ public:
 
     CudaMuon muon;
 
+    CudaSpulse spulse;
+
     CudaLanguageModelGradients trainGradients;
 
     CudaAdamState tokenEmbeddingState;
@@ -312,6 +322,7 @@ public:
     CudaAdamState projectionBiasState;
     std::vector<CudaTransformerBlockAdamStates> blockAdamStates;
     std::vector<CudaTransformerBlockMuonStates> blockMuonStates;
+    std::vector<CudaTransformerBlockSpulseStates> blockSpulseStates;
 
     /// <summary>host Adam moments used when CudaAdam::preferCpuOffload (device states stay empty)</summary>
     AdamState hostTokenEmbeddingState;
@@ -319,6 +330,7 @@ public:
     AdamState hostProjectionWeightState;
     AdamState hostProjectionBiasState;
     std::vector<CudaTransformerBlockHostAdamStates> hostBlockAdamStates;
+    std::vector<CudaTransformerBlockHostSpulseStates> hostBlockSpulseStates;
 
     /// <summary>FP32 Adam masters on host when preferFp16GpuWeights</summary>
     Matrix hostTokenEmbeddingMaster;
@@ -663,6 +675,9 @@ public:
 
     /// <summary>tiny packed Muon+Adam train: finite loss after a few steps</summary>
     static void runMuonTrainSmokeDemo(int vocabularySize = 128, int embeddingDim = 64, int sequenceLength = 32, int blockCount = 2, int headCount = 4);
+
+    /// <summary>tiny packed SPULSE+Adam hybrid train: finite loss after a few steps</summary>
+    static void runSpulseTrainSmokeDemo(int vocabularySize = 128, int embeddingDim = 64, int sequenceLength = 32, int blockCount = 2, int headCount = 4);
 
     /// <summary>Full vs Selective checkpointing: one packed microstep loss + embed-grad max abs diff</summary>
     static void runSelectiveCheckpointParitySmokeDemo(

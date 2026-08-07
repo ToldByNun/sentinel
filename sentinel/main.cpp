@@ -7,6 +7,7 @@
 #include "NeuralNet/Cuda/CudaAdam.hpp"
 #include "NeuralNet/Cuda/CudaSbao.hpp"
 #include "NeuralNet/Cuda/CudaMuon.hpp"
+#include "NeuralNet/Cuda/CudaSPULSE.hpp"
 #include "NeuralNet/Cuda/CudaAmp.hpp"
 #include "NeuralNet/Cuda/CudaTransformerBlock.hpp"
 #include "NeuralNet/Layers/CausalSelfAttention.hpp"
@@ -391,6 +392,11 @@ int main() {
             CudaMuon::runSmokeDemo(64, 48);
             CudaMuon::runSmokeDemo(48, 64);
             CudaLanguageModel::runMuonTrainSmokeDemo(128, 64, 32, 2, 4);
+        });
+        run("spulse", []() {
+            CudaSpulse::runSmokeDemo(64, 48);
+            CudaSpulse::runSmokeDemo(48, 64);
+            CudaLanguageModel::runSpulseTrainSmokeDemo(128, 64, 32, 2, 4);
         });
         run("attention", []() {
             CausalSelfAttention::runSparseMaskSmokeDemo(32, 2, 16, 32, 4, 2);
@@ -1741,6 +1747,11 @@ int main() {
         CudaMuon::runSmokeDemo(64, 48);
         CudaMuon::runSmokeDemo(48, 64);
         CudaLanguageModel::runMuonTrainSmokeDemo(128, 64, 32, 2, 4);
+
+        SmokeLog::section("spulse");
+        CudaSpulse::runSmokeDemo(64, 48);
+        CudaSpulse::runSmokeDemo(48, 64);
+        CudaLanguageModel::runSpulseTrainSmokeDemo(128, 64, 32, 2, 4);
 
         SmokeLog::section("attention");
         CausalSelfAttention::runSparseMaskSmokeDemo(32, 2, 16, 32, 4, 2);
