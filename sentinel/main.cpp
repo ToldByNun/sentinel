@@ -404,7 +404,7 @@ int main() {
                 spulseLearned ? "yes" : "no");
             SmokeLog::result(
                 "verdict",
-                "%s  quality=%s (maxLossRatio=%.2f)  speed=%s (minSpeedRatio=%.2f)  — speed without quality is not enough",
+                "%s  quality=%s (maxLossRatio=%.2f)  speed=%s (minSpeedRatio=%.2f)  -- speed without quality is not enough",
                 pass ? "PASS" : "FAIL",
                 qualityOk ? "ok" : "bad",
                 maxLossRatio,
