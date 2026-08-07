@@ -49,10 +49,11 @@ __global__ void spulseFusedStep(
     float oneMinusMom,
     float gradientScale,
     float learningRate,
-    float keep
+    float keep,
+    float momCorrection
 ) {
     __shared__ float shared[256];
-    const float stepScale = energy[2];
+    const float stepScale = energy[2] * momCorrection;
     float local = 0.0f;
     for (int index = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
          index < elementCount;
@@ -115,10 +116,11 @@ __global__ void spulsePrepareHostDelta(
     float momentumBeta,
     float oneMinusMom,
     float gradientScale,
-    float learningRate
+    float learningRate,
+    float momCorrection
 ) {
     __shared__ float shared[256];
-    const float stepScale = energy[2];
+    const float stepScale = energy[2] * momCorrection;
     float local = 0.0f;
     for (int index = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
          index < elementCount;
@@ -151,10 +153,11 @@ __global__ void spulseFusedStepHalf(
     float oneMinusMom,
     float gradientScale,
     float learningRate,
-    float keep
+    float keep,
+    float momCorrection
 ) {
     __shared__ float shared[256];
-    const float stepScale = energy[2];
+    const float stepScale = energy[2] * momCorrection;
     float local = 0.0f;
     for (int index = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
          index < elementCount;
@@ -189,10 +192,11 @@ __global__ void spulsePrepareHostDeltaHalf(
     float momentumBeta,
     float oneMinusMom,
     float gradientScale,
-    float learningRate
+    float learningRate,
+    float momCorrection
 ) {
     __shared__ float shared[256];
-    const float stepScale = energy[2];
+    const float stepScale = energy[2] * momCorrection;
     float local = 0.0f;
     for (int index = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
          index < elementCount;
@@ -230,6 +234,7 @@ __global__ void spulseStepInt8(
     float gradientScale,
     float learningRate,
     float keep,
+    float momCorrection,
     int writeDelta
 ) {
     const int quantBlock = static_cast<int>(blockIdx.x);
@@ -244,7 +249,7 @@ __global__ void spulseStepInt8(
     float* reduceSum = reduceMax + threadCount;
 
     const float oldScale = momentumScales[quantBlock];
-    const float stepScale = energy[2];
+    const float stepScale = energy[2] * momCorrection;
     float localSum = 0.0f;
 
     for (int local = static_cast<int>(threadIdx.x); local < count; local += threadCount) {
@@ -315,12 +320,13 @@ void hostUpdateCore(
     float scaleMin,
     float scaleMax,
     float weightDecay,
-    float gradientScale
+    float gradientScale,
+    float momCorrection
 ) {
     const float oneMinusMom = 1.0f - momentumBeta;
     const float oneMinusFast = 1.0f - fastBeta;
     const float oneMinusSlow = 1.0f - slowBeta;
-    const float stepScale = scale;
+    const float stepScale = scale * momCorrection;
     float sumSquares = 0.0f;
     const float keep = 1.0f - learningRate * weightDecay;
     const float step = learningRate * stepScale;
@@ -354,12 +360,13 @@ void hostUpdateFromHalfCore(
     float scaleMin,
     float scaleMax,
     float weightDecay,
-    float gradientScale
+    float gradientScale,
+    float momCorrection
 ) {
     const float oneMinusMom = 1.0f - momentumBeta;
     const float oneMinusFast = 1.0f - fastBeta;
     const float oneMinusSlow = 1.0f - slowBeta;
-    const float stepScale = scale;
+    const float stepScale = scale * momCorrection;
     float sumSquares = 0.0f;
     const float keep = 1.0f - learningRate * weightDecay;
     const float step = learningRate * stepScale;
@@ -641,7 +648,8 @@ CudaSpulse::CudaSpulse(
       coverage(coverage),
       hostLightweight(hostLightweight),
       momentumStorage(momentumStorage),
-      int8BlockSize(int8BlockSize) {
+      int8BlockSize(int8BlockSize),
+      timeStep(0) {
     if (learningRate <= 0.0f) throw std::invalid_argument("CudaSpulse learningRate must be > 0");
     if (momentumBeta < 0.0f || momentumBeta >= 1.0f) throw std::invalid_argument("CudaSpulse momentumBeta must be in [0, 1)");
     if (fastBeta < 0.0f || fastBeta >= 1.0f) throw std::invalid_argument("CudaSpulse fastBeta must be in [0, 1)");
@@ -651,6 +659,17 @@ CudaSpulse::CudaSpulse(
     if (scaleMin <= 0.0f || scaleMax < scaleMin) throw std::invalid_argument("CudaSpulse invalid scale clip");
     if (weightDecay < 0.0f) throw std::invalid_argument("CudaSpulse weightDecay must be >= 0");
     if (int8BlockSize <= 0) throw std::invalid_argument("CudaSpulse int8BlockSize must be > 0");
+}
+
+void CudaSpulse::step() {
+    ++this->timeStep;
+}
+
+float CudaSpulse::momentumBiasCorrection() const {
+    if (this->timeStep <= 0) return 1.0f;
+    const float oneMinusPow = 1.0f - std::pow(this->momentumBeta, static_cast<float>(this->timeStep));
+    if (!(oneMinusPow > 0.0f)) return 1.0f;
+    return 1.0f / oneMinusPow;
 }
 
 const char* CudaSpulse::coverageName(SpulseCoverage coverage) {
@@ -687,6 +706,7 @@ void CudaSpulse::update(CudaMatrix& parameter, CudaSpulseState& state, const Cud
     const int elementCount = static_cast<int>(parameter.elementCount());
     const float oneMinusMom = 1.0f - this->momentumBeta;
     const float keep = 1.0f - this->learningRate * this->weightDecay;
+    const float momCorrection = this->momentumBiasCorrection();
     cudaStream_t stream = CudaMatmul::activeStream();
 
     this->sumSquaresScratch.ensureCapacity(sizeof(float));
@@ -707,7 +727,8 @@ void CudaSpulse::update(CudaMatrix& parameter, CudaSpulseState& state, const Cud
             oneMinusMom,
             gradientScale,
             this->learningRate,
-            keep);
+            keep,
+            momCorrection);
         throwIfFailed(cudaGetLastError(), "spulseFusedStep");
     } else if (state.storage == SpulseMomentumStorage::Fp16) {
         const int threads = 256;
@@ -723,7 +744,8 @@ void CudaSpulse::update(CudaMatrix& parameter, CudaSpulseState& state, const Cud
             oneMinusMom,
             gradientScale,
             this->learningRate,
-            keep);
+            keep,
+            momCorrection);
         throwIfFailed(cudaGetLastError(), "spulseFusedStepHalf");
     } else {
         const int blockSize = state.int8BlockSize;
@@ -744,6 +766,7 @@ void CudaSpulse::update(CudaMatrix& parameter, CudaSpulseState& state, const Cud
             gradientScale,
             this->learningRate,
             keep,
+            momCorrection,
             0);
         throwIfFailed(cudaGetLastError(), "spulseStepInt8");
     }
@@ -774,6 +797,7 @@ void CudaSpulse::prepareHostDeltaInPlace(
 
     const int elementCount = static_cast<int>(rows * cols);
     const float oneMinusMom = 1.0f - this->momentumBeta;
+    const float momCorrection = this->momentumBiasCorrection();
     cudaStream_t stream = CudaMatmul::activeStream();
 
     this->sumSquaresScratch.ensureCapacity(sizeof(float));
@@ -792,7 +816,8 @@ void CudaSpulse::prepareHostDeltaInPlace(
             this->momentumBeta,
             oneMinusMom,
             gradientScale,
-            this->learningRate);
+            this->learningRate,
+            momCorrection);
         throwIfFailed(cudaGetLastError(), "spulsePrepareHostDelta");
     } else if (state.storage == SpulseMomentumStorage::Fp16) {
         const int threads = 256;
@@ -806,7 +831,8 @@ void CudaSpulse::prepareHostDeltaInPlace(
             this->momentumBeta,
             oneMinusMom,
             gradientScale,
-            this->learningRate);
+            this->learningRate,
+            momCorrection);
         throwIfFailed(cudaGetLastError(), "spulsePrepareHostDeltaHalf");
     } else {
         const int blockSize = state.int8BlockSize;
@@ -827,6 +853,7 @@ void CudaSpulse::prepareHostDeltaInPlace(
             gradientScale,
             this->learningRate,
             1.0f,
+            momCorrection,
             1);
         throwIfFailed(cudaGetLastError(), "spulseStepInt8 (host delta)");
     }
@@ -966,7 +993,8 @@ void CudaSpulse::updateHost(Matrix& parameter, SpulseState& state, const Matrix&
         this->scaleMin,
         this->scaleMax,
         this->weightDecay,
-        gradientScale);
+        gradientScale,
+        this->momentumBiasCorrection());
 }
 
 void CudaSpulse::updateHostFromHalf(
@@ -1020,7 +1048,8 @@ void CudaSpulse::updateHostFromHalf(
         this->scaleMin,
         this->scaleMax,
         this->weightDecay,
-        gradientScale);
+        gradientScale,
+        this->momentumBiasCorrection());
 }
 
 void CudaSpulse::applyFusedHalfHostPieces(const std::vector<SpulseFusedHalfHostPiece>& pieces, float gradientScale) const {
@@ -1079,6 +1108,7 @@ void CudaSpulse::runSmokeDemo(int parameterRows, int parameterCols) {
         SpulseState hostState;
         // Host reference always uses FP32 u.
         CudaSpulse hostOpt(1e-3f, 0.9f, 0.9f, 0.999f, 1e-8f, 0.25f, 4.0f, 0.0f, SpulseCoverage::Hybrid);
+        hostOpt.step();
         hostOpt.updateHost(hostParamRef, hostState, hostGrad, 1.0f);
 
         CudaMatrix deviceParam;
@@ -1086,6 +1116,7 @@ void CudaSpulse::runSmokeDemo(int parameterRows, int parameterCols) {
         CudaMatrix deviceGrad;
         deviceGrad.upload(hostGrad);
         CudaSpulseState deviceState;
+        opt.step();
         opt.update(deviceParam, deviceState, deviceGrad, 1.0f);
         throwIfFailed(cudaDeviceSynchronize(), "CudaSpulse update synchronize");
         Matrix deviceDownloaded = deviceParam.download();

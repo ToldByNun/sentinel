@@ -407,6 +407,7 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
     };
     std::deque<AsyncHostUpdateJob> asyncHostUpdateJobs;
     bool hostAdamSteppedThisMicrobatch = false;
+    bool hostSpulseSteppedThisMicrobatch = false;
     auto finishOldestAsyncHostUpdate = [&]() {
         if (asyncHostUpdateJobs.empty()) return;
         AsyncHostUpdateJob job = std::move(asyncHostUpdateJobs.front());
@@ -664,8 +665,13 @@ void CudaLanguageModel::runPackedTrainDevice(size_t tokenCount, int segmentLengt
             flushPendingHostUpdate();
 
             if (pipelineHostSpulse && !this->spulse.hostLightweight) {
-                // Bake delta = lr·s·u into device grad buffers on the compute stream before D2H.
+                // Bake delta = lr·s·û into device grad buffers on the compute stream before D2H.
+                // Bias-correct once per microbatch (same t for every block).
                 this->spulse.learningRate = this->adam.learningRate;
+                if (!hostSpulseSteppedThisMicrobatch) {
+                    this->spulse.step();
+                    hostSpulseSteppedThisMicrobatch = true;
+                }
                 if (this->blockSpulseStates.size() != this->blocks.size())
                     throw std::logic_error("runPackedTrainDevice SPULSE device states not ready for host delta");
                 this->spulse.prepareHybridBlockHostDeltas(
@@ -2708,6 +2714,9 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
     this->adam.step();
     this->muon.learningRate = this->adam.learningRate;
     this->spulse.learningRate = this->adam.learningRate;
+    // Host GPU-u path already stepped during bwd prepareHostDelta; GPU-resident steps here.
+    if (!(this->preferSpulse && CudaSbao::pipelineHostWeightUpdate() && !this->spulse.hostLightweight))
+        this->spulse.step();
 
     auto syncFusedMirrors = [this]() {
         if (CudaAdam::preferFp16GpuWeights && CudaSbao::pipelineHostWeightUpdate()) {

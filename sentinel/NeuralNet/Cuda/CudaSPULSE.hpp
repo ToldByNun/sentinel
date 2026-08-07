@@ -117,6 +117,8 @@ public:
     SpulseMomentumStorage momentumStorage;
     /// <summary>absmax block size when momentumStorage == Int8</summary>
     int int8BlockSize;
+    /// <summary>optimizer step count for momentum bias correction (Adam-style)</summary>
+    int timeStep;
 
     /// <summary>scratch for ||g||² reduction (device); reused across updates</summary>
     CudaDeviceBuffer sumSquaresScratch;
@@ -134,6 +136,12 @@ public:
         bool hostLightweight = false,
         SpulseMomentumStorage momentumStorage = SpulseMomentumStorage::Fp32,
         int int8BlockSize = 256);
+
+    /// <summary>advance timeStep (call once per optimizer step before updates)</summary>
+    void step();
+
+    /// <summary>1 / (1 - β^t); 1 when timeStep==0</summary>
+    float momentumBiasCorrection() const;
 
     /// <summary>true when this tensor class is owned by SPULSE under current coverage</summary>
     bool ownsHybridBlockWeights() const;
