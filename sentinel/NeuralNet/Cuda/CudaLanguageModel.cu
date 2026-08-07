@@ -3067,7 +3067,8 @@ void CudaLanguageModel::trainOnExamples(
     int& packCount,
     int& singleExamplePackCount,
     long long& packedExampleSum,
-    long long& packedTokenSum
+    long long& packedTokenSum,
+    unsigned shuffleSeed
 ) {
     if (batchSize <= 0) batchSize = 32;
     if (this->gradientAccumulationSteps <= 0) this->gradientAccumulationSteps = 1;
@@ -3098,10 +3099,26 @@ void CudaLanguageModel::trainOnExamples(
     std::vector<int> order(static_cast<size_t>(exampleCount));
     for (int index = 0; index < exampleCount; ++index)
         order[static_cast<size_t>(index)] = index;
-    std::stable_sort(order.begin(), order.end(), [&dataset](int left, int right) {
-        return dataset.examples[static_cast<size_t>(left)].inputTokenIds.size()
-            < dataset.examples[static_cast<size_t>(right)].inputTokenIds.size();
-    });
+
+    // Shuffle then length-sort *within each pack window*. A global short→long epoch
+    // (previous behavior) is a hard curriculum: early Adam steps see only short docs,
+    // late steps only long ones — online trainLoss can rise across epochs while test
+    // still inches down. Window-local sort keeps packing dense without that pathology.
+    if (shuffleSeed != 0u) {
+        unsigned rng = shuffleSeed;
+        for (int index = exampleCount - 1; index > 0; --index) {
+            rng = rng * 1664525u + 1013904223u;
+            const int swapIndex = static_cast<int>(rng % static_cast<unsigned>(index + 1));
+            const int temporary = order[static_cast<size_t>(index)];
+            order[static_cast<size_t>(index)] = order[static_cast<size_t>(swapIndex)];
+            order[static_cast<size_t>(swapIndex)] = temporary;
+        }
+    } else {
+        std::stable_sort(order.begin(), order.end(), [&dataset](int left, int right) {
+            return dataset.examples[static_cast<size_t>(left)].inputTokenIds.size()
+                < dataset.examples[static_cast<size_t>(right)].inputTokenIds.size();
+        });
+    }
 
     std::vector<const LanguageModelExample*> packPointers;
     packPointers.reserve(static_cast<size_t>((std::max)(1, this->maxPackedColumns / CudaLanguageModel::lengthBucketStep)));
@@ -3115,6 +3132,16 @@ void CudaLanguageModel::trainOnExamples(
         int windowEnd = windowStart + packWindow;
         if (windowEnd > exampleCount) windowEnd = exampleCount;
 
+        if (shuffleSeed != 0u) {
+            std::stable_sort(
+                order.begin() + windowStart,
+                order.begin() + windowEnd,
+                [&dataset](int left, int right) {
+                    return dataset.examples[static_cast<size_t>(left)].inputTokenIds.size()
+                        < dataset.examples[static_cast<size_t>(right)].inputTokenIds.size();
+                });
+        }
+
         int packStart = windowStart;
         while (packStart < windowEnd) {
             const int trueLength = static_cast<int>(
@@ -3124,6 +3151,11 @@ void CudaLanguageModel::trainOnExamples(
             int maxExamplesInPack = 1;
             if (bucketLength > 0 && this->maxPackedColumns > 0)
                 maxExamplesInPack = (std::max)(1, this->maxPackedColumns / bucketLength);
+            // Cap pack to the remaining Adam-step budget so effective batch does not
+            // overshoot batchSize*gradAccum by hundreds of short examples in one pack.
+            const int remainingToStep = examplesPerAdamStep - accumulatedExampleCount;
+            if (remainingToStep > 0)
+                maxExamplesInPack = (std::min)(maxExamplesInPack, remainingToStep);
 
             packPointers.clear();
             int packEnd = packStart;
@@ -3216,6 +3248,8 @@ void CudaLanguageModel::train(const LanguageModelDataset& trainDataset, const La
         int singleExamplePackCount = 0;
         long long packedExampleSum = 0;
         long long packedTokenSum = 0;
+        // Non-zero seed every epoch: shuffle + window-local length pack (see trainOnExamples).
+        const unsigned shuffleSeed = 0xC0FFEEu ^ (0x9E3779B9u * static_cast<unsigned>(epoch + 1));
         this->trainOnExamples(
             trainDataset,
             batchSize,
@@ -3227,7 +3261,8 @@ void CudaLanguageModel::train(const LanguageModelDataset& trainDataset, const La
             packCount,
             singleExamplePackCount,
             packedExampleSum,
-            packedTokenSum
+            packedTokenSum,
+            shuffleSeed
         );
 
         CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "CudaLanguageModel::train epoch synchronize");
@@ -3304,6 +3339,8 @@ void CudaLanguageModel::train(LanguageModelChunkSource& source, int epochs, int 
         LanguageModelDataset epochDataset;
         source.fillTrainDataset(epochDataset);
         if (!epochDataset.examples.empty()) {
+            // Non-zero seed every epoch: shuffle + window-local length pack (see trainOnExamples).
+            const unsigned shuffleSeed = 0xA5A5A5A5u ^ (0x9E3779B9u * static_cast<unsigned>(epoch + 1));
             this->trainOnExamples(
                 epochDataset,
                 batchSize,
@@ -3315,7 +3352,8 @@ void CudaLanguageModel::train(LanguageModelChunkSource& source, int epochs, int 
                 packCount,
                 singleExamplePackCount,
                 packedExampleSum,
-                packedTokenSum
+                packedTokenSum,
+                shuffleSeed
             );
         }
         if (accumulatedExampleCount > 0) {
