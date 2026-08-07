@@ -256,7 +256,7 @@ int main() {
 
     // Temporary: HostSGD vs SPULSE-Host — speed AND loss quality (the real tradeoff).
     // Flip false after check.
-    const bool runSpulseHostQualityCompare = true;
+    const bool runSpulseHostQualityCompare = false;
 
     if (runSpulseHostQualityCompare) {
         SmokeLog::section("HostSGD vs SPULSE-Host (speed + loss)");

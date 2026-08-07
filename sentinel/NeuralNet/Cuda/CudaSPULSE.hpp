@@ -122,6 +122,13 @@ public:
 
     /// <summary>scratch for ||g||² reduction (device); reused across updates</summary>
     CudaDeviceBuffer sumSquaresScratch;
+    /// <summary>device descriptors for batched host-delta prepare (Hybrid block)</summary>
+    CudaDeviceBuffer deltaPieceScratch;
+    /// <summary>
+    /// Pieces waiting for <c>commitPendingHybridHostEnergies</c> after host-delta bake.
+    /// Allows energy commit to overlap fused-half D2H on the copy stream.
+    /// </summary>
+    int pendingHostEnergyPieceCount = 0;
 
     explicit CudaSpulse(
         float learningRate = 3e-3f,
@@ -162,13 +169,20 @@ public:
         float gradientScale = 1.0f);
 
     /// <summary>
-    /// Prepare deltas for every Hybrid host-offload weight in a block (same layout as
-    /// <c>enqueueDeferredHostWeightGradDownloads</c>).
+    /// Bake <c>delta = lr·s·û</c> for every Hybrid host-offload weight in a block
+    /// (same layout as <c>enqueueDeferredHostWeightGradDownloads</c>).
+    /// Energy commit is deferred to <c>commitPendingHybridHostEnergies</c> so D2H can overlap.
     /// </summary>
     void prepareHybridBlockHostDeltas(
         CudaTransformerBlock& block,
         CudaTransformerBlockSpulseStates& spulseStates,
         float gradientScale);
+
+    /// <summary>
+    /// Commit dual-horizon energy for the last batched host-delta bake (no-op if nothing pending).
+    /// Call after recording the host-grad compute event so commit overlaps copy-stream D2H.
+    /// </summary>
+    void commitPendingHybridHostEnergies();
 
     /// <summary>host FP32 update (masters / reference)</summary>
     void updateHost(Matrix& parameter, SpulseState& state, const Matrix& gradient, float gradientScale = 1.0f) const;
