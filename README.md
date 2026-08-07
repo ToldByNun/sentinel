@@ -144,7 +144,7 @@ Defaults aim at **throughput when VRAM fits**. Large models on 16 GB typically
 | Pack budget | Auto from free VRAM; override with `set_max_packed_columns` |
 | Activation ckpt | `Off` = fastest when acts fit; `Full`/`Selective` when VRAM-tight |
 | **SBAO** | Auto: **GpuInt8Adam** if resident fit, else **HostFusedHalfAdam**, else **HostFusedHalfSgd** (e.g. ~4B on 16 GB) |
-| **SPULSE** | Opt-in optimizer (not SBAO): dual-horizon energy-scaled momentum on hidden 2D weights; Hybrid v1. Host path keeps `u` on GPU + half-delta D2H. `set_prefer_spulse(True)` before `enable_cuda_train` |
+| **SPULSE** | Opt-in optimizer (not SBAO): dual-horizon energy-scaled momentum on hidden 2D weights; Hybrid v1. Host path keeps `u` on GPU + half-delta D2H. `u` storage: Fp32/Fp16/Int8 via `set_spulse_momentum_storage`. `set_prefer_spulse(True)` before `enable_cuda_train` |
 | Weight tying | On (LM head shares token embedding) |
 | CUDA graphs | Only with checkpointing **Off** and stable shapes |
 
