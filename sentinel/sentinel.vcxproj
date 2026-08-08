@@ -31,6 +31,7 @@
     <ClCompile Include="NeuralNet\Data\LanguageModelDataset.cpp" />
     <ClCompile Include="NeuralNet\Initializers\UniformInit.cpp" />
     <ClCompile Include="NeuralNet\IO\SafeTensors.cpp" />
+    <ClCompile Include="NeuralNet\IO\PytorchStateDict.cpp" />
     <ClCompile Include="NeuralNet\IO\HuggingFaceConfig.cpp" />
     <ClCompile Include="NeuralNet\IO\HuggingFaceWeights.cpp" />
     <ClCompile Include="NeuralNet\Utils\TextUtil.cpp" />
@@ -222,7 +223,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>cudart_static.lib;cublasLt.lib;cublas.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>cudart_static.lib;cublasLt.lib;cublas.lib;zlib.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
@@ -248,7 +249,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>cudart_static.lib;cublasLt.lib;cublas.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>cudart_static.lib;cublasLt.lib;cublas.lib;zlib.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>

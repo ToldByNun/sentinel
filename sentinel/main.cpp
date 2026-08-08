@@ -18,6 +18,7 @@
 #include "NeuralNet/Data/ArrowChunkReader.hpp"
 #include "NeuralNet/Network/LanguageModel.hpp"
 #include "NeuralNet/IO/SafeTensors.hpp"
+#include "NeuralNet/IO/PytorchStateDict.hpp"
 #include "NeuralNet/IO/HuggingFaceConfig.hpp"
 #include "NeuralNet/IO/HuggingFaceWeights.hpp"
 #include "NeuralNet/Optimizers/Adam.hpp"
@@ -58,6 +59,17 @@ int main() {
         return 0;
     }
     free(halfSmokeEnv);
+    char* ptBinSmokeEnv = nullptr;
+    size_t ptBinSmokeLen = 0;
+    if (_dupenv_s(&ptBinSmokeEnv, &ptBinSmokeLen, "SENTINEL_PYTORCH_BIN_SMOKE") == 0
+        && ptBinSmokeEnv != nullptr
+        && ptBinSmokeEnv[0] == '1'
+        && ptBinSmokeEnv[1] == '\0') {
+        free(ptBinSmokeEnv);
+        PytorchStateDict::runSmokeDemo();
+        return 0;
+    }
+    free(ptBinSmokeEnv);
     char* interSmokeEnv = nullptr;
     size_t interSmokeLen = 0;
     if (_dupenv_s(&interSmokeEnv, &interSmokeLen, "SENTINEL_INTERMEDIATE_SIZE_SMOKE") == 0
@@ -194,6 +206,12 @@ int main() {
     if (const char* halfSmoke = std::getenv("SENTINEL_SAFETENSORS_HALF_SMOKE")) {
         if (halfSmoke[0] == '1' && halfSmoke[1] == '\0') {
             SafeTensors::runHalfLoadSmokeDemo();
+            return 0;
+        }
+    }
+    if (const char* ptBinSmoke = std::getenv("SENTINEL_PYTORCH_BIN_SMOKE")) {
+        if (ptBinSmoke[0] == '1' && ptBinSmoke[1] == '\0') {
+            PytorchStateDict::runSmokeDemo();
             return 0;
         }
     }
@@ -731,6 +749,7 @@ int main() {
             LanguageModel::runHuggingFaceRoundtripSmokeDemo();
             LanguageModel::runStreamingSmokeDemo();
             SafeTensors::runHalfLoadSmokeDemo();
+            PytorchStateDict::runSmokeDemo();
             CudaLanguageModel::runTrainSmokeDemo(64, 32, 16, 1, 2);
             CudaLanguageModel::runTrainSmokeDemo(1000, 64, 48, 2, 4);
             CudaLanguageModel::runTrainInt8AdamSmokeDemo(1000, 64, 48, 2, 4);

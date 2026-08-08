@@ -267,14 +267,16 @@ public:
     static LanguageModel loadHuggingFace(const std::string& modelDirectory, float learningRate = 3e-4f);
 
     /// <summary>
-    /// export a Transformers-compatible directory: config.json + model.safetensors (HF names, F32).
-    /// modelType must be allowlisted (llama / mistral / qwen2). Optionally copy tokenizer files
-    /// from tokenizerSourceDirectory (tokenizer.json, tokenizer_config.json, …).
+    /// export a Transformers-compatible directory: config.json + weights (HF names, F32).
+    /// modelType must be allowlisted (llama / mistral / qwen2).
+    /// weightFormat: "safetensors" (default), "bin" (pytorch_model.bin), or "both".
+    /// Optionally copy tokenizer files from tokenizerSourceDirectory.
     /// </summary>
     void saveHuggingFace(
         const std::string& modelDirectory,
         const std::string& modelType = "llama",
-        const std::string& tokenizerSourceDirectory = "");
+        const std::string& tokenizerSourceDirectory = "",
+        const std::string& weightFormat = "safetensors");
 
     /// <summary>save/load roundtrip smoke on a tiny model</summary>
     static void runCheckpointSmokeDemo();

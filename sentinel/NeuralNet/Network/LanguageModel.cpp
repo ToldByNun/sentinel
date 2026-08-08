@@ -1852,7 +1852,8 @@ LanguageModel LanguageModel::loadHuggingFace(const std::string& modelDirectory, 
 void LanguageModel::saveHuggingFace(
     const std::string& modelDirectory,
     const std::string& modelType,
-    const std::string& tokenizerSourceDirectory) {
+    const std::string& tokenizerSourceDirectory,
+    const std::string& weightFormat) {
     if (modelDirectory.empty())
         throw std::invalid_argument("LanguageModel::saveHuggingFace empty modelDirectory");
     if (this->blocks.empty())
@@ -1861,6 +1862,8 @@ void LanguageModel::saveHuggingFace(
         throw std::invalid_argument(
             "LanguageModel::saveHuggingFace unsupported model_type='" + modelType
             + "' (allowlist: llama, mistral, qwen2)");
+    const HuggingFace::WeightExportFormat exportFormat =
+        HuggingFace::parseWeightExportFormat(weightFormat);
 
     if (this->cudaEnabled() && this->device != nullptr && !this->deviceStale)
         this->device->downloadTo(*this);
@@ -1927,7 +1930,8 @@ void LanguageModel::saveHuggingFace(
         config,
         sentinelWeights,
         HuggingFace::WeightLayoutFamily::LlamaMistralLike,
-        tokenizerSourceDirectory);
+        tokenizerSourceDirectory,
+        exportFormat);
 }
 
 void LanguageModel::runCheckpointSmokeDemo() {
@@ -2249,12 +2253,14 @@ void LanguageModel::runHuggingFaceExportSmokeDemo() {
     model.finalNorm.gamma.data[0] = 0.5f;
 
     const Matrix logitsBefore = model.forward({ 1, 2, 3, 4 });
-    model.saveHuggingFace(exportDir.string(), "llama", tokSrcDir.string());
+    model.saveHuggingFace(exportDir.string(), "llama", tokSrcDir.string(), "both");
 
     if (!fs::is_regular_file(exportDir / "config.json"))
         throw std::runtime_error("HF export smoke: missing config.json");
     if (!fs::is_regular_file(exportDir / "model.safetensors"))
         throw std::runtime_error("HF export smoke: missing model.safetensors");
+    if (!fs::is_regular_file(exportDir / "pytorch_model.bin"))
+        throw std::runtime_error("HF export smoke: missing pytorch_model.bin");
     if (!fs::is_regular_file(exportDir / "tokenizer.json")
         || !fs::is_regular_file(exportDir / "tokenizer_config.json"))
         throw std::runtime_error("HF export smoke: tokenizer files not copied");
@@ -2294,6 +2300,13 @@ void LanguageModel::runHuggingFaceExportSmokeDemo() {
     if (maxDiff > 1.0e-5f)
         throw std::runtime_error("HF export smoke: logits drifted after export/import");
 
+    // Bin-only reload: remove safetensors so loadMappedWeights must take pytorch_model.bin.
+    fs::remove(exportDir / "model.safetensors");
+    LanguageModel fromBin = LanguageModel::loadHuggingFace(exportDir.string(), 1e-3f);
+    if (std::fabs(fromBin.tokenEmbedding.weight.data[0] - 0.125f) > 1.0e-6f
+        || std::fabs(fromBin.blocks[0].attention.keyWeight.data[0] - 0.25f) > 1.0e-6f)
+        throw std::runtime_error("HF export smoke: pytorch_model.bin reload mismatch");
+
     bool rejected = false;
     try {
         model.saveHuggingFace(exportDir.string(), "gpt2");
@@ -2307,7 +2320,7 @@ void LanguageModel::runHuggingFaceExportSmokeDemo() {
     fs::remove_all(tokSrcDir);
     SmokeLog::result(
         "LanguageModel saveHuggingFace",
-        "config+weights+tokenizer=ok  reload=ok  logitsDiff=%.2e  reject=model_type",
+        "safe+bin+tokenizer=ok  reload=ok  binOnly=ok  logitsDiff=%.2e  reject=model_type",
         maxDiff);
 }
 
