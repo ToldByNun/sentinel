@@ -49,6 +49,29 @@ LanguageModelDataset LanguageModelDataset::build(const std::vector<std::string>&
     return dataset;
 }
 
+LanguageModelDataset LanguageModelDataset::build(
+    const std::vector<std::string>& texts,
+    const HuggingFace::Tokenizer& tokenizer,
+    size_t maximumTokenCount,
+    bool buildOneHot) {
+    if (!tokenizer.isLoaded())
+        throw std::invalid_argument("LanguageModelDataset::build HfTokenizer is not loaded");
+
+    LanguageModelDataset dataset;
+    dataset.vocabularySize = tokenizer.vocabSize();
+
+    for (const std::string& text : texts) {
+        std::vector<int> tokenIds = tokenizer.encode(text, /*addSpecialTokens=*/true);
+        if (maximumTokenCount > 0 && tokenIds.size() > maximumTokenCount)
+            tokenIds.resize(maximumTokenCount);
+        if (tokenIds.size() < 2) continue;
+
+        dataset.examples.push_back(LanguageModelDataset::fromTokenIds(tokenIds, dataset.vocabularySize, buildOneHot));
+    }
+
+    return dataset;
+}
+
 int LanguageModelDataset::size() const {
     return static_cast<int>(this->examples.size());
 }

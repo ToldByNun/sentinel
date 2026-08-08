@@ -4,7 +4,7 @@ Sentinel can **import** HuggingFace causal LM checkpoints that fit the engine su
 
 This is **not** a Llama-only importer/exporter. Public APIs are HF-generic (`loadHuggingFace` / `saveHuggingFace`, `load_huggingface` / `save_huggingface`, `HfTokenizer`). Llama / Mistral / Qwen2-style repos are the **first supported layout family** because they share tensor names and math.
 
-API details: [Python](python.md) · [C++](cpp.md). Example (next milestone): `examples/python/finetune_hf.py`.
+API details: [Python](python.md) · [C++](cpp.md). End-to-end fine-tune: [`examples/python/finetune_hf.py`](../examples/python/finetune_hf.py).
 
 ---
 
@@ -19,13 +19,14 @@ model = S.LanguageModel.load_huggingface("/path/to/hf_model", learning_rate=3e-4
 tok = S.HfTokenizer.load("/path/to/hf_model")
 
 ids = tok.encode("hello world", add_special_tokens=True)
-# Fine-tune: encode corpus → next-token pairs → model.train(...).
-# See recipes in python.md; end-to-end script: examples/python/finetune_hf.py (when present).
+train = S.LanguageModelDataset.build(texts, tok, maximum_token_count=512, build_one_hot=False)
 
 if S.cuda_available():
     model.enable_cuda()
     model.set_prefer_flash_attention(True)
     model.enable_cuda_train()
+
+model.train(train, epochs=1, batch_size=4)
 
 # After fine-tune: HF-compatible directory (weights + config; copy tokenizer from the source repo)
 model.save_huggingface(
@@ -34,6 +35,13 @@ model.save_huggingface(
     tokenizer_source_directory="/path/to/hf_model",
     weight_format="both",  # "safetensors" | "bin" | "both"
 )
+```
+
+CLI wrapper (local dir, Hub repo id if `huggingface_hub` is installed, or `--demo` stub):
+
+```bash
+python examples/python/finetune_hf.py /path/to/hf_model examples/data/sample.jsonl --out hf_finetuned
+python examples/python/finetune_hf.py --demo --out hf_demo_out
 ```
 
 Expected directory contents (import **and** export):

@@ -135,7 +135,7 @@ positions = data.total_prediction_count
 
 | Member | Signature | Notes |
 | ------ | --------- | ----- |
-| `build` (static) | `(texts, tokenizer, maximum_token_count=0, build_one_hot=False) -> LanguageModelDataset` | Skips sequences shorter than 2 tokens; truncates if `maximum_token_count > 0` |
+| `build` (static) | `(texts, tokenizer, maximum_token_count=0, build_one_hot=False) -> LanguageModelDataset` | `tokenizer` is `BPETokenizer` or `HfTokenizer`; skips sequences shorter than 2 tokens; truncates if `maximum_token_count > 0` |
 | `size` | `int` (ro) | Number of examples |
 | `total_prediction_count` | `int` (ro) | Sum of next-token positions |
 | `vocabulary_size` | `int` (rw) | Set by `build` |
@@ -267,6 +267,8 @@ Requires `enable_cuda_train`. Unset `SENTINEL_PHASE_TRACE` when quoting tok/s.
 **Tiny CPU/GPU toy** — [`examples/python/train_tiny.py`](../examples/python/train_tiny.py)
 
 **JSONL (in-memory)** — [`examples/python/train_jsonl.py`](../examples/python/train_jsonl.py)
+
+**HuggingFace fine-tune + export** — [`examples/python/finetune_hf.py`](../examples/python/finetune_hf.py) (details: [huggingface.md](huggingface.md))
 
 **HuggingFace import / export** — [huggingface.md](huggingface.md) (`load_huggingface` / `save_huggingface` + `HfTokenizer`)
 

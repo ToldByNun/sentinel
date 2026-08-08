@@ -107,7 +107,7 @@ Header: `Data/LanguageModelDataset.hpp`
 
 | API | Notes |
 | --- | ----- |
-| `LanguageModelDataset::build(texts, tok, maxTokens=0, buildOneHot=true)` | Skip len &lt; 2; optional truncate |
+| `LanguageModelDataset::build(texts, tok, maxTokens=0, buildOneHot=true)` | `BPETokenizer` or `HuggingFace::Tokenizer`; skip len &lt; 2; optional truncate |
 | `fromTokenIds` / `makeOneHotSequence` | Lower-level helpers |
 | `size()` / `totalPredictionCount()` | |
 | `examples` / `vocabularySize` | Public fields |

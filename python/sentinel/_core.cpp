@@ -2,6 +2,8 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <stdexcept>
+
 #include "NeuralNet/Cuda/CudaMatmul.hpp"
 #include "NeuralNet/Data/LanguageModelDataset.hpp"
 #include "NeuralNet/Network/LanguageModel.hpp"
@@ -114,12 +116,32 @@ NB_MODULE(_core, m) {
         .def(nb::init<>())
         .def_static(
             "build",
-            &LanguageModelDataset::build,
+            [](const std::vector<std::string>& texts,
+               nb::object tokenizer,
+               size_t maximumTokenCount,
+               bool buildOneHot) {
+                if (nb::isinstance<BPETokenizer>(tokenizer)) {
+                    return LanguageModelDataset::build(
+                        texts,
+                        nb::cast<const BPETokenizer&>(tokenizer),
+                        maximumTokenCount,
+                        buildOneHot);
+                }
+                if (nb::isinstance<HuggingFace::Tokenizer>(tokenizer)) {
+                    return LanguageModelDataset::build(
+                        texts,
+                        nb::cast<const HuggingFace::Tokenizer&>(tokenizer),
+                        maximumTokenCount,
+                        buildOneHot);
+                }
+                throw std::invalid_argument(
+                    "LanguageModelDataset.build tokenizer must be BPETokenizer or HfTokenizer");
+            },
             nb::arg("texts"),
             nb::arg("tokenizer"),
             nb::arg("maximum_token_count") = 0,
             nb::arg("build_one_hot") = false,
-            "Encode texts and build shifted next-token examples")
+            "Encode texts (BPETokenizer or HfTokenizer) and build shifted next-token examples")
         .def_prop_ro("size", &LanguageModelDataset::size)
         .def_prop_ro("total_prediction_count", &LanguageModelDataset::totalPredictionCount)
         .def_rw("vocabulary_size", &LanguageModelDataset::vocabularySize);
