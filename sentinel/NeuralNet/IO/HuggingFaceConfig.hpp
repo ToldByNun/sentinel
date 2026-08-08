@@ -34,11 +34,20 @@ struct Config {
 /// <summary>allowlisted model_type values (Llama/Mistral/Qwen2-like layout family)</summary>
 bool isSupportedModelType(const std::string& modelType);
 
+/// <summary>HF architectures[] entry for an allowlisted model_type (e.g. llama → LlamaForCausalLM)</summary>
+std::string defaultArchitectureName(const std::string& modelType);
+
 /// <summary>load config.json from a file path or a HF model directory</summary>
 Config loadConfig(const std::string& pathOrDirectory);
 
 /// <summary>parse config.json text (UTF-8); throws on malformed / unsupported</summary>
 Config parseConfigJson(const std::string& json);
+
+/// <summary>serialize Config to a Transformers-compatible config.json body</summary>
+std::string serializeConfigJson(const Config& config);
+
+/// <summary>write config.json into a HF model directory (creates the directory if needed)</summary>
+void saveConfig(const std::string& modelDirectory, const Config& config);
 
 /// <summary>fixture: allowlisted parse + reject unknown/MoE/sliding_window/quantized</summary>
 void runConfigParseSmokeDemo();

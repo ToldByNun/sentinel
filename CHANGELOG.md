@@ -10,6 +10,7 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- **HuggingFace export**: `LanguageModel::saveHuggingFace` / Python `save_huggingface` writes a Transformers-compatible directory (`config.json` + F32 `model.safetensors` with Llama/Mistral/Qwen2-style keys). Optional `tokenizer_source_directory` copies tokenizer files. Helpers: `HuggingFace::serializeConfigJson` / `saveConfig`, `remapSentinelWeightsToHf` / `saveDirectory`. Smoke: `SENTINEL_HF_EXPORT_SMOKE=1`.
 - **SPULSE** optimizer (opt-in): dual-horizon energy-scaled momentum on hidden 2D weights + Adam on embed/norms/biases/head (`set_prefer_spulse` / `setCudaPreferSpulse`). Hybrid coverage v1; Full planned. Logic lives in `CudaSPULSE.*`. GPU-resident path keeps full `u` on device. **Host fused-half**: default keeps `u` on GPU, bakes `delta = lr·s·û` into the grad buffer before half D2H, then HostSGD-shaped host axpy (same PCIe volume as HostSGD). EMA momentum uses **Adam-style bias correction** (`û = u / (1-β^t)`) so cold-start steps match HostSGD magnitude. Kernels use **float4/half2** loads and fuse energy commit into the last grid block (no `<<<1,1>>>` launch). `hostLightweight` is a VRAM fallback (no device `u`). Device `u` storage selectable via `SpulseMomentumStorage` / `set_spulse_momentum_storage`: **Fp32** (default), **Fp16**, or **Int8** (absmax blocks) for VRAM experiments. Distinct from SBAO (policy). Harness: `runSpulseThroughputCompare` (GPU), `runSpulseHostQualityCompare` (HostSGD vs SPULSE-Host: tok/s **and** loss quality — speed without quality fails).
 - `BPETokenizer` persistence: binary `.sbpe` via `save` / `load` / `loadFrom` (C++ + Python)
 - Examples write/load sibling `{stem}.sbpe` next to checkpoints
@@ -59,3 +60,4 @@ First library-oriented release surface.
 - HF import smoke: `SENTINEL_HF_IMPORT_SMOKE=1`.
 - HF tokenizer smoke: `SENTINEL_HF_TOKENIZER_SMOKE=1`.
 - HF roundtrip smoke: `SENTINEL_HF_ROUNDTRIP_SMOKE=1`.
+- HF export smoke: `SENTINEL_HF_EXPORT_SMOKE=1`.

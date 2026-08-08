@@ -21,7 +21,7 @@ Includes are rooted at the NeuralNet tree, e.g.:
 
 Sources live under [`sentinel/NeuralNet/`](../sentinel/NeuralNet/). The `sentinel` executable from `main.cpp` is a **harness**, not the API contract.
 
-HuggingFace checkpoint import (allowlist, weight map, tokenizer, VRAM): **[huggingface.md](huggingface.md)**.
+HuggingFace checkpoint import / export (allowlist, weight map, tokenizer, VRAM): **[huggingface.md](huggingface.md)**.
 
 ---
 
@@ -213,6 +213,7 @@ Set offload / SBAO preferences **before** `enableCudaTrain()` when pack and chec
 | `loadCheckpoint(path)` | `.snlm` or routes `.safetensors` |
 | `saveSafeTensors` / `loadSafeTensors` | Weights + metadata (`IO/SafeTensors.hpp`); overload accepts in-memory `SafeTensors::File` |
 | `loadHuggingFace(dir, lr=3e-4)` | Static: parse HF `config.json`, size model, remap/load safetensors shards; see [huggingface.md](huggingface.md) |
+| `saveHuggingFace(dir, modelType="llama", tokenizerSource="")` | Export Transformers-compatible dir (`config.json` + HF-named `model.safetensors`; optional tokenizer copy) |
 
 Focused smoke: `SENTINEL_HF_ROUNDTRIP_SMOKE=1` — stub HF dir → import + `HfTokenizer` encode + 1 host train step + generate (finite gate).
 
@@ -235,8 +236,8 @@ Unset env `SENTINEL_PHASE_TRACE` when quoting throughput.
 | ------ | ---- |
 | `Optimizers/Adam.hpp` / `SGD.hpp` | Host optimizers |
 | `IO/SafeTensors.hpp` | Weight file format — **load** F32/BF16/F16 → host F32; **save** F32 |
-| `IO/HuggingFaceConfig.hpp` | Minimal `config.json` parse; allowlist `llama`/`mistral`/`qwen2`; rejects MoE / sliding-window / quantized |
-| `IO/HuggingFaceWeights.hpp` | HF→Sentinel tensor remap + shard index (`loadMappedWeights`); first family: Llama/Mistral-like names |
+| `IO/HuggingFaceConfig.hpp` | Minimal `config.json` parse/serialize; allowlist `llama`/`mistral`/`qwen2`; rejects MoE / sliding-window / quantized |
+| `IO/HuggingFaceWeights.hpp` | HF↔Sentinel tensor remap + shard index (`loadMappedWeights` / `saveDirectory`); first family: Llama/Mistral-like names |
 | `Tokenizer/HfTokenizer.hpp` | HF `tokenizer.json` ByteLevel BPE (`HuggingFace::Tokenizer`); `.sbpe` stays on `BPETokenizer` |
 | `Data/TextRowReader.hpp` / `JsonlLoader.hpp` / `ArrowChunkReader.hpp` | Corpus I/O |
 | `Cuda/CudaMatmul.hpp` | `CudaMatmul::isAvailable()` |

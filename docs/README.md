@@ -6,7 +6,7 @@ Library reference for **v0.1**. High-level install and quickstarts live in the r
 | ---- | -------- |
 | [Python API](python.md) | `pip install sentinel-lm` → `import sentinel` |
 | [C++ API](cpp.md) | CMake `find_package(Sentinel)` → `Sentinel::sentinel` |
-| [HuggingFace import](huggingface.md) | HF causal-LM load + tokenizer + fine-tune notes |
+| [HuggingFace import / export](huggingface.md) | HF causal-LM load/save + tokenizer + fine-tune notes |
 
 **Not API:** `sentinel/main.cpp` smoke/scale harness flags, ad-hoc probe scripts unless linked from these pages.
 

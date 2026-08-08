@@ -1,8 +1,8 @@
-# HuggingFace causal-LM import
+# HuggingFace causal-LM import / export
 
-Sentinel can **import HuggingFace causal LM checkpoints** that fit the engine surface (RoPE + RMSNorm + SwiGLU + optional GQA), then fine-tune with the usual C++ / Python train path.
+Sentinel can **import** HuggingFace causal LM checkpoints that fit the engine surface (RoPE + RMSNorm + SwiGLU + optional GQA), fine-tune with the usual C++ / Python train path, then **export** back to a Transformers-compatible directory (`config.json` + `model.safetensors` with HF tensor names).
 
-This is **not** a Llama-only importer. Public APIs are HF-generic (`loadHuggingFace` / `load_huggingface`, `HfTokenizer`). Llama / Mistral / Qwen2-style repos are the **first supported layout family** because they share tensor names and math.
+This is **not** a Llama-only importer/exporter. Public APIs are HF-generic (`loadHuggingFace` / `saveHuggingFace`, `load_huggingface` / `save_huggingface`, `HfTokenizer`). Llama / Mistral / Qwen2-style repos are the **first supported layout family** because they share tensor names and math.
 
 API details: [Python](python.md) · [C++](cpp.md). Example (next milestone): `examples/python/finetune_hf.py`.
 
@@ -26,17 +26,24 @@ if S.cuda_available():
     model.enable_cuda()
     model.set_prefer_flash_attention(True)
     model.enable_cuda_train()
+
+# After fine-tune: HF-compatible directory (weights + config; copy tokenizer from the source repo)
+model.save_huggingface(
+    "/path/to/hf_export",
+    model_type="llama",
+    tokenizer_source_directory="/path/to/hf_model",
+)
 ```
 
-Expected directory contents:
+Expected directory contents (import **and** export):
 
 | File | Role |
 | ---- | ---- |
 | `config.json` | Arch (required) |
-| `model.safetensors` **or** sharded `*.safetensors` + `model.safetensors.index.json` | Weights |
-| `tokenizer.json` | ByteLevel BPE (for `HfTokenizer`) |
+| `model.safetensors` **or** sharded `*.safetensors` + `model.safetensors.index.json` | Weights (export writes a single `model.safetensors`) |
+| `tokenizer.json` | ByteLevel BPE (for `HfTokenizer`; export copies when `tokenizer_source_directory` is set) |
 
-After fine-tune, save Sentinel weights with `model.save_safetensors(...)`. Keep the HF `tokenizer.json` (or convert later); native `.sbpe` is only for Sentinel-trained BPEs.
+`save_safetensors` still writes **Sentinel** tensor names + arch metadata. Prefer `save_huggingface` when the consumer is Transformers / `from_pretrained`. Native `.sbpe` is only for Sentinel-trained BPEs.
 
 ### C++
 
@@ -47,9 +54,11 @@ After fine-tune, save Sentinel weights with `model.save_safetensors(...)`. Keep 
 LanguageModel model = LanguageModel::loadHuggingFace("/path/to/hf_model", 3e-4f);
 HuggingFace::Tokenizer tok = HuggingFace::Tokenizer::load("/path/to/hf_model");
 std::vector<int> ids = tok.encode("hello world", /*addSpecialTokens=*/true);
+
+model.saveHuggingFace("/path/to/hf_export", "llama", "/path/to/hf_model");
 ```
 
-Lower-level pieces (if you need them): `HuggingFace::loadConfig`, `HuggingFace::loadMappedWeights` under `IO/`.
+Lower-level pieces (if you need them): `HuggingFace::loadConfig` / `saveConfig`, `HuggingFace::loadMappedWeights` / `saveDirectory` under `IO/`.
 
 ---
 
@@ -126,12 +135,22 @@ Also out of scope for now: bit-identical loss vs Transformers, GGUF, and separat
 
 ---
 
+## Export notes
+
+- Writes **F32** `model.safetensors` with Llama/Mistral/Qwen2-style keys (`model.embed_tokens.weight`, `model.layers.{i}.*`, `model.norm.weight`, optional `lm_head.weight`).
+- `config.json` includes the allowlisted `model_type`, matching `architectures[]`, GQA heads, `rope_theta`, `rms_norm_eps`, `tie_word_embeddings`, and `attention_bias` / `mlp_bias` from Sentinel `use_bias`.
+- Tied embeddings: export **omits** `lm_head.weight` (same as many HF repos); import reloads via `tie_word_embeddings`.
+- Tokenizer files are **not** synthesized from `.sbpe`. Pass `tokenizer_source_directory` to copy `tokenizer.json`, `tokenizer_config.json`, `special_tokens_map.json`, `vocab.json`, `merges.txt`, and `generation_config.json` when present.
+- Export is single-file (no shard index). Re-import via `loadHuggingFace` / `load_huggingface` is covered by the export smoke.
+
+---
+
 ## Fine-tune / VRAM notes
 
 - Import builds a **host** `LanguageModel` sized from config. Call `enable_cuda` / `enable_cuda_train` before heavy train when using GPU.
 - Consumer 16 GB: prefer flash attention; for multi‑B models use HostSGD / SBAO (`set_prefer_host_sgd` or `SbaoMode.HostFusedHalfSgd`) and activation checkpointing `Full` — see [Python](python.md) / [C++](cpp.md) device setup.
 - GQA reduces KV footprint vs MHA at the same width; pack budget still auto-scales from free VRAM.
-- After fine-tune, `save_safetensors` writes Sentinel layout + arch metadata (`kv_head_count`, `rope_theta`, `use_bias`, …). Reload with a matching ctor or keep using the same imported model object.
+- After fine-tune prefer `save_huggingface` for Transformers; `save_safetensors` still writes Sentinel layout + arch metadata for in-engine reload.
 
 ---
 
@@ -141,9 +160,10 @@ With the `sentinel` demo binary:
 
 | Env | What |
 | --- | ---- |
-| `SENTINEL_HF_CONFIG_SMOKE=1` | `config.json` allowlist / rejects |
-| `SENTINEL_HF_WEIGHT_MAP_SMOKE=1` | shard remap |
+| `SENTINEL_HF_CONFIG_SMOKE=1` | `config.json` allowlist / rejects / serialize |
+| `SENTINEL_HF_WEIGHT_MAP_SMOKE=1` | shard remap + export remap |
 | `SENTINEL_HF_IMPORT_SMOKE=1` | `loadHuggingFace` |
+| `SENTINEL_HF_EXPORT_SMOKE=1` | `saveHuggingFace` → reload parity + tokenizer copy |
 | `SENTINEL_HF_TOKENIZER_SMOKE=1` | `tokenizer.json` encode/decode |
 | `SENTINEL_HF_ROUNDTRIP_SMOKE=1` | import + encode + 1 host train step + generate (finite gate) |
 
@@ -154,6 +174,7 @@ With the `sentinel` demo binary:
 | C++ | Python |
 | --- | ------ |
 | `LanguageModel::loadHuggingFace` | `LanguageModel.load_huggingface` |
+| `LanguageModel::saveHuggingFace` | `LanguageModel.save_huggingface` |
 | `HuggingFace::Tokenizer` (`Tokenizer/HfTokenizer.hpp`) | `HfTokenizer` |
-| `HuggingFace::loadConfig` | (C++ only) |
-| `HuggingFace::loadMappedWeights` | (C++ only) |
+| `HuggingFace::loadConfig` / `saveConfig` | (C++ only) |
+| `HuggingFace::loadMappedWeights` / `saveDirectory` | (C++ only) |

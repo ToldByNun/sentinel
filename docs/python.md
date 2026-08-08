@@ -10,7 +10,7 @@ S.__version__
 
 Bindings live in [`python/sentinel/_core.cpp`](../python/sentinel/_core.cpp) and are re-exported from [`python/sentinel/__init__.py`](../python/sentinel/__init__.py).
 
-HuggingFace checkpoint import (supported `model_type`s, rejects, VRAM): **[huggingface.md](huggingface.md)**.
+HuggingFace checkpoint import / export (supported `model_type`s, rejects, VRAM): **[huggingface.md](huggingface.md)**.
 
 On Windows, importing `sentinel` adds CUDA `bin\x64` / `bin` via `os.add_dll_directory` so `cublasLt` loads. Set `CUDA_PATH` if the toolkit is non-default.
 
@@ -245,9 +245,10 @@ cont = model.generate(prompt_ids, new_token_count=32, temperature=0.9, top_k=20,
 | ------ | --------- | ----- |
 | `save_checkpoint` | `(path, include_optimizer=True) -> None` | Native `.snlm` |
 | `load_checkpoint` | `(path) -> None` | `.snlm` or `.safetensors` |
-| `save_safetensors` | `(path) -> None` | Weights + arch metadata |
+| `save_safetensors` | `(path) -> None` | Weights + arch metadata (Sentinel tensor names) |
 | `load_safetensors` | `(path) -> None` | Architecture must already match |
 | `load_huggingface` | `(path, learning_rate=3e-4) -> LanguageModel` | Static: HF dir (`config.json` + safetensors) → sized model + weights; see [huggingface.md](huggingface.md) |
+| `save_huggingface` | `(path, model_type="llama", tokenizer_source_directory="") -> None` | Export Transformers-compatible dir (`config.json` + HF-named `model.safetensors`; optional tokenizer copy) |
 
 Rebuild a model with the **same** dims before `load_safetensors`. Tokenizer is separate (`BPETokenizer` / `HfTokenizer`).
 
@@ -267,7 +268,7 @@ Requires `enable_cuda_train`. Unset `SENTINEL_PHASE_TRACE` when quoting tok/s.
 
 **JSONL (in-memory)** — [`examples/python/train_jsonl.py`](../examples/python/train_jsonl.py)
 
-**HuggingFace import** — [huggingface.md](huggingface.md) (`LanguageModel.load_huggingface` + `HfTokenizer`)
+**HuggingFace import / export** — [huggingface.md](huggingface.md) (`load_huggingface` / `save_huggingface` + `HfTokenizer`)
 
 **Large model on 16 GB (HostSGD)**
 

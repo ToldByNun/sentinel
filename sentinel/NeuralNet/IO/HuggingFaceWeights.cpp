@@ -485,6 +485,97 @@ SafeTensors::File loadMappedWeights(
     return out;
 }
 
+SafeTensors::File remapSentinelWeightsToHf(
+    const SafeTensors::File& sentinelWeights,
+    const Config& config,
+    WeightLayoutFamily family) {
+    const std::vector<WeightMapEntry> map = buildWeightMap(config, family);
+    SafeTensors::File out;
+    // Transformers often stamps format=pt; keep export recognizable without Sentinel arch keys.
+    out.metadata["format"] = "pt";
+
+    for (const WeightMapEntry& entry : map) {
+        const auto it = sentinelWeights.tensors.find(entry.sentinelName);
+        if (it == sentinelWeights.tensors.end()) {
+            if (entry.optional)
+                continue;
+            throw std::runtime_error(
+                "HuggingFace export: missing required Sentinel tensor " + entry.sentinelName
+                + " (→ " + entry.hfName + ")");
+        }
+
+        Matrix matrix = entry.transpose ? Matrix::transpose(it->second) : it->second;
+        if (entry.expectedCols == 1)
+            matrix = asColumnVector(matrix, entry.expectedRows);
+        if (matrix.rows != entry.expectedRows || matrix.cols != entry.expectedCols) {
+            throw std::runtime_error(
+                "HuggingFace export: shape mismatch for " + entry.sentinelName
+                + " → " + entry.hfName
+                + " got [" + std::to_string(matrix.rows) + "," + std::to_string(matrix.cols)
+                + "] expected [" + std::to_string(entry.expectedRows) + ","
+                + std::to_string(entry.expectedCols) + "]");
+        }
+        SafeTensors::putMatrix(out, entry.hfName, matrix);
+    }
+
+    if (out.tensors.find("model.embed_tokens.weight") == out.tensors.end())
+        throw std::runtime_error("HuggingFace export: missing model.embed_tokens.weight");
+    if (!config.tieWordEmbeddings && out.tensors.find("lm_head.weight") == out.tensors.end())
+        throw std::runtime_error("HuggingFace export: missing lm_head.weight (untied)");
+
+    return out;
+}
+
+void saveDirectory(
+    const std::string& modelDirectory,
+    const Config& config,
+    const SafeTensors::File& sentinelWeights,
+    WeightLayoutFamily family,
+    const std::string& tokenizerSourceDirectory) {
+    if (modelDirectory.empty())
+        throw std::invalid_argument("HuggingFace::saveDirectory empty modelDirectory");
+
+    const fs::path root(modelDirectory);
+    fs::create_directories(root);
+
+    Config exportConfig = config;
+    if (exportConfig.architecture.empty())
+        exportConfig.architecture = defaultArchitectureName(exportConfig.modelType);
+    saveConfig(root.string(), exportConfig);
+
+    const SafeTensors::File hfWeights = remapSentinelWeightsToHf(sentinelWeights, exportConfig, family);
+    SafeTensors::save((root / "model.safetensors").string(), hfWeights);
+
+    if (!tokenizerSourceDirectory.empty()) {
+        const fs::path tokRoot(tokenizerSourceDirectory);
+        if (!fs::is_directory(tokRoot))
+            throw std::runtime_error(
+                "HuggingFace::saveDirectory tokenizerSourceDirectory is not a directory: "
+                + tokenizerSourceDirectory);
+
+        static const char* const kTokenizerFiles[] = {
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+            "vocab.json",
+            "merges.txt",
+            "generation_config.json",
+        };
+        int copied = 0;
+        for (const char* name : kTokenizerFiles) {
+            const fs::path src = tokRoot / name;
+            if (!fs::is_regular_file(src)) continue;
+            const fs::path dst = root / name;
+            fs::copy_file(src, dst, fs::copy_options::overwrite_existing);
+            ++copied;
+        }
+        if (copied == 0)
+            throw std::runtime_error(
+                "HuggingFace::saveDirectory tokenizerSourceDirectory has no tokenizer files: "
+                + tokenizerSourceDirectory);
+    }
+}
+
 void runWeightMapSmokeDemo() {
     Config cfg;
     cfg.modelType = "llama";
@@ -607,9 +698,40 @@ void runWeightMapSmokeDemo() {
 
     fs::remove_all(dir);
 
+    // Export remap: Sentinel names → HF names (tied lm_head omitted).
+    SafeTensors::File sentinel;
+    fillArchMetadata(sentinel, cfg);
+    SafeTensors::putMatrix(sentinel, "token_embedding.weight", filled(32, 16, 0.11f));
+    SafeTensors::putMatrix(sentinel, "blocks.0.attn_norm.weight", filled(16, 1, 0.21f));
+    SafeTensors::putMatrix(sentinel, "blocks.0.attn.q_proj.weight", filled(16, 16, 0.31f));
+    SafeTensors::putMatrix(sentinel, "blocks.0.attn.k_proj.weight", filled(8, 16, 0.32f));
+    SafeTensors::putMatrix(sentinel, "blocks.0.attn.v_proj.weight", filled(8, 16, 0.33f));
+    SafeTensors::putMatrix(sentinel, "blocks.0.attn.o_proj.weight", filled(16, 16, 0.34f));
+    SafeTensors::putMatrix(sentinel, "blocks.0.ffn_norm.weight", filled(16, 1, 0.22f));
+    SafeTensors::putMatrix(sentinel, "blocks.0.ffn.gate_proj.weight", filled(32, 16, 0.41f));
+    SafeTensors::putMatrix(sentinel, "blocks.0.ffn.up_proj.weight", filled(32, 16, 0.42f));
+    SafeTensors::putMatrix(sentinel, "blocks.0.ffn.down_proj.weight", filled(16, 32, 0.43f));
+    SafeTensors::putMatrix(sentinel, "blocks.1.attn_norm.weight", filled(16, 1, 0.51f));
+    SafeTensors::putMatrix(sentinel, "blocks.1.attn.q_proj.weight", filled(16, 16, 0.61f));
+    SafeTensors::putMatrix(sentinel, "blocks.1.attn.k_proj.weight", filled(8, 16, 0.62f));
+    SafeTensors::putMatrix(sentinel, "blocks.1.attn.v_proj.weight", filled(8, 16, 0.63f));
+    SafeTensors::putMatrix(sentinel, "blocks.1.attn.o_proj.weight", filled(16, 16, 0.64f));
+    SafeTensors::putMatrix(sentinel, "blocks.1.ffn_norm.weight", filled(16, 1, 0.52f));
+    SafeTensors::putMatrix(sentinel, "blocks.1.ffn.gate_proj.weight", filled(32, 16, 0.71f));
+    SafeTensors::putMatrix(sentinel, "blocks.1.ffn.up_proj.weight", filled(32, 16, 0.72f));
+    SafeTensors::putMatrix(sentinel, "blocks.1.ffn.down_proj.weight", filled(16, 32, 0.73f));
+    SafeTensors::putMatrix(sentinel, "final_norm.weight", filled(16, 1, 0.91f));
+    const SafeTensors::File exported = remapSentinelWeightsToHf(sentinel, cfg);
+    if (exported.tensors.count("model.embed_tokens.weight") == 0
+        || exported.tensors.count("model.layers.0.self_attn.k_proj.weight") == 0
+        || exported.tensors.count("lm_head.weight") != 0)
+        throw std::runtime_error("HF weight map smoke: export remap failed");
+    if (std::fabs(exported.tensors.at("model.layers.0.self_attn.k_proj.weight").data[0] - 0.32f) > 1.0e-6f)
+        throw std::runtime_error("HF weight map smoke: export value mismatch");
+
     SmokeLog::result(
         "HuggingFace weight map",
-        "llama-like map=%zu  shards=2  GQA k=8  tie=ok  missing=reject",
+        "llama-like map=%zu  shards=2  GQA k=8  tie=ok  missing=reject  export=ok",
         map.size());
 }
 

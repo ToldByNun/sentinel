@@ -1849,6 +1849,87 @@ LanguageModel LanguageModel::loadHuggingFace(const std::string& modelDirectory, 
     return model;
 }
 
+void LanguageModel::saveHuggingFace(
+    const std::string& modelDirectory,
+    const std::string& modelType,
+    const std::string& tokenizerSourceDirectory) {
+    if (modelDirectory.empty())
+        throw std::invalid_argument("LanguageModel::saveHuggingFace empty modelDirectory");
+    if (this->blocks.empty())
+        throw std::logic_error("LanguageModel::saveHuggingFace no blocks");
+    if (!HuggingFace::isSupportedModelType(modelType))
+        throw std::invalid_argument(
+            "LanguageModel::saveHuggingFace unsupported model_type='" + modelType
+            + "' (allowlist: llama, mistral, qwen2)");
+
+    if (this->cudaEnabled() && this->device != nullptr && !this->deviceStale)
+        this->device->downloadTo(*this);
+    else if (this->cudaTrainEnabled() && this->device != nullptr)
+        this->device->downloadTo(*this);
+
+    // Same Sentinel tensor packing as saveSafeTensors (in-memory; no temp file).
+    SafeTensors::File sentinelWeights;
+    sentinelWeights.metadata["format"] = "sentinel";
+    sentinelWeights.metadata["arch"] = "causal_lm_rope_swiglu";
+    sentinelWeights.metadata["vocab_size"] = std::to_string(this->tokenEmbedding.vocabSize());
+    sentinelWeights.metadata["embedding_dim"] = std::to_string(this->tokenEmbedding.embeddingDim());
+    sentinelWeights.metadata["max_position"] = std::to_string(this->maximumPositionCount);
+    sentinelWeights.metadata["block_count"] = std::to_string(this->blocks.size());
+    sentinelWeights.metadata["head_count"] = std::to_string(this->blocks[0].attention.headCount);
+    sentinelWeights.metadata["kv_head_count"] = std::to_string(this->kvHeadCount());
+    sentinelWeights.metadata["intermediate_size"] = std::to_string(this->intermediateSize());
+    sentinelWeights.metadata["rope_theta"] = std::to_string(this->ropeTheta());
+    sentinelWeights.metadata["use_bias"] = this->useBias() ? "1" : "0";
+    sentinelWeights.metadata["tie_embedding"] = this->tieEmbeddingProjection ? "1" : "0";
+
+    SafeTensors::putMatrix(sentinelWeights, "token_embedding.weight", this->tokenEmbedding.weight);
+    for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+        const TransformerBlock& block = this->blocks[blockIndex];
+        const std::string prefix = "blocks." + std::to_string(blockIndex) + ".";
+        SafeTensors::putMatrix(sentinelWeights, prefix + "attn.q_proj.weight", block.attention.queryWeight);
+        SafeTensors::putMatrix(sentinelWeights, prefix + "attn.k_proj.weight", block.attention.keyWeight);
+        SafeTensors::putMatrix(sentinelWeights, prefix + "attn.v_proj.weight", block.attention.valueWeight);
+        SafeTensors::putMatrix(sentinelWeights, prefix + "attn.o_proj.weight", block.attention.outputWeight);
+        SafeTensors::putMatrix(sentinelWeights, prefix + "attn_norm.weight", block.attentionNorm.gamma);
+        SafeTensors::putMatrix(sentinelWeights, prefix + "ffn_norm.weight", block.feedForwardNorm.gamma);
+        SafeTensors::putMatrix(sentinelWeights, prefix + "ffn.gate_proj.weight", block.feedForward.gateWeight);
+        SafeTensors::putMatrix(sentinelWeights, prefix + "ffn.up_proj.weight", block.feedForward.upWeight);
+        SafeTensors::putMatrix(sentinelWeights, prefix + "ffn.down_proj.weight", block.feedForward.downWeight);
+        if (this->useBias()) {
+            SafeTensors::putMatrix(sentinelWeights, prefix + "ffn.gate_proj.bias", block.feedForward.gateBias);
+            SafeTensors::putMatrix(sentinelWeights, prefix + "ffn.up_proj.bias", block.feedForward.upBias);
+            SafeTensors::putMatrix(sentinelWeights, prefix + "ffn.down_proj.bias", block.feedForward.downBias);
+        }
+    }
+    SafeTensors::putMatrix(sentinelWeights, "final_norm.weight", this->finalNorm.gamma);
+    if (!this->tieEmbeddingProjection)
+        SafeTensors::putMatrix(sentinelWeights, "lm_head.weight", this->outputProjection.weight);
+    if (this->useBias())
+        SafeTensors::putMatrix(sentinelWeights, "lm_head.bias", this->outputProjection.bias);
+
+    HuggingFace::Config config;
+    config.modelType = modelType;
+    config.architecture = HuggingFace::defaultArchitectureName(modelType);
+    config.vocabSize = this->tokenEmbedding.vocabSize();
+    config.hiddenSize = this->tokenEmbedding.embeddingDim();
+    config.intermediateSize = this->intermediateSize();
+    config.numHiddenLayers = static_cast<int>(this->blocks.size());
+    config.numAttentionHeads = this->blocks[0].attention.headCount;
+    config.numKeyValueHeads = this->kvHeadCount();
+    config.maxPositionEmbeddings = this->maximumPositionCount;
+    config.rmsNormEps = this->finalNorm.epsilon;
+    config.ropeTheta = this->ropeTheta();
+    config.tieWordEmbeddings = this->tieEmbeddingProjection;
+    config.useBias = this->useBias();
+
+    HuggingFace::saveDirectory(
+        modelDirectory,
+        config,
+        sentinelWeights,
+        HuggingFace::WeightLayoutFamily::LlamaMistralLike,
+        tokenizerSourceDirectory);
+}
+
 void LanguageModel::runCheckpointSmokeDemo() {
     LanguageModel model(64, 32, 16, Adam(0.001f), 1, 2);
     model.enableCuda();
@@ -2132,6 +2213,102 @@ void LanguageModel::runKvHeadCountSmokeDemo() {
         heads,
         kvHeads,
         expectedKvRows);
+}
+
+void LanguageModel::runHuggingFaceExportSmokeDemo() {
+    namespace fs = std::filesystem;
+
+    const fs::path exportDir = fs::path("hf_export_smoke_out");
+    const fs::path tokSrcDir = fs::path("hf_export_smoke_tok");
+    fs::remove_all(exportDir);
+    fs::remove_all(tokSrcDir);
+    fs::create_directories(tokSrcDir);
+
+    {
+        std::ofstream out(tokSrcDir / "tokenizer.json", std::ios::binary);
+        if (!out) throw std::runtime_error("HF export smoke: cannot write tokenizer.json");
+        out << R"json({"version":"1.0","model":{"type":"BPE","vocab":{"a":0},"merges":[]}})json";
+    }
+    {
+        std::ofstream out(tokSrcDir / "tokenizer_config.json", std::ios::binary);
+        out << R"json({"tokenizer_class":"PreTrainedTokenizerFast"})json";
+    }
+
+    // Tiny GQA + tied + no-bias model (HF-typical).
+    LanguageModel model(32, 16, 64, Adam(1e-3f), 2, 4, 32, 10000.0f, false, 2);
+    model.setTieEmbeddingProjection(true);
+    model.finalNorm.epsilon = 1.0e-5f;
+    for (TransformerBlock& block : model.blocks) {
+        block.attentionNorm.epsilon = 1.0e-5f;
+        block.feedForwardNorm.epsilon = 1.0e-5f;
+    }
+    // Distinct values so reload parity is meaningful.
+    model.tokenEmbedding.weight.data[0] = 0.125f;
+    model.blocks[0].attention.keyWeight.data[0] = 0.25f;
+    model.blocks[1].feedForward.downWeight.data[0] = 0.375f;
+    model.finalNorm.gamma.data[0] = 0.5f;
+
+    const Matrix logitsBefore = model.forward({ 1, 2, 3, 4 });
+    model.saveHuggingFace(exportDir.string(), "llama", tokSrcDir.string());
+
+    if (!fs::is_regular_file(exportDir / "config.json"))
+        throw std::runtime_error("HF export smoke: missing config.json");
+    if (!fs::is_regular_file(exportDir / "model.safetensors"))
+        throw std::runtime_error("HF export smoke: missing model.safetensors");
+    if (!fs::is_regular_file(exportDir / "tokenizer.json")
+        || !fs::is_regular_file(exportDir / "tokenizer_config.json"))
+        throw std::runtime_error("HF export smoke: tokenizer files not copied");
+
+    const HuggingFace::Config cfg = HuggingFace::loadConfig(exportDir.string());
+    if (cfg.modelType != "llama" || cfg.architecture != "LlamaForCausalLM")
+        throw std::runtime_error("HF export smoke: config model_type/architecture mismatch");
+    if (cfg.vocabSize != 32 || cfg.hiddenSize != 16 || cfg.numKeyValueHeads != 2
+        || cfg.intermediateSize != 32 || !cfg.tieWordEmbeddings || cfg.useBias)
+        throw std::runtime_error("HF export smoke: config arch fields mismatch");
+
+    const SafeTensors::File raw = SafeTensors::load((exportDir / "model.safetensors").string());
+    if (raw.tensors.count("model.embed_tokens.weight") == 0
+        || raw.tensors.count("model.layers.0.self_attn.k_proj.weight") == 0
+        || raw.tensors.count("model.norm.weight") == 0)
+        throw std::runtime_error("HF export smoke: HF tensor names missing");
+    if (raw.tensors.count("lm_head.weight") != 0)
+        throw std::runtime_error("HF export smoke: tied export should omit lm_head.weight");
+    if (raw.tensors.count("token_embedding.weight") != 0)
+        throw std::runtime_error("HF export smoke: Sentinel names must not appear in HF file");
+
+    LanguageModel reloaded = LanguageModel::loadHuggingFace(exportDir.string(), 1e-3f);
+    if (std::fabs(reloaded.tokenEmbedding.weight.data[0] - 0.125f) > 1.0e-6f
+        || std::fabs(reloaded.blocks[0].attention.keyWeight.data[0] - 0.25f) > 1.0e-6f
+        || std::fabs(reloaded.blocks[1].feedForward.downWeight.data[0] - 0.375f) > 1.0e-6f
+        || std::fabs(reloaded.finalNorm.gamma.data[0] - 0.5f) > 1.0e-6f)
+        throw std::runtime_error("HF export smoke: reloaded weights mismatch");
+    if (!reloaded.tieEmbeddingProjection || reloaded.useBias() || reloaded.kvHeadCount() != 2)
+        throw std::runtime_error("HF export smoke: reloaded tie/bias/kv mismatch");
+
+    const Matrix logitsAfter = reloaded.forward({ 1, 2, 3, 4 });
+    if (logitsAfter.rows != logitsBefore.rows || logitsAfter.cols != logitsBefore.cols)
+        throw std::runtime_error("HF export smoke: logits shape mismatch");
+    float maxDiff = 0.0f;
+    for (size_t i = 0; i < logitsBefore.data.size(); ++i)
+        maxDiff = (std::max)(maxDiff, std::fabs(logitsBefore.data[i] - logitsAfter.data[i]));
+    if (maxDiff > 1.0e-5f)
+        throw std::runtime_error("HF export smoke: logits drifted after export/import");
+
+    bool rejected = false;
+    try {
+        model.saveHuggingFace(exportDir.string(), "gpt2");
+    } catch (const std::exception&) {
+        rejected = true;
+    }
+    if (!rejected)
+        throw std::runtime_error("HF export smoke: should reject unsupported model_type");
+
+    fs::remove_all(exportDir);
+    fs::remove_all(tokSrcDir);
+    SmokeLog::result(
+        "LanguageModel saveHuggingFace",
+        "config+weights+tokenizer=ok  reload=ok  logitsDiff=%.2e  reject=model_type",
+        maxDiff);
 }
 
 void LanguageModel::runHuggingFaceImportSmokeDemo() {

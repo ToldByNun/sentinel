@@ -266,6 +266,16 @@ public:
     /// </summary>
     static LanguageModel loadHuggingFace(const std::string& modelDirectory, float learningRate = 3e-4f);
 
+    /// <summary>
+    /// export a Transformers-compatible directory: config.json + model.safetensors (HF names, F32).
+    /// modelType must be allowlisted (llama / mistral / qwen2). Optionally copy tokenizer files
+    /// from tokenizerSourceDirectory (tokenizer.json, tokenizer_config.json, …).
+    /// </summary>
+    void saveHuggingFace(
+        const std::string& modelDirectory,
+        const std::string& modelType = "llama",
+        const std::string& tokenizerSourceDirectory = "");
+
     /// <summary>save/load roundtrip smoke on a tiny model</summary>
     static void runCheckpointSmokeDemo();
 
@@ -283,6 +293,9 @@ public:
 
     /// <summary>HF dir → loadHuggingFace sizes + weights + forward sanity</summary>
     static void runHuggingFaceImportSmokeDemo();
+
+    /// <summary>saveHuggingFace → loadHuggingFace weight/config parity (+ optional tokenizer copy)</summary>
+    static void runHuggingFaceExportSmokeDemo();
 
     /// <summary>HF stub dir: import + HfTokenizer encode + host microtrain; shapes/finite gate</summary>
     static void runHuggingFaceRoundtripSmokeDemo();

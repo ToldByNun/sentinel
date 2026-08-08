@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -474,6 +475,14 @@ bool isSupportedModelType(const std::string& modelType) {
     return modelType == "llama" || modelType == "mistral" || modelType == "qwen2";
 }
 
+std::string defaultArchitectureName(const std::string& modelType) {
+    if (modelType == "llama") return "LlamaForCausalLM";
+    if (modelType == "mistral") return "MistralForCausalLM";
+    if (modelType == "qwen2") return "Qwen2ForCausalLM";
+    throw std::invalid_argument(
+        "HuggingFace::defaultArchitectureName unsupported model_type='" + modelType + "'");
+}
+
 Config parseConfigJson(const std::string& json) {
     RawFields raw;
     ingestTopLevel(json, raw);
@@ -491,6 +500,61 @@ Config loadConfig(const std::string& pathOrDirectory) {
         path += "config.json";
     }
     return parseConfigJson(readEntireFile(path));
+}
+
+std::string serializeConfigJson(const Config& config) {
+    if (!isSupportedModelType(config.modelType))
+        throw std::invalid_argument(
+            "HuggingFace::serializeConfigJson unsupported model_type='" + config.modelType + "'");
+    if (config.vocabSize <= 0 || config.hiddenSize <= 0 || config.intermediateSize <= 0
+        || config.numHiddenLayers <= 0 || config.numAttentionHeads <= 0
+        || config.numKeyValueHeads <= 0 || config.maxPositionEmbeddings <= 0)
+        throw std::invalid_argument("HuggingFace::serializeConfigJson incomplete config");
+
+    const std::string architecture = config.architecture.empty()
+        ? defaultArchitectureName(config.modelType)
+        : config.architecture;
+
+    auto formatFloat = [](float value) -> std::string {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%.8g", static_cast<double>(value));
+        return std::string(buf);
+    };
+
+    std::ostringstream out;
+    out << "{\n";
+    out << "  \"architectures\": [\"" << architecture << "\"],\n";
+    out << "  \"model_type\": \"" << config.modelType << "\",\n";
+    out << "  \"vocab_size\": " << config.vocabSize << ",\n";
+    out << "  \"hidden_size\": " << config.hiddenSize << ",\n";
+    out << "  \"intermediate_size\": " << config.intermediateSize << ",\n";
+    out << "  \"num_hidden_layers\": " << config.numHiddenLayers << ",\n";
+    out << "  \"num_attention_heads\": " << config.numAttentionHeads << ",\n";
+    out << "  \"num_key_value_heads\": " << config.numKeyValueHeads << ",\n";
+    out << "  \"max_position_embeddings\": " << config.maxPositionEmbeddings << ",\n";
+    out << "  \"rms_norm_eps\": " << formatFloat(config.rmsNormEps) << ",\n";
+    out << "  \"rope_theta\": " << formatFloat(config.ropeTheta) << ",\n";
+    out << "  \"tie_word_embeddings\": " << (config.tieWordEmbeddings ? "true" : "false") << ",\n";
+    out << "  \"attention_bias\": " << (config.useBias ? "true" : "false") << ",\n";
+    out << "  \"mlp_bias\": " << (config.useBias ? "true" : "false") << ",\n";
+    out << "  \"torch_dtype\": \"float32\",\n";
+    out << "  \"transformers_version\": \"4.40.0\"\n";
+    out << "}\n";
+    return out.str();
+}
+
+void saveConfig(const std::string& modelDirectory, const Config& config) {
+    if (modelDirectory.empty())
+        throw std::invalid_argument("HuggingFace::saveConfig empty modelDirectory");
+
+    namespace fs = std::filesystem;
+    const fs::path root(modelDirectory);
+    fs::create_directories(root);
+    const fs::path path = root / "config.json";
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) throw std::runtime_error("HuggingFace::saveConfig cannot write " + path.string());
+    out << serializeConfigJson(config);
+    if (!out) throw std::runtime_error("HuggingFace::saveConfig write failed for " + path.string());
 }
 
 void runConfigParseSmokeDemo() {
@@ -571,9 +635,20 @@ void runConfigParseSmokeDemo() {
         throw std::runtime_error("HF config smoke: loadConfig file roundtrip failed");
     std::remove(path.c_str());
 
+    const Config roundtrip = parseConfigJson(serializeConfigJson(cfg));
+    if (roundtrip.modelType != cfg.modelType
+        || roundtrip.vocabSize != cfg.vocabSize
+        || roundtrip.numKeyValueHeads != cfg.numKeyValueHeads
+        || std::fabs(roundtrip.ropeTheta - cfg.ropeTheta) > 1.0f
+        || roundtrip.tieWordEmbeddings != cfg.tieWordEmbeddings
+        || roundtrip.useBias != cfg.useBias)
+        throw std::runtime_error("HF config smoke: serializeConfigJson roundtrip failed");
+    if (defaultArchitectureName("qwen2") != "Qwen2ForCausalLM")
+        throw std::runtime_error("HF config smoke: defaultArchitectureName qwen2 mismatch");
+
     SmokeLog::result(
         "HuggingFace config parse",
-        "llama GQA ok  rejects=model_type/MoE/sliding/quant  file=ok");
+        "llama GQA ok  rejects=model_type/MoE/sliding/quant  file=ok  serialize=ok");
 }
 
 } // namespace HuggingFace
