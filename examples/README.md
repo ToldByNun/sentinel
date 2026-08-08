@@ -11,12 +11,15 @@ API reference: [docs/python.md](../docs/python.md) · [docs/cpp.md](../docs/cpp.
 | [`python/train_tiny.py`](python/train_tiny.py) | In-memory toy corpus → train → `.snlm` + `.safetensors` |
 | [`python/generate.py`](python/generate.py) | Load checkpoint (or train toy) → sample |
 | [`python/train_jsonl.py`](python/train_jsonl.py) | Load JSONL texts → train → save weights |
+| [`python/finetune_hf.py`](python/finetune_hf.py) | HF import → JSONL fine-tune → `save_huggingface` export (`--demo` offline stub) |
 
 ```bash
 pip install -e . --no-build-isolation   # from repo root
 python examples/python/train_tiny.py
 python examples/python/generate.py tiny_demo.snlm "the cat"
 python examples/python/train_jsonl.py examples/data/sample.jsonl --out run.safetensors
+python examples/python/finetune_hf.py --demo --out hf_demo_out
+# python examples/python/finetune_hf.py /path/to/hf_model examples/data/sample.jsonl --out hf_finetuned
 ```
 
 ### JSONL shape (Python example)

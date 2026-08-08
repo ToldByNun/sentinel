@@ -3,6 +3,7 @@
 
 #include "../Math/Matrix.hpp"
 #include "../Tokenizer/BPETokenizer.hpp"
+#include "../Tokenizer/HfTokenizer.hpp"
 
 #include <string>
 #include <vector>
@@ -40,6 +41,15 @@ public:
     /// if maximumTokenCount > 0 truncates before the shift
     /// </summary>
     static LanguageModelDataset build(const std::vector<std::string>& texts, const BPETokenizer& tokenizer, size_t maximumTokenCount = 0, bool buildOneHot = true);
+
+    /// <summary>
+    /// same as build(BPETokenizer), using HuggingFace::Tokenizer (adds specials when configured)
+    /// </summary>
+    static LanguageModelDataset build(
+        const std::vector<std::string>& texts,
+        const HuggingFace::Tokenizer& tokenizer,
+        size_t maximumTokenCount = 0,
+        bool buildOneHot = true);
 
     int size() const;
 

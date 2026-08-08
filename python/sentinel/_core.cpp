@@ -2,11 +2,12 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <stdexcept>
+
 #include "NeuralNet/Cuda/CudaMatmul.hpp"
 #include "NeuralNet/Data/LanguageModelDataset.hpp"
 #include "NeuralNet/Network/LanguageModel.hpp"
 #include "NeuralNet/Optimizers/Adam.hpp"
-#include "NeuralNet/IO/HuggingFaceResolve.hpp"
 #include "NeuralNet/Tokenizer/BPETokenizer.hpp"
 #include "NeuralNet/Tokenizer/HfTokenizer.hpp"
 
@@ -86,19 +87,13 @@ NB_MODULE(_core, m) {
         .def_prop_ro("unknown_token_id", &BPETokenizer::unknownTokenId)
         .def_prop_ro("is_trained", &BPETokenizer::isTrained);
 
-    m.def(
-        "resolve_huggingface",
-        &HuggingFace::resolveModelDirectory,
-        nb::arg("source"),
-        "Resolve a local path, Hub repo id (org/name[@rev]), or huggingface.co URL to a local model directory (uses the standard HF cache)");
-
     nb::class_<HuggingFace::Tokenizer>(m, "HfTokenizer")
         .def(nb::init<>())
         .def_static(
             "load",
             &HuggingFace::Tokenizer::load,
-            nb::arg("source"),
-            "Load HuggingFace tokenizer.json from a local path, Hub repo id (org/name[@rev]), or HF URL")
+            nb::arg("path"),
+            "Load HuggingFace tokenizer.json from a file or model directory")
         .def(
             "encode",
             &HuggingFace::Tokenizer::encode,
@@ -121,12 +116,32 @@ NB_MODULE(_core, m) {
         .def(nb::init<>())
         .def_static(
             "build",
-            &LanguageModelDataset::build,
+            [](const std::vector<std::string>& texts,
+               nb::object tokenizer,
+               size_t maximumTokenCount,
+               bool buildOneHot) {
+                if (nb::isinstance<BPETokenizer>(tokenizer)) {
+                    return LanguageModelDataset::build(
+                        texts,
+                        nb::cast<const BPETokenizer&>(tokenizer),
+                        maximumTokenCount,
+                        buildOneHot);
+                }
+                if (nb::isinstance<HuggingFace::Tokenizer>(tokenizer)) {
+                    return LanguageModelDataset::build(
+                        texts,
+                        nb::cast<const HuggingFace::Tokenizer&>(tokenizer),
+                        maximumTokenCount,
+                        buildOneHot);
+                }
+                throw std::invalid_argument(
+                    "LanguageModelDataset.build tokenizer must be BPETokenizer or HfTokenizer");
+            },
             nb::arg("texts"),
             nb::arg("tokenizer"),
             nb::arg("maximum_token_count") = 0,
             nb::arg("build_one_hot") = false,
-            "Encode texts and build shifted next-token examples")
+            "Encode texts (BPETokenizer or HfTokenizer) and build shifted next-token examples")
         .def_prop_ro("size", &LanguageModelDataset::size)
         .def_prop_ro("total_prediction_count", &LanguageModelDataset::totalPredictionCount)
         .def_rw("vocabulary_size", &LanguageModelDataset::vocabularySize);
@@ -322,9 +337,9 @@ NB_MODULE(_core, m) {
         .def_static(
             "load_huggingface",
             &LanguageModel::loadHuggingFace,
-            nb::arg("source"),
+            nb::arg("path"),
             nb::arg("learning_rate") = 3e-4f,
-            "Build + load a causal LM from a local HF directory, Hub repo id (org/name[@rev]), or huggingface.co URL")
+            "Build + load a causal LM from a HuggingFace model directory (config.json + safetensors or pytorch_model.bin)")
         .def(
             "save_huggingface",
             &LanguageModel::saveHuggingFace,

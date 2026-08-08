@@ -33,7 +33,6 @@
     <ClCompile Include="NeuralNet\IO\SafeTensors.cpp" />
     <ClCompile Include="NeuralNet\IO\PytorchStateDict.cpp" />
     <ClCompile Include="NeuralNet\IO\HuggingFaceConfig.cpp" />
-    <ClCompile Include="NeuralNet\IO\HuggingFaceResolve.cpp" />
     <ClCompile Include="NeuralNet\IO\HuggingFaceWeights.cpp" />
     <ClCompile Include="NeuralNet\Utils\TextUtil.cpp" />
     <ClCompile Include="NeuralNet\Layers\Dense.cpp" />

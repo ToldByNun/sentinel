@@ -21,7 +21,6 @@ On Windows, importing `sentinel` adds CUDA `bin\x64` / `bin` via `os.add_dll_dir
 | Name | Type | Description |
 | ---- | ---- | ----------- |
 | `cuda_available()` | `() -> bool` | True if a CUDA device is usable |
-| `resolve_huggingface(source)` | `str -> str` | Local path / Hub id / HF URL → local model dir (standard HF cache) |
 | `__version__` | `str` | Binding / core version (e.g. `"0.1.0"`) |
 
 ---
@@ -103,14 +102,14 @@ Convention: keep the tokenizer next to weights as `{stem}.sbpe` (e.g. `run.safet
 Load a HuggingFace `tokenizer.json` (ByteLevel BPE; Llama-3/Qwen2-style `ignore_merges` supported). Native `.sbpe` training stays on `BPETokenizer`.
 
 ```python
-tok = S.HfTokenizer.load("meta-llama/Llama-3.2-1B")  # local path, Hub id, or HF URL
+tok = S.HfTokenizer.load("/path/to/hf_model")  # or .../tokenizer.json
 ids = tok.encode("hello", add_special_tokens=True)
 text = tok.decode(ids, skip_special_tokens=True)
 ```
 
 | Method / property | Notes |
 | ----------------- | ----- |
-| `load` (static) | local path / Hub repo id / HF URL |
+| `load` (static) | file or HF model directory |
 | `encode` / `decode` | optional BOS / skip specials |
 | `vocab_size`, `bos_token_id`, `eos_token_id`, `pad_token_id`, `unk_token_id` | `-1` when absent |
 | `ignore_merges` | Llama-3-style whole-piece vocab hits |
@@ -136,7 +135,7 @@ positions = data.total_prediction_count
 
 | Member | Signature | Notes |
 | ------ | --------- | ----- |
-| `build` (static) | `(texts, tokenizer, maximum_token_count=0, build_one_hot=False) -> LanguageModelDataset` | Skips sequences shorter than 2 tokens; truncates if `maximum_token_count > 0` |
+| `build` (static) | `(texts, tokenizer, maximum_token_count=0, build_one_hot=False) -> LanguageModelDataset` | `tokenizer` is `BPETokenizer` or `HfTokenizer`; skips sequences shorter than 2 tokens; truncates if `maximum_token_count > 0` |
 | `size` | `int` (ro) | Number of examples |
 | `total_prediction_count` | `int` (ro) | Sum of next-token positions |
 | `vocabulary_size` | `int` (rw) | Set by `build` |
@@ -171,7 +170,7 @@ model = S.LanguageModel(
 Or load a HuggingFace causal-LM directory (allowlisted `model_type`: `llama` / `mistral` / `qwen2`):
 
 ```python
-model = S.LanguageModel.load_huggingface("meta-llama/Llama-3.2-1B", learning_rate=3e-4)  # or local path / HF URL
+model = S.LanguageModel.load_huggingface("/path/to/hf_model", learning_rate=3e-4)
 ```
 
 ### Device setup
@@ -248,8 +247,7 @@ cont = model.generate(prompt_ids, new_token_count=32, temperature=0.9, top_k=20,
 | `load_checkpoint` | `(path) -> None` | `.snlm` or `.safetensors` |
 | `save_safetensors` | `(path) -> None` | Weights + arch metadata (Sentinel tensor names) |
 | `load_safetensors` | `(path) -> None` | Architecture must already match |
-| `load_huggingface` | `(source, learning_rate=3e-4) -> LanguageModel` | Static: local HF dir, Hub repo id (`org/name[@rev]`), or HF URL → sized model + weights; see [huggingface.md](huggingface.md) |
-| `resolve_huggingface` | `(source) -> str` | Resolve source to a local model directory (standard HF hub cache; optional extra `sentinel-lm[hf]`) |
+| `load_huggingface` | `(path, learning_rate=3e-4) -> LanguageModel` | Static: HF dir (`config.json` + safetensors) → sized model + weights; see [huggingface.md](huggingface.md) |
 | `save_huggingface` | `(path, model_type="llama", tokenizer_source_directory="", weight_format="safetensors") -> None` | Export Transformers-compatible dir (`config.json` + `model.safetensors` and/or `pytorch_model.bin`; optional tokenizer copy). `weight_format`: `"safetensors"` \| `"bin"` \| `"both"` |
 
 Rebuild a model with the **same** dims before `load_safetensors`. Tokenizer is separate (`BPETokenizer` / `HfTokenizer`).
@@ -269,6 +267,8 @@ Requires `enable_cuda_train`. Unset `SENTINEL_PHASE_TRACE` when quoting tok/s.
 **Tiny CPU/GPU toy** — [`examples/python/train_tiny.py`](../examples/python/train_tiny.py)
 
 **JSONL (in-memory)** — [`examples/python/train_jsonl.py`](../examples/python/train_jsonl.py)
+
+**HuggingFace fine-tune + export** — [`examples/python/finetune_hf.py`](../examples/python/finetune_hf.py) (details: [huggingface.md](huggingface.md))
 
 **HuggingFace import / export** — [huggingface.md](huggingface.md) (`load_huggingface` / `save_huggingface` + `HfTokenizer`)
 

@@ -89,6 +89,7 @@ print(tok.decode(model.generate(tok.encode("the"), new_token_count=16)))
 python examples/python/train_tiny.py
 python examples/python/generate.py tiny_demo.snlm "the cat"
 python examples/python/train_jsonl.py examples/data/sample.jsonl --out run.safetensors
+python examples/python/finetune_hf.py --demo --out hf_demo_out
 ```
 
 ## Quickstart (C++)

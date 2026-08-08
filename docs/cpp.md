@@ -107,7 +107,7 @@ Header: `Data/LanguageModelDataset.hpp`
 
 | API | Notes |
 | --- | ----- |
-| `LanguageModelDataset::build(texts, tok, maxTokens=0, buildOneHot=true)` | Skip len &lt; 2; optional truncate |
+| `LanguageModelDataset::build(texts, tok, maxTokens=0, buildOneHot=true)` | `BPETokenizer` or `HuggingFace::Tokenizer`; skip len &lt; 2; optional truncate |
 | `fromTokenIds` / `makeOneHotSequence` | Lower-level helpers |
 | `size()` / `totalPredictionCount()` | |
 | `examples` / `vocabularySize` | Public fields |
@@ -212,7 +212,7 @@ Set offload / SBAO preferences **before** `enableCudaTrain()` when pack and chec
 | `saveCheckpoint(path, includeOptimizer=true)` | Native `.snlm` |
 | `loadCheckpoint(path)` | `.snlm` or routes `.safetensors` |
 | `saveSafeTensors` / `loadSafeTensors` | Weights + metadata (`IO/SafeTensors.hpp`); overload accepts in-memory `SafeTensors::File` |
-| `loadHuggingFace(source, lr=3e-4)` | Static: local HF dir, Hub repo id (`org/name[@rev]`), or HF URL → config + safetensors/`.bin`; see [huggingface.md](huggingface.md) |
+| `loadHuggingFace(dir, lr=3e-4)` | Static: parse HF `config.json`, size model, remap/load safetensors or modern `pytorch_model.bin`; see [huggingface.md](huggingface.md) |
 | `saveHuggingFace(dir, modelType="llama", tokenizerSource="", weightFormat="safetensors")` | Export Transformers-compatible dir (`config.json` + `model.safetensors` and/or `pytorch_model.bin`; optional tokenizer copy). `weightFormat`: `safetensors` \| `bin` \| `both` |
 
 Focused smoke: `SENTINEL_HF_ROUNDTRIP_SMOKE=1` — stub HF dir → import + `HfTokenizer` encode + 1 host train step + generate (finite gate).
@@ -238,7 +238,6 @@ Unset env `SENTINEL_PHASE_TRACE` when quoting throughput.
 | `IO/SafeTensors.hpp` | Weight file format — **load** F32/BF16/F16 → host F32; **save** F32 |
 | `IO/PytorchStateDict.hpp` | Modern torch ZIP state-dict — **load** F32/F16/BF16 → host F32; **save** F32 (no libtorch; zlib) |
 | `IO/HuggingFaceConfig.hpp` | Minimal `config.json` parse/serialize; allowlist `llama`/`mistral`/`qwen2`; rejects MoE / sliding-window / quantized |
-| `IO/HuggingFaceResolve.hpp` | Resolve local path / Hub repo id / HF URL → directory (`resolveModelDirectory`; uses standard HF cache via `hf` / `huggingface_hub`) |
 | `IO/HuggingFaceWeights.hpp` | HF↔Sentinel tensor remap + shard index (`loadMappedWeights` / `saveDirectory`); safetensors + `.bin`; first family: Llama/Mistral-like names |
 | `Tokenizer/HfTokenizer.hpp` | HF `tokenizer.json` ByteLevel BPE (`HuggingFace::Tokenizer`); `.sbpe` stays on `BPETokenizer` |
 | `Data/TextRowReader.hpp` / `JsonlLoader.hpp` / `ArrowChunkReader.hpp` | Corpus I/O |

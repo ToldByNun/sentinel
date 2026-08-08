@@ -261,12 +261,10 @@ public:
     void loadSafeTensors(const SafeTensors::File& file);
 
     /// <summary>
-    /// build a LanguageModel from a HuggingFace source and load remapped weights.
-    /// source: local model directory, Hub repo id (org/name or org/name@rev), or
-    /// huggingface.co / hf.co URL. Hub downloads use the standard HF cache
-    /// (requires `hf` CLI or python `huggingface_hub`). Unsupported arches throw.
+    /// build a LanguageModel from a HuggingFace model directory (config.json + safetensors shards)
+    /// and load remapped weights; unsupported arches throw
     /// </summary>
-    static LanguageModel loadHuggingFace(const std::string& modelSource, float learningRate = 3e-4f);
+    static LanguageModel loadHuggingFace(const std::string& modelDirectory, float learningRate = 3e-4f);
 
     /// <summary>
     /// export a Transformers-compatible directory: config.json + weights (HF names, F32).
