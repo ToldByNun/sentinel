@@ -1,6 +1,6 @@
 # HuggingFace causal-LM import / export
 
-Sentinel can **import** HuggingFace causal LM checkpoints that fit the engine surface (RoPE + RMSNorm + SwiGLU + optional GQA), fine-tune with the usual C++ / Python train path, then **export** back to a Transformers-compatible directory (`config.json` + `model.safetensors` with HF tensor names).
+Sentinel can **import** HuggingFace causal LM checkpoints that fit the engine surface (RoPE + RMSNorm + SwiGLU + optional GQA), fine-tune with the usual C++ / Python train path, then **export** back to a Transformers-compatible directory (`config.json` + `model.safetensors` and/or `pytorch_model.bin` with HF tensor names).
 
 This is **not** a Llama-only importer/exporter. Public APIs are HF-generic (`loadHuggingFace` / `saveHuggingFace`, `load_huggingface` / `save_huggingface`, `HfTokenizer`). Llama / Mistral / Qwen2-style repos are the **first supported layout family** because they share tensor names and math.
 
@@ -32,6 +32,7 @@ model.save_huggingface(
     "/path/to/hf_export",
     model_type="llama",
     tokenizer_source_directory="/path/to/hf_model",
+    weight_format="both",  # "safetensors" | "bin" | "both"
 )
 ```
 
@@ -40,7 +41,8 @@ Expected directory contents (import **and** export):
 | File | Role |
 | ---- | ---- |
 | `config.json` | Arch (required) |
-| `model.safetensors` **or** sharded `*.safetensors` + `model.safetensors.index.json` | Weights (export writes a single `model.safetensors`) |
+| `model.safetensors` **or** sharded `*.safetensors` + `model.safetensors.index.json` | Weights (preferred on import; export default) |
+| `pytorch_model.bin` **or** sharded `*.bin` + `pytorch_model.bin.index.json` | PyTorch ZIP state-dict fallback (modern `torch.save`; F32/F16/BF16 → host F32) |
 | `tokenizer.json` | ByteLevel BPE (for `HfTokenizer`; export copies when `tokenizer_source_directory` is set) |
 
 `save_safetensors` still writes **Sentinel** tensor names + arch metadata. Prefer `save_huggingface` when the consumer is Transformers / `from_pretrained`. Native `.sbpe` is only for Sentinel-trained BPEs.
@@ -90,7 +92,7 @@ Architectures should look like `*ForCausalLM` when `architectures` is present.
 | `tie_word_embeddings` | embed ↔ LM-head tying |
 | `attention_bias` / `mlp_bias` | `use_bias` (either true → biases trainable) |
 
-Weights load **BF16 / F16 / F32** safetensors → host F32. Shards via `model.safetensors.index.json`.
+Weights load **BF16 / F16 / F32** (safetensors or modern PyTorch ZIP `.bin`) → host F32. Prefer safetensors when both exist; else `pytorch_model.bin` / index shards. Legacy non-zip pickle `.bin` is rejected.
 
 ### Weight names (first layout family)
 
@@ -137,11 +139,12 @@ Also out of scope for now: bit-identical loss vs Transformers, GGUF, and separat
 
 ## Export notes
 
-- Writes **F32** `model.safetensors` with Llama/Mistral/Qwen2-style keys (`model.embed_tokens.weight`, `model.layers.{i}.*`, `model.norm.weight`, optional `lm_head.weight`).
+- Writes **F32** weights with Llama/Mistral/Qwen2-style keys (`model.embed_tokens.weight`, `model.layers.{i}.*`, `model.norm.weight`, optional `lm_head.weight`).
+- `weight_format`: `"safetensors"` (default) → `model.safetensors`; `"bin"` → `pytorch_model.bin` (torch.load-compatible ZIP); `"both"` → both.
 - `config.json` includes the allowlisted `model_type`, matching `architectures[]`, GQA heads, `rope_theta`, `rms_norm_eps`, `tie_word_embeddings`, and `attention_bias` / `mlp_bias` from Sentinel `use_bias`.
 - Tied embeddings: export **omits** `lm_head.weight` (same as many HF repos); import reloads via `tie_word_embeddings`.
 - Tokenizer files are **not** synthesized from `.sbpe`. Pass `tokenizer_source_directory` to copy `tokenizer.json`, `tokenizer_config.json`, `special_tokens_map.json`, `vocab.json`, `merges.txt`, and `generation_config.json` when present.
-- Export is single-file (no shard index). Re-import via `loadHuggingFace` / `load_huggingface` is covered by the export smoke.
+- Export is single-file per format (no shard index). Re-import via `loadHuggingFace` / `load_huggingface` is covered by the export smoke (`both` + bin-only reload).
 
 ---
 
@@ -163,7 +166,8 @@ With the `sentinel` demo binary:
 | `SENTINEL_HF_CONFIG_SMOKE=1` | `config.json` allowlist / rejects / serialize |
 | `SENTINEL_HF_WEIGHT_MAP_SMOKE=1` | shard remap + export remap |
 | `SENTINEL_HF_IMPORT_SMOKE=1` | `loadHuggingFace` |
-| `SENTINEL_HF_EXPORT_SMOKE=1` | `saveHuggingFace` → reload parity + tokenizer copy |
+| `SENTINEL_HF_EXPORT_SMOKE=1` | `saveHuggingFace` → reload parity + tokenizer copy + `pytorch_model.bin` |
+| `SENTINEL_PYTORCH_BIN_SMOKE=1` | ZIP state-dict save/load roundtrip (`PytorchStateDict`) |
 | `SENTINEL_HF_TOKENIZER_SMOKE=1` | `tokenizer.json` encode/decode |
 | `SENTINEL_HF_ROUNDTRIP_SMOKE=1` | import + encode + 1 host train step + generate (finite gate) |
 
@@ -178,3 +182,4 @@ With the `sentinel` demo binary:
 | `HuggingFace::Tokenizer` (`Tokenizer/HfTokenizer.hpp`) | `HfTokenizer` |
 | `HuggingFace::loadConfig` / `saveConfig` | (C++ only) |
 | `HuggingFace::loadMappedWeights` / `saveDirectory` | (C++ only) |
+| `PytorchStateDict::load` / `save` | (C++ only; used by HF import/export) |

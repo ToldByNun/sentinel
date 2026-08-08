@@ -40,6 +40,7 @@ endif()
 find_package(CUDAToolkit REQUIRED)
 find_package(OpenMP)
 find_package(Threads REQUIRED)
+find_package(ZLIB REQUIRED)
 include(GNUInstallDirs)
 
 set(SENTINEL_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/sentinel")
@@ -57,6 +58,7 @@ set(SENTINEL_CXX_SOURCES
     "${SENTINEL_ROOT}/NeuralNet/Data/LanguageModelDataset.cpp"
     "${SENTINEL_ROOT}/NeuralNet/Initializers/UniformInit.cpp"
     "${SENTINEL_ROOT}/NeuralNet/IO/SafeTensors.cpp"
+    "${SENTINEL_ROOT}/NeuralNet/IO/PytorchStateDict.cpp"
     "${SENTINEL_ROOT}/NeuralNet/IO/HuggingFaceConfig.cpp"
     "${SENTINEL_ROOT}/NeuralNet/IO/HuggingFaceWeights.cpp"
     "${SENTINEL_ROOT}/NeuralNet/Utils/TextUtil.cpp"
@@ -136,6 +138,7 @@ target_link_libraries(sentinel PUBLIC
     CUDA::cublasLt
     CUDA::cublas
     Threads::Threads
+    ZLIB::ZLIB
 )
 
 if(UNIX AND NOT APPLE)

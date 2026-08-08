@@ -1,5 +1,6 @@
 #include "HuggingFaceWeights.hpp"
 
+#include "PytorchStateDict.hpp"
 #include "../Math/Matrix.hpp"
 #include "../Utils/SmokeLog.hpp"
 
@@ -369,6 +370,20 @@ std::vector<WeightMapEntry> buildWeightMap(const Config& config, WeightLayoutFam
     throw std::runtime_error("HuggingFace::buildWeightMap unknown layout family");
 }
 
+WeightExportFormat parseWeightExportFormat(const std::string& name) {
+    std::string lower = name;
+    for (char& ch : lower)
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    if (lower == "safetensors" || lower == "safe" || lower == "st")
+        return WeightExportFormat::SafeTensors;
+    if (lower == "bin" || lower == "pytorch" || lower == "pt" || lower == "pytorch_bin")
+        return WeightExportFormat::PytorchBin;
+    if (lower == "both" || lower == "all")
+        return WeightExportFormat::Both;
+    throw std::invalid_argument(
+        "HuggingFace::parseWeightExportFormat expected safetensors|bin|both, got '" + name + "'");
+}
+
 WeightShardIndex loadWeightShardIndex(const std::string& modelDirectory) {
     if (modelDirectory.empty())
         throw std::invalid_argument("HuggingFace::loadWeightShardIndex empty directory");
@@ -380,36 +395,88 @@ WeightShardIndex loadWeightShardIndex(const std::string& modelDirectory) {
     WeightShardIndex index;
     index.directory = root.string();
 
-    const fs::path indexPath = root / "model.safetensors.index.json";
-    if (fs::is_regular_file(indexPath)) {
-        index.weightToFile = parseWeightMapFromIndexJson(readEntireFile(indexPath.string()));
+    const fs::path safeIndexPath = root / "model.safetensors.index.json";
+    if (fs::is_regular_file(safeIndexPath)) {
+        index.kind = WeightFileKind::SafeTensors;
+        index.weightToFile = parseWeightMapFromIndexJson(readEntireFile(safeIndexPath.string()));
         return index;
     }
 
-    const fs::path single = root / "model.safetensors";
-    if (fs::is_regular_file(single)) {
+    const fs::path singleSafe = root / "model.safetensors";
+    if (fs::is_regular_file(singleSafe)) {
+        index.kind = WeightFileKind::SafeTensors;
         index.singleFile = "model.safetensors";
         return index;
     }
 
-    std::vector<std::string> shards;
+    std::vector<std::string> safeShards;
     for (const auto& entry : fs::directory_iterator(root)) {
         if (!entry.is_regular_file()) continue;
         const std::string name = entry.path().filename().string();
         if (!endsWithIgnoreCase(name, ".safetensors")) continue;
         if (name.find("adapter") != std::string::npos) continue;
-        shards.push_back(name);
+        safeShards.push_back(name);
     }
-    std::sort(shards.begin(), shards.end());
-    if (shards.size() == 1) {
-        index.singleFile = shards.front();
+    std::sort(safeShards.begin(), safeShards.end());
+    if (safeShards.size() == 1) {
+        index.kind = WeightFileKind::SafeTensors;
+        index.singleFile = safeShards.front();
         return index;
     }
-    if (shards.empty())
-        throw std::runtime_error("HuggingFace weights: no .safetensors under " + modelDirectory);
+    if (safeShards.size() > 1) {
+        throw std::runtime_error(
+            "HuggingFace weights: multiple .safetensors without model.safetensors.index.json under "
+            + modelDirectory);
+    }
+
+    // PyTorch .bin fallback (modern zip torch.save).
+    const fs::path binIndexPath = root / "pytorch_model.bin.index.json";
+    if (fs::is_regular_file(binIndexPath)) {
+        index.kind = WeightFileKind::PytorchBin;
+        index.weightToFile = parseWeightMapFromIndexJson(readEntireFile(binIndexPath.string()));
+        return index;
+    }
+
+    const fs::path pytorchBin = root / "pytorch_model.bin";
+    if (fs::is_regular_file(pytorchBin)) {
+        index.kind = WeightFileKind::PytorchBin;
+        index.singleFile = "pytorch_model.bin";
+        return index;
+    }
+
+    const fs::path modelBin = root / "model.bin";
+    if (fs::is_regular_file(modelBin)) {
+        index.kind = WeightFileKind::PytorchBin;
+        index.singleFile = "model.bin";
+        return index;
+    }
+
+    std::vector<std::string> binShards;
+    for (const auto& entry : fs::directory_iterator(root)) {
+        if (!entry.is_regular_file()) continue;
+        const std::string name = entry.path().filename().string();
+        if (!endsWithIgnoreCase(name, ".bin") && !endsWithIgnoreCase(name, ".pt")
+            && !endsWithIgnoreCase(name, ".pth"))
+            continue;
+        if (name.find("adapter") != std::string::npos) continue;
+        if (name.find("training_args") != std::string::npos) continue;
+        if (name.find("optimizer") != std::string::npos) continue;
+        binShards.push_back(name);
+    }
+    std::sort(binShards.begin(), binShards.end());
+    if (binShards.size() == 1) {
+        index.kind = WeightFileKind::PytorchBin;
+        index.singleFile = binShards.front();
+        return index;
+    }
+    if (binShards.size() > 1) {
+        throw std::runtime_error(
+            "HuggingFace weights: multiple .bin/.pt shards without pytorch_model.bin.index.json under "
+            + modelDirectory);
+    }
+
     throw std::runtime_error(
-        "HuggingFace weights: multiple shards without model.safetensors.index.json under "
-        + modelDirectory);
+        "HuggingFace weights: no .safetensors or pytorch .bin under " + modelDirectory);
 }
 
 SafeTensors::File loadMappedWeights(
@@ -433,7 +500,12 @@ SafeTensors::File loadMappedWeights(
     auto shardFor = [&](const std::string& path) -> const SafeTensors::File& {
         auto it = loadedShards.find(path);
         if (it != loadedShards.end()) return it->second;
-        auto [ins, _] = loadedShards.emplace(path, SafeTensors::load(path));
+        SafeTensors::File loaded;
+        if (shardIndex.kind == WeightFileKind::SafeTensors)
+            loaded = SafeTensors::load(path);
+        else
+            loaded = PytorchStateDict::load(path);
+        auto [ins, _] = loadedShards.emplace(path, std::move(loaded));
         return ins->second;
     };
 
@@ -531,7 +603,8 @@ void saveDirectory(
     const Config& config,
     const SafeTensors::File& sentinelWeights,
     WeightLayoutFamily family,
-    const std::string& tokenizerSourceDirectory) {
+    const std::string& tokenizerSourceDirectory,
+    WeightExportFormat weightFormat) {
     if (modelDirectory.empty())
         throw std::invalid_argument("HuggingFace::saveDirectory empty modelDirectory");
 
@@ -544,7 +617,10 @@ void saveDirectory(
     saveConfig(root.string(), exportConfig);
 
     const SafeTensors::File hfWeights = remapSentinelWeightsToHf(sentinelWeights, exportConfig, family);
-    SafeTensors::save((root / "model.safetensors").string(), hfWeights);
+    if (weightFormat == WeightExportFormat::SafeTensors || weightFormat == WeightExportFormat::Both)
+        SafeTensors::save((root / "model.safetensors").string(), hfWeights);
+    if (weightFormat == WeightExportFormat::PytorchBin || weightFormat == WeightExportFormat::Both)
+        PytorchStateDict::save((root / "pytorch_model.bin").string(), hfWeights);
 
     if (!tokenizerSourceDirectory.empty()) {
         const fs::path tokRoot(tokenizerSourceDirectory);
