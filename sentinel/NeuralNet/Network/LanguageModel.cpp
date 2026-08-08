@@ -849,11 +849,16 @@ void LanguageModel::setCudaPreferSpulse(bool enabled) {
 }
 
 void LanguageModel::setCudaSpulseCoverage(SpulseCoverage coverage) {
-    if (coverage == SpulseCoverage::Full)
-        throw std::invalid_argument("LanguageModel::setCudaSpulseCoverage Full not implemented yet (use Hybrid)");
     if (this->device == nullptr) this->enableCuda();
     if (this->device == nullptr) return;
+    if (this->device->spulse.coverage == coverage) return;
     this->device->spulse.coverage = coverage;
+    // Full owns embed/norms/biases/head on device; hostLightweight (no device u) is Hybrid-only.
+    if (coverage == SpulseCoverage::Full)
+        this->device->spulse.hostLightweight = false;
+    this->device->trainStateReady = false;
+    if (this->deviceTrainEnabled)
+        this->device->ensureTrainState();
     std::cout << "LanguageModel::setCudaSpulseCoverage: " << CudaSpulse::coverageName(coverage) << '\n';
 }
 

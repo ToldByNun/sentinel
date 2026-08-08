@@ -49,7 +49,10 @@ public:
     void uploadFrom(const SpulseState& host);
 };
 
-/// <summary>device SPULSE state for hidden 2D weights in one block (per-tensor; no fuse memcpy)</summary>
+/// <summary>
+/// device SPULSE state for one block.
+/// Hybrid owns the 7 hidden 2D weights; Full also owns norms / FFN biases.
+/// </summary>
 class CudaTransformerBlockSpulseStates {
 public:
     CudaSpulseState queryWeight;
@@ -59,11 +62,18 @@ public:
     CudaSpulseState feedForwardGateWeight;
     CudaSpulseState feedForwardUpWeight;
     CudaSpulseState feedForwardDownWeight;
+    /// <summary>Full coverage only</summary>
+    CudaSpulseState attentionNormGamma;
+    CudaSpulseState feedForwardNormGamma;
+    CudaSpulseState feedForwardGateBias;
+    CudaSpulseState feedForwardUpBias;
+    CudaSpulseState feedForwardDownBias;
 
     void ensureFrom(
         const CudaTransformerBlock& block,
         SpulseMomentumStorage storage = SpulseMomentumStorage::Fp32,
-        int int8BlockSize = 256);
+        int int8BlockSize = 256,
+        bool includeAux = false);
     void free();
 };
 
@@ -199,14 +209,23 @@ public:
     void applyFusedHalfHostPieces(const std::vector<SpulseFusedHalfHostPiece>& pieces, float gradientScale) const;
 
     /// <summary>
-    /// Hybrid coverage: Q/K/V / attn-out / gate / up / down on device.
-    /// Adam still owns embed / norms / biases / head via the caller.
+    /// Hybrid (and Full): Q/K/V / attn-out / gate / up / down on device.
     /// </summary>
     void applyHybridBlockWeights(
         CudaTransformerBlock& block,
         CudaTransformerBlockGradients& blockGradients,
         CudaTransformerBlockSpulseStates& spulseStates,
         float gradientScale);
+
+    /// <summary>
+    /// Full coverage: block norms + FFN biases (Adam does not touch these).
+    /// </summary>
+    void applyFullBlockAuxWeights(
+        CudaTransformerBlock& block,
+        CudaTransformerBlockGradients& blockGradients,
+        CudaTransformerBlockSpulseStates& spulseStates,
+        float gradientScale,
+        bool useBias);
 
     /// <summary>host reference vs GPU parity + one finite step (also spot-checks Fp16 u)</summary>
     static void runSmokeDemo(int parameterRows = 64, int parameterCols = 48);

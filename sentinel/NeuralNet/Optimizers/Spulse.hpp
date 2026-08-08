@@ -7,7 +7,8 @@
 
 /// <summary>
 /// SPULSE coverage: which tensors the optimizer owns.
-/// Hybrid = hidden 2D block weights (v1). Full = all params (planned).
+/// Hybrid = hidden 2D block weights; Adam keeps embed / norms / biases / head.
+/// Full = all trainable params (Adam idle while SPULSE is enabled).
 /// </summary>
 enum class SpulseCoverage : std::int32_t {
     Hybrid = 0,

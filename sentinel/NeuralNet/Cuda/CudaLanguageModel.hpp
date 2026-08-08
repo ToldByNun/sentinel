@@ -53,8 +53,11 @@ public:
     /// <summary>release all device moment buffers</summary>
     void free();
 
-    /// <summary>release Adam moments for hidden 2D weights (Muon owns those)</summary>
+    /// <summary>release Adam moments for hidden 2D weights (Muon / SPULSE Hybrid owns those)</summary>
     void freeMuonManagedWeights();
+
+    /// <summary>release Adam moments for norms / FFN biases (SPULSE Full owns those)</summary>
+    void freeSpulseFullAuxWeights();
 };
 
 /// <summary>device Muon momentum for hidden 2D weights in one block (fused QKV / gateUp)</summary>
@@ -250,7 +253,10 @@ public:
     /// <summary>Muon on hidden 2D weights; Adam on embed/norms/biases/head</summary>
     bool preferMuon;
 
-    /// <summary>SPULSE on hidden 2D weights (Hybrid); Adam on embed/norms/biases/head. Mutex with Muon.</summary>
+    /// <summary>
+    /// SPULSE enabled. Hybrid: hidden 2D + Adam aux; Full: all params via SPULSE.
+    /// Mutex with Muon.
+    /// </summary>
     bool preferSpulse;
 
     /// <summary>log cudaMemGetInfo during packed train (4B probe)</summary>
@@ -323,6 +329,12 @@ public:
     std::vector<CudaTransformerBlockAdamStates> blockAdamStates;
     std::vector<CudaTransformerBlockMuonStates> blockMuonStates;
     std::vector<CudaTransformerBlockSpulseStates> blockSpulseStates;
+
+    /// <summary>SPULSE Full: device momentum for embed / final norm / untied head (+ bias)</summary>
+    CudaSpulseState tokenEmbeddingSpulseState;
+    CudaSpulseState finalNormGammaSpulseState;
+    CudaSpulseState projectionWeightSpulseState;
+    CudaSpulseState projectionBiasSpulseState;
 
     /// <summary>host Adam moments used when CudaAdam::preferCpuOffload (device states stay empty)</summary>
     AdamState hostTokenEmbeddingState;
