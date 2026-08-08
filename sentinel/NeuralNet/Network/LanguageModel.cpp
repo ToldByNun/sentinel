@@ -22,6 +22,7 @@
 #include "../Cuda/CudaMuon.hpp"
 #include "../Initializers/UniformInit.hpp"
 #include "../IO/SafeTensors.hpp"
+#include "../IO/SentinelModelConfig.hpp"
 #include "../IO/HuggingFaceConfig.hpp"
 #include "../IO/HuggingFaceWeights.hpp"
 #include "../Losses/CrossEntropy.hpp"
@@ -1854,6 +1855,78 @@ LanguageModel LanguageModel::loadHuggingFace(const std::string& modelDirectory, 
     return model;
 }
 
+LanguageModel LanguageModel::fromSentinelConfig(
+    const SentinelModel::Config& config,
+    const std::string& baseDirectory,
+    bool loadWeights) {
+    if (!SentinelModel::isSentinelModelFormat(config.format))
+        throw std::invalid_argument("LanguageModel::fromSentinelConfig format must be sentinel-model");
+    if (!(config.learningRate > 0.0f))
+        throw std::invalid_argument("LanguageModel::fromSentinelConfig learningRate must be > 0");
+
+    LanguageModel model(
+        config.vocabSize,
+        config.embeddingDim,
+        config.maxPosition,
+        Adam(config.learningRate),
+        config.blockCount,
+        config.headCount,
+        config.intermediateSize,
+        config.ropeTheta,
+        config.useBias,
+        config.kvHeadCount);
+
+    model.finalNorm.epsilon = config.rmsNormEps;
+    for (TransformerBlock& block : model.blocks) {
+        block.attentionNorm.epsilon = config.rmsNormEps;
+        block.feedForwardNorm.epsilon = config.rmsNormEps;
+    }
+
+    if (config.tieEmbedding != model.tieEmbeddingProjection)
+        model.setTieEmbeddingProjection(config.tieEmbedding);
+
+    if (loadWeights && !config.weights.empty()) {
+        const std::string weightsPath = SentinelModel::resolveWeightsPath(baseDirectory, config.weights);
+        if (weightsPath.empty())
+            throw std::runtime_error("LanguageModel::fromSentinelConfig empty resolved weights path");
+        model.loadCheckpoint(weightsPath);
+    }
+    return model;
+}
+
+LanguageModel LanguageModel::loadSentinelModel(const std::string& pathOrDirectory, bool loadWeights) {
+    if (pathOrDirectory.empty())
+        throw std::invalid_argument("LanguageModel::loadSentinelModel empty path");
+    const SentinelModel::Config config = SentinelModel::loadConfig(pathOrDirectory);
+    return fromSentinelConfig(config, SentinelModel::configDirectory(pathOrDirectory), loadWeights);
+}
+
+SentinelModel::Config LanguageModel::sentinelConfig() const {
+    if (this->blocks.empty())
+        throw std::logic_error("LanguageModel::sentinelConfig no blocks");
+
+    SentinelModel::Config config;
+    config.format = "sentinel-model";
+    config.vocabSize = this->tokenEmbedding.vocabSize();
+    config.embeddingDim = this->tokenEmbedding.embeddingDim();
+    config.maxPosition = this->maximumPositionCount;
+    config.blockCount = static_cast<int>(this->blocks.size());
+    config.headCount = this->blocks[0].attention.headCount;
+    config.kvHeadCount = this->kvHeadCount();
+    config.intermediateSize = this->intermediateSize();
+    config.ropeTheta = this->ropeTheta();
+    config.useBias = this->useBias();
+    config.tieEmbedding = this->tieEmbeddingProjection;
+    config.rmsNormEps = this->finalNorm.epsilon;
+    config.learningRate = this->optimizer.learningRate;
+    config.weights.clear();
+    return config;
+}
+
+void LanguageModel::saveSentinelConfig(const std::string& pathOrDirectory) const {
+    SentinelModel::saveConfig(pathOrDirectory, this->sentinelConfig());
+}
+
 void LanguageModel::saveHuggingFace(
     const std::string& modelDirectory,
     const std::string& modelType,
@@ -2327,6 +2400,72 @@ void LanguageModel::runHuggingFaceExportSmokeDemo() {
         "LanguageModel saveHuggingFace",
         "safe+bin+tokenizer=ok  reload=ok  binOnly=ok  logitsDiff=%.2e  reject=model_type",
         maxDiff);
+}
+
+void LanguageModel::runSentinelModelConfigSmokeDemo() {
+    namespace fs = std::filesystem;
+    SentinelModel::runConfigParseSmokeDemo();
+
+    const fs::path dir = fs::temp_directory_path() / "sentinel_model_build_smoke";
+    fs::create_directories(dir);
+
+    LanguageModel model(64, 32, 48, Adam(1.0e-3f), 2, 4, 0, 10000.0f, true, 2);
+    model.finalNorm.epsilon = 2.0e-5f;
+    for (TransformerBlock& block : model.blocks) {
+        block.attentionNorm.epsilon = 2.0e-5f;
+        block.feedForwardNorm.epsilon = 2.0e-5f;
+    }
+    model.setTieEmbeddingProjection(true);
+
+    const fs::path weightsPath = dir / "weights.safetensors";
+    model.saveSafeTensors(weightsPath.string());
+
+    SentinelModel::Config config = model.sentinelConfig();
+    if (std::fabs(config.rmsNormEps - 2.0e-5f) > 1.0e-12f)
+        throw std::runtime_error("LanguageModel::runSentinelModelConfigSmokeDemo rms_norm_eps snapshot mismatch");
+    if (config.kvHeadCount != 2 || config.learningRate != 1.0e-3f)
+        throw std::runtime_error("LanguageModel::runSentinelModelConfigSmokeDemo snapshot field mismatch");
+
+    config.weights = "weights.safetensors";
+    const fs::path jsonPath = dir / "model.json";
+    SentinelModel::saveConfig(jsonPath.string(), config);
+
+    LanguageModel loaded = LanguageModel::loadSentinelModel(dir.string());
+    if (loaded.tokenEmbedding.vocabSize() != 64 || loaded.tokenEmbedding.embeddingDim() != 32
+        || loaded.maximumPositionCount != 48 || loaded.blocks.size() != 2
+        || loaded.kvHeadCount() != 2 || !loaded.tieEmbeddingProjection
+        || std::fabs(loaded.finalNorm.epsilon - 2.0e-5f) > 1.0e-12f
+        || std::fabs(loaded.optimizer.learningRate - 1.0e-3f) > 1.0e-9f)
+        throw std::runtime_error("LanguageModel::runSentinelModelConfigSmokeDemo loadSentinelModel mismatch");
+
+    // Spot-check a weight tensor survived the config→safetensors path.
+    float maxDiff = 0.0f;
+    for (size_t i = 0; i < model.tokenEmbedding.weight.data.size(); ++i) {
+        maxDiff = (std::max)(
+            maxDiff,
+            std::fabs(model.tokenEmbedding.weight.data[i] - loaded.tokenEmbedding.weight.data[i]));
+    }
+    if (maxDiff > 1.0e-6f)
+        throw std::runtime_error("LanguageModel::runSentinelModelConfigSmokeDemo weight mismatch");
+
+    LanguageModel shell = LanguageModel::fromSentinelConfig(model.sentinelConfig(), "", false);
+    if (shell.blocks.size() != 2 || shell.useBias() != model.useBias())
+        throw std::runtime_error("LanguageModel::runSentinelModelConfigSmokeDemo fromSentinelConfig shell mismatch");
+
+    const fs::path yamlPath = dir / "model.yaml";
+    shell.saveSentinelConfig(yamlPath.string());
+    const SentinelModel::Config fromYaml = SentinelModel::loadConfig(yamlPath.string());
+    if (fromYaml.vocabSize != 64 || fromYaml.headCount != 4)
+        throw std::runtime_error("LanguageModel::runSentinelModelConfigSmokeDemo saveSentinelConfig YAML mismatch");
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    SmokeLog::result(
+        "LanguageModel sentinel-model config",
+        "json+yaml+weights=ok  vocab=%d embed=%d kv=%d",
+        loaded.tokenEmbedding.vocabSize(),
+        loaded.tokenEmbedding.embeddingDim(),
+        loaded.kvHeadCount());
 }
 
 void LanguageModel::runHuggingFaceImportSmokeDemo() {

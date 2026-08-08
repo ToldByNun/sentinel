@@ -214,6 +214,8 @@ Set offload / SBAO preferences **before** `enableCudaTrain()` when pack and chec
 | `loadCheckpoint(path)` | `.snlm` or routes `.safetensors` |
 | `saveSafeTensors` / `loadSafeTensors` | Weights + metadata (`IO/SafeTensors.hpp`); overload accepts in-memory `SafeTensors::File` |
 | `loadHuggingFace(dir, lr=3e-4)` | Static: parse HF `config.json`, size model, remap/load safetensors or modern `pytorch_model.bin`; see [huggingface.md](huggingface.md) |
+| `fromSentinelConfig` / `loadSentinelModel` | Static: native `sentinel-model` JSON/YAML (`IO/SentinelModelConfig.hpp`); optional `weights` |
+| `sentinelConfig` / `saveSentinelConfig` | Snapshot / write native model config |
 | `saveHuggingFace(dir, modelType="llama", tokenizerSource="", weightFormat="safetensors")` | Export Transformers-compatible dir (`config.json` + `model.safetensors` and/or `pytorch_model.bin`; optional tokenizer copy). `weightFormat`: `safetensors` \| `bin` \| `both` |
 
 Focused smoke: `SENTINEL_HF_ROUNDTRIP_SMOKE=1` — stub HF dir → import + `HfTokenizer` encode + 1 host train step + generate (finite gate).
@@ -237,6 +239,7 @@ Unset env `SENTINEL_PHASE_TRACE` when quoting throughput.
 | ------ | ---- |
 | `Optimizers/Adam.hpp` / `SGD.hpp` | Host optimizers |
 | `IO/SafeTensors.hpp` | Weight file format — **load** F32/BF16/F16 → host F32; **save** F32 |
+| `IO/SentinelModelConfig.hpp` | Native `format: "sentinel-model"` JSON/YAML (flat YAML); size + optional weights |
 | `IO/PytorchStateDict.hpp` | Modern torch ZIP state-dict — **load** F32/F16/BF16 → host F32; **save** F32 (no libtorch; zlib) |
 | `IO/HuggingFaceConfig.hpp` | Minimal `config.json` parse/serialize; allowlist `llama`/`mistral`/`qwen2`; rejects MoE / sliding-window / quantized |
 | `IO/HuggingFaceWeights.hpp` | HF↔Sentinel tensor remap + shard index (`loadMappedWeights` / `saveDirectory`); safetensors + `.bin`; first family: Llama/Mistral-like names |

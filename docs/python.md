@@ -173,6 +173,51 @@ Or load a HuggingFace causal-LM directory (allowlisted `model_type`: `llama` / `
 model = S.LanguageModel.load_huggingface("/path/to/hf_model", learning_rate=3e-4)
 ```
 
+Or size / load from a native **`sentinel-model`** JSON/YAML config (field names match safetensors metadata):
+
+```python
+model = S.LanguageModel.from_config("examples/configs/tiny.json")
+# dict / SentinelModelConfig also work:
+model = S.LanguageModel.from_config({
+    "format": "sentinel-model",
+    "vocab_size": 32000,
+    "embedding_dim": 768,
+    "max_position": 512,
+    "block_count": 12,
+    "head_count": 12,
+    "kv_head_count": 12,
+    "intermediate_size": 0,
+    "rope_theta": 10000,
+    "use_bias": True,
+    "tie_embedding": True,
+    "rms_norm_eps": 1e-5,
+    "learning_rate": 3e-4,
+    "weights": None,  # or "weights.safetensors" next to the config
+})
+model.save_sentinel_config("out/model.yaml")
+```
+
+### `SentinelModelConfig`
+
+| Field | Notes |
+| ----- | ----- |
+| `format` | Must be `"sentinel-model"` |
+| `vocab_size` / `embedding_dim` / `max_position` / `block_count` / `head_count` | Required |
+| `kv_head_count` | Optional; defaults to `head_count` (MHA) |
+| `intermediate_size` | `0` = legacy expand-4 SwiGLU |
+| `rope_theta` / `use_bias` / `tie_embedding` / `rms_norm_eps` / `learning_rate` | Optional (defaults match ctor) |
+| `weights` | `null`/empty = random init; else `.safetensors` / `.snlm` path (relative to config file) |
+
+| Method | Notes |
+| ------ | ----- |
+| `SentinelModelConfig.load(path)` | `model.json` / `.yaml` / `.yml` or directory |
+| `parse_json` / `parse_yaml` | From text |
+| `to_json` / `to_yaml` / `save` | Serialize |
+| `LanguageModel.from_config` / `load_sentinel_model` | Build (+ optional weights) |
+| `sentinel_config` / `save_sentinel_config` | Snapshot / write |
+
+YAML support is flat `key: value` only (no nested maps/lists). Smoke: `SENTINEL_MODEL_CONFIG_SMOKE=1`.
+
 ### Device setup
 
 Call **before** heavy train when using CUDA:
@@ -249,6 +294,8 @@ cont = model.generate(prompt_ids, new_token_count=32, temperature=0.9, top_k=20,
 | `load_safetensors` | `(path) -> None` | Architecture must already match |
 | `load_huggingface` | `(path, learning_rate=3e-4) -> LanguageModel` | Static: HF dir (`config.json` + safetensors) → sized model + weights; see [huggingface.md](huggingface.md) |
 | `save_huggingface` | `(path, model_type="llama", tokenizer_source_directory="", weight_format="safetensors") -> None` | Export Transformers-compatible dir (`config.json` + `model.safetensors` and/or `pytorch_model.bin`; optional tokenizer copy). `weight_format`: `"safetensors"` \| `"bin"` \| `"both"` |
+| `from_config` / `load_sentinel_model` | `(path\|dict\|SentinelModelConfig, …) -> LanguageModel` | Native `sentinel-model` JSON/YAML (+ optional weights) |
+| `sentinel_config` / `save_sentinel_config` | snapshot / write native config | |
 
 Rebuild a model with the **same** dims before `load_safetensors`. Tokenizer is separate (`BPETokenizer` / `HfTokenizer`).
 
