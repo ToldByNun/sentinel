@@ -10,6 +10,7 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- **HuggingFace Hub sources**: `loadHuggingFace` / `load_huggingface` and `HfTokenizer.load` accept a local directory, Hub repo id (`org/name` or `org/name@rev`), or `huggingface.co` / `hf.co` URL. Resolves via `HuggingFace::resolveModelDirectory` / Python `resolve_huggingface` into the **standard HF cache** (`hf` CLI or `huggingface_hub`; optional extra `sentinel-lm[hf]`). No Sentinel-specific cache. Smoke: `SENTINEL_HF_RESOLVE_SMOKE=1`.
 - **HuggingFace export**: `LanguageModel::saveHuggingFace` / Python `save_huggingface` writes a Transformers-compatible directory (`config.json` + F32 `model.safetensors` and/or `pytorch_model.bin` with Llama/Mistral/Qwen2-style keys). `weight_format`: `safetensors` \| `bin` \| `both`. Optional `tokenizer_source_directory` copies tokenizer files. Helpers: `HuggingFace::serializeConfigJson` / `saveConfig`, `remapSentinelWeightsToHf` / `saveDirectory`. Smoke: `SENTINEL_HF_EXPORT_SMOKE=1`.
 - **PyTorch `.bin` state-dict I/O** (no libtorch): `PytorchStateDict::load` / `save` for modern ZIP `torch.save` archives (F32 write; F32/F16/BF16 read → host F32). HF import falls back to `pytorch_model.bin` / index shards when safetensors is absent. Legacy non-zip pickle rejected. Smoke: `SENTINEL_PYTORCH_BIN_SMOKE=1`.
 - **SPULSE** optimizer (opt-in): dual-horizon energy-scaled momentum on hidden 2D weights + Adam on embed/norms/biases/head (`set_prefer_spulse` / `setCudaPreferSpulse`). Hybrid coverage v1; Full planned. Logic lives in `CudaSPULSE.*`. GPU-resident path keeps full `u` on device. **Host fused-half**: default keeps `u` on GPU, bakes `delta = lr·s·û` into the grad buffer before half D2H, then HostSGD-shaped host axpy (same PCIe volume as HostSGD). EMA momentum uses **Adam-style bias correction** (`û = u / (1-β^t)`) so cold-start steps match HostSGD magnitude. Kernels use **float4/half2** loads and fuse energy commit into the last grid block (no `<<<1,1>>>` launch). `hostLightweight` is a VRAM fallback (no device `u`). Device `u` storage selectable via `SpulseMomentumStorage` / `set_spulse_momentum_storage`: **Fp32** (default), **Fp16**, or **Int8** (absmax blocks) for VRAM experiments. Distinct from SBAO (policy). Harness: `runSpulseThroughputCompare` (GPU), `runSpulseHostQualityCompare` (HostSGD vs SPULSE-Host: tok/s **and** loss quality — speed without quality fails).
@@ -57,6 +58,7 @@ First library-oriented release surface.
 - CUDA GQA smoke: `SENTINEL_GQA_CUDA_SMOKE=1`.
 - LM `kv_head_count` smoke: `SENTINEL_KV_HEAD_COUNT_SMOKE=1`.
 - HF config parse smoke: `SENTINEL_HF_CONFIG_SMOKE=1`.
+- HF resolve smoke: `SENTINEL_HF_RESOLVE_SMOKE=1`.
 - HF weight-map smoke: `SENTINEL_HF_WEIGHT_MAP_SMOKE=1`.
 - HF import smoke: `SENTINEL_HF_IMPORT_SMOKE=1`.
 - HF tokenizer smoke: `SENTINEL_HF_TOKENIZER_SMOKE=1`.

@@ -6,6 +6,7 @@
 #include "NeuralNet/Data/LanguageModelDataset.hpp"
 #include "NeuralNet/Network/LanguageModel.hpp"
 #include "NeuralNet/Optimizers/Adam.hpp"
+#include "NeuralNet/IO/HuggingFaceResolve.hpp"
 #include "NeuralNet/Tokenizer/BPETokenizer.hpp"
 #include "NeuralNet/Tokenizer/HfTokenizer.hpp"
 
@@ -85,13 +86,19 @@ NB_MODULE(_core, m) {
         .def_prop_ro("unknown_token_id", &BPETokenizer::unknownTokenId)
         .def_prop_ro("is_trained", &BPETokenizer::isTrained);
 
+    m.def(
+        "resolve_huggingface",
+        &HuggingFace::resolveModelDirectory,
+        nb::arg("source"),
+        "Resolve a local path, Hub repo id (org/name[@rev]), or huggingface.co URL to a local model directory (uses the standard HF cache)");
+
     nb::class_<HuggingFace::Tokenizer>(m, "HfTokenizer")
         .def(nb::init<>())
         .def_static(
             "load",
             &HuggingFace::Tokenizer::load,
-            nb::arg("path"),
-            "Load HuggingFace tokenizer.json from a file or model directory")
+            nb::arg("source"),
+            "Load HuggingFace tokenizer.json from a local path, Hub repo id (org/name[@rev]), or HF URL")
         .def(
             "encode",
             &HuggingFace::Tokenizer::encode,
@@ -315,9 +322,9 @@ NB_MODULE(_core, m) {
         .def_static(
             "load_huggingface",
             &LanguageModel::loadHuggingFace,
-            nb::arg("path"),
+            nb::arg("source"),
             nb::arg("learning_rate") = 3e-4f,
-            "Build + load a causal LM from a HuggingFace model directory (config.json + safetensors or pytorch_model.bin)")
+            "Build + load a causal LM from a local HF directory, Hub repo id (org/name[@rev]), or huggingface.co URL")
         .def(
             "save_huggingface",
             &LanguageModel::saveHuggingFace,

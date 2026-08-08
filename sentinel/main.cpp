@@ -20,6 +20,7 @@
 #include "NeuralNet/IO/SafeTensors.hpp"
 #include "NeuralNet/IO/PytorchStateDict.hpp"
 #include "NeuralNet/IO/HuggingFaceConfig.hpp"
+#include "NeuralNet/IO/HuggingFaceResolve.hpp"
 #include "NeuralNet/IO/HuggingFaceWeights.hpp"
 #include "NeuralNet/Optimizers/Adam.hpp"
 #include "NeuralNet/Utils/SmokeLog.hpp"
@@ -125,6 +126,17 @@ int main() {
         return 0;
     }
     free(hfConfigSmokeEnv);
+    char* hfResolveSmokeEnv = nullptr;
+    size_t hfResolveSmokeLen = 0;
+    if (_dupenv_s(&hfResolveSmokeEnv, &hfResolveSmokeLen, "SENTINEL_HF_RESOLVE_SMOKE") == 0
+        && hfResolveSmokeEnv != nullptr
+        && hfResolveSmokeEnv[0] == '1'
+        && hfResolveSmokeEnv[1] == '\0') {
+        free(hfResolveSmokeEnv);
+        HuggingFace::runResolveSmokeDemo();
+        return 0;
+    }
+    free(hfResolveSmokeEnv);
     char* hfWeightSmokeEnv = nullptr;
     size_t hfWeightSmokeLen = 0;
     if (_dupenv_s(&hfWeightSmokeEnv, &hfWeightSmokeLen, "SENTINEL_HF_WEIGHT_MAP_SMOKE") == 0
@@ -242,6 +254,12 @@ int main() {
     if (const char* hfConfigSmoke = std::getenv("SENTINEL_HF_CONFIG_SMOKE")) {
         if (hfConfigSmoke[0] == '1' && hfConfigSmoke[1] == '\0') {
             HuggingFace::runConfigParseSmokeDemo();
+            return 0;
+        }
+    }
+    if (const char* hfResolveSmoke = std::getenv("SENTINEL_HF_RESOLVE_SMOKE")) {
+        if (hfResolveSmoke[0] == '1' && hfResolveSmoke[1] == '\0') {
+            HuggingFace::runResolveSmokeDemo();
             return 0;
         }
     }
@@ -742,6 +760,7 @@ int main() {
             LanguageModel::runBiasPolicySmokeDemo();
             LanguageModel::runKvHeadCountSmokeDemo();
             HuggingFace::runConfigParseSmokeDemo();
+            HuggingFace::runResolveSmokeDemo();
             HuggingFace::runWeightMapSmokeDemo();
             LanguageModel::runHuggingFaceImportSmokeDemo();
             LanguageModel::runHuggingFaceExportSmokeDemo();
