@@ -313,6 +313,8 @@ Requires `enable_cuda_train`. Unset `SENTINEL_PHASE_TRACE` when quoting tok/s.
 
 **Tiny CPU/GPU toy** — [`examples/python/train_tiny.py`](../examples/python/train_tiny.py)
 
+**From JSON/YAML config** — [`examples/python/train_from_config.py`](../examples/python/train_from_config.py) + [`examples/configs/`](../examples/configs/)
+
 **JSONL (in-memory)** — [`examples/python/train_jsonl.py`](../examples/python/train_jsonl.py)
 
 **HuggingFace fine-tune + export** — [`examples/python/finetune_hf.py`](../examples/python/finetune_hf.py) (details: [huggingface.md](huggingface.md))
