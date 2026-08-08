@@ -15,8 +15,13 @@ API details: [Python](python.md) · [C++](cpp.md). Example (next milestone): `ex
 ```python
 import sentinel as S
 
-model = S.LanguageModel.load_huggingface("/path/to/hf_model", learning_rate=3e-4)
-tok = S.HfTokenizer.load("/path/to/hf_model")
+# Any of: local directory, Hub repo id, or huggingface.co / hf.co URL
+# (Hub downloads use the standard HF cache — pip install 'sentinel-lm[hf]' / huggingface_hub)
+model = S.LanguageModel.load_huggingface("meta-llama/Llama-3.2-1B", learning_rate=3e-4)
+# model = S.LanguageModel.load_huggingface("/path/to/hf_model")
+# model = S.LanguageModel.load_huggingface("https://huggingface.co/meta-llama/Llama-3.2-1B")
+tok = S.HfTokenizer.load("meta-llama/Llama-3.2-1B")
+# optional: local_dir = S.resolve_huggingface("meta-llama/Llama-3.2-1B")
 
 ids = tok.encode("hello world", add_special_tokens=True)
 # Fine-tune: encode corpus → next-token pairs → model.train(...).
@@ -53,14 +58,17 @@ Expected directory contents (import **and** export):
 #include "NeuralNet/Network/LanguageModel.hpp"
 #include "NeuralNet/Tokenizer/HfTokenizer.hpp"
 
-LanguageModel model = LanguageModel::loadHuggingFace("/path/to/hf_model", 3e-4f);
-HuggingFace::Tokenizer tok = HuggingFace::Tokenizer::load("/path/to/hf_model");
+// Local path, Hub repo id (org/name or org/name@rev), or HF URL — same three forms as Python.
+LanguageModel model = LanguageModel::loadHuggingFace("meta-llama/Llama-3.2-1B", 3e-4f);
+HuggingFace::Tokenizer tok = HuggingFace::Tokenizer::load("meta-llama/Llama-3.2-1B");
 std::vector<int> ids = tok.encode("hello world", /*addSpecialTokens=*/true);
 
 model.saveHuggingFace("/path/to/hf_export", "llama", "/path/to/hf_model");
 ```
 
-Lower-level pieces (if you need them): `HuggingFace::loadConfig` / `saveConfig`, `HuggingFace::loadMappedWeights` / `saveDirectory` under `IO/`.
+Hub resolution needs the Hugging Face CLI (`hf` / `huggingface-cli`) or a Python with `huggingface_hub` on `PATH`. Gated repos use `HF_TOKEN` / `huggingface-cli login`. Downloads go to the **standard Hub cache** (`HF_HOME` / `~/.cache/huggingface`) — Sentinel does not keep a separate cache.
+
+Lower-level pieces: `HuggingFace::resolveModelDirectory` / `resolveTokenizerDirectory`, `loadConfig` / `saveConfig`, `loadMappedWeights` / `saveDirectory` under `IO/`.
 
 ---
 
@@ -164,6 +172,7 @@ With the `sentinel` demo binary:
 | Env | What |
 | --- | ---- |
 | `SENTINEL_HF_CONFIG_SMOKE=1` | `config.json` allowlist / rejects / serialize |
+| `SENTINEL_HF_RESOLVE_SMOKE=1` | local / Hub-id / URL parse (offline; no network) |
 | `SENTINEL_HF_WEIGHT_MAP_SMOKE=1` | shard remap + export remap |
 | `SENTINEL_HF_IMPORT_SMOKE=1` | `loadHuggingFace` |
 | `SENTINEL_HF_EXPORT_SMOKE=1` | `saveHuggingFace` → reload parity + tokenizer copy + `pytorch_model.bin` |
@@ -180,6 +189,7 @@ With the `sentinel` demo binary:
 | `LanguageModel::loadHuggingFace` | `LanguageModel.load_huggingface` |
 | `LanguageModel::saveHuggingFace` | `LanguageModel.save_huggingface` |
 | `HuggingFace::Tokenizer` (`Tokenizer/HfTokenizer.hpp`) | `HfTokenizer` |
+| `HuggingFace::resolveModelDirectory` | `resolve_huggingface` |
 | `HuggingFace::loadConfig` / `saveConfig` | (C++ only) |
 | `HuggingFace::loadMappedWeights` / `saveDirectory` | (C++ only) |
 | `PytorchStateDict::load` / `save` | (C++ only; used by HF import/export) |

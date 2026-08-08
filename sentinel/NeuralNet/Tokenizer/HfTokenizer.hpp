@@ -16,7 +16,10 @@ class Tokenizer {
 public:
     Tokenizer() = default;
 
-    /// <summary>load tokenizer.json from a file path or HF model directory</summary>
+    /// <summary>
+    /// load tokenizer.json from a local path, Hub repo id (org/name[@rev]), or HF URL.
+    /// Hub downloads use the standard HF cache (`hf` / huggingface_hub).
+    /// </summary>
     static Tokenizer load(const std::string& pathOrDirectory);
 
     /// <summary>text → token ids; optionally prepend BOS when configured</summary>

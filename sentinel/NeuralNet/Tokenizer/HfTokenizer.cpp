@@ -1,5 +1,6 @@
 #include "HfTokenizer.hpp"
 
+#include "../IO/HuggingFaceResolve.hpp"
 #include "../Utils/SmokeLog.hpp"
 
 #include <algorithm>
@@ -859,7 +860,8 @@ Tokenizer Tokenizer::load(const std::string& pathOrDirectory) {
     if (pathOrDirectory.empty())
         throw std::invalid_argument("HfTokenizer::load empty path");
 
-    std::string path = pathOrDirectory;
+    // Local dir / Hub repo id / HF URL → directory with tokenizer.json (Hub uses default HF cache).
+    std::string path = HuggingFace::resolveTokenizerDirectory(pathOrDirectory);
     if (pathLooksLikeDirectory(path)) {
         if (!path.empty() && path.back() != '/' && path.back() != '\\')
             path.push_back('/');

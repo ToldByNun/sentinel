@@ -23,6 +23,7 @@
 #include "../Initializers/UniformInit.hpp"
 #include "../IO/SafeTensors.hpp"
 #include "../IO/HuggingFaceConfig.hpp"
+#include "../IO/HuggingFaceResolve.hpp"
 #include "../IO/HuggingFaceWeights.hpp"
 #include "../Losses/CrossEntropy.hpp"
 #include "../Tokenizer/BPETokenizer.hpp"
@@ -1816,12 +1817,13 @@ void LanguageModel::loadSafeTensors(const SafeTensors::File& file) {
     }
 }
 
-LanguageModel LanguageModel::loadHuggingFace(const std::string& modelDirectory, float learningRate) {
-    if (modelDirectory.empty())
-        throw std::invalid_argument("LanguageModel::loadHuggingFace empty modelDirectory");
+LanguageModel LanguageModel::loadHuggingFace(const std::string& modelSource, float learningRate) {
+    if (modelSource.empty())
+        throw std::invalid_argument("LanguageModel::loadHuggingFace empty model source");
     if (!(learningRate > 0.0f))
         throw std::invalid_argument("LanguageModel::loadHuggingFace learningRate must be > 0");
 
+    const std::string modelDirectory = HuggingFace::resolveModelDirectory(modelSource);
     const HuggingFace::Config config = HuggingFace::loadConfig(modelDirectory);
     LanguageModel model(
         config.vocabSize,
