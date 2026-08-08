@@ -988,7 +988,8 @@ void CudaSpulseState::uploadFrom(const SpulseState& host) {
 void CudaTransformerBlockSpulseStates::ensureFrom(
     const CudaTransformerBlock& block,
     SpulseMomentumStorage storage,
-    int int8BlockSize
+    int int8BlockSize,
+    bool includeAux
 ) {
     this->queryWeight.ensure(block.attention.queryWeight, storage, int8BlockSize);
     this->keyWeight.ensure(block.attention.keyWeight, storage, int8BlockSize);
@@ -997,6 +998,29 @@ void CudaTransformerBlockSpulseStates::ensureFrom(
     this->feedForwardGateWeight.ensure(block.feedForward.gateWeight, storage, int8BlockSize);
     this->feedForwardUpWeight.ensure(block.feedForward.upWeight, storage, int8BlockSize);
     this->feedForwardDownWeight.ensure(block.feedForward.downWeight, storage, int8BlockSize);
+
+    if (includeAux) {
+        this->attentionNormGamma.ensure(block.attentionNorm.gamma, storage, int8BlockSize);
+        this->feedForwardNormGamma.ensure(block.feedForwardNorm.gamma, storage, int8BlockSize);
+        if (!block.feedForward.gateBias.empty())
+            this->feedForwardGateBias.ensure(block.feedForward.gateBias, storage, int8BlockSize);
+        else
+            this->feedForwardGateBias.free();
+        if (!block.feedForward.upBias.empty())
+            this->feedForwardUpBias.ensure(block.feedForward.upBias, storage, int8BlockSize);
+        else
+            this->feedForwardUpBias.free();
+        if (!block.feedForward.downBias.empty())
+            this->feedForwardDownBias.ensure(block.feedForward.downBias, storage, int8BlockSize);
+        else
+            this->feedForwardDownBias.free();
+    } else {
+        this->attentionNormGamma.free();
+        this->feedForwardNormGamma.free();
+        this->feedForwardGateBias.free();
+        this->feedForwardUpBias.free();
+        this->feedForwardDownBias.free();
+    }
 }
 
 void CudaTransformerBlockSpulseStates::free() {
@@ -1007,6 +1031,11 @@ void CudaTransformerBlockSpulseStates::free() {
     this->feedForwardGateWeight.free();
     this->feedForwardUpWeight.free();
     this->feedForwardDownWeight.free();
+    this->attentionNormGamma.free();
+    this->feedForwardNormGamma.free();
+    this->feedForwardGateBias.free();
+    this->feedForwardUpBias.free();
+    this->feedForwardDownBias.free();
 }
 
 void CudaTransformerBlockHostSpulseStates::clear() {
@@ -1630,6 +1659,47 @@ void CudaSpulse::applyHybridBlockWeights(
     this->update(block.feedForward.gateWeight, spulseStates.feedForwardGateWeight, blockGradients.feedForwardGateWeight, gradientScale);
     this->update(block.feedForward.upWeight, spulseStates.feedForwardUpWeight, blockGradients.feedForwardUpWeight, gradientScale);
     this->update(block.feedForward.downWeight, spulseStates.feedForwardDownWeight, blockGradients.feedForwardDownWeight, gradientScale);
+}
+
+void CudaSpulse::applyFullBlockAuxWeights(
+    CudaTransformerBlock& block,
+    CudaTransformerBlockGradients& blockGradients,
+    CudaTransformerBlockSpulseStates& spulseStates,
+    float gradientScale,
+    bool useBias
+) {
+    if (!this->ownsFullModelWeights()) return;
+
+    this->update(
+        block.attentionNorm.gamma,
+        spulseStates.attentionNormGamma,
+        blockGradients.attentionNormGamma,
+        gradientScale);
+    this->update(
+        block.feedForwardNorm.gamma,
+        spulseStates.feedForwardNormGamma,
+        blockGradients.feedForwardNormGamma,
+        gradientScale);
+    if (useBias) {
+        if (!block.feedForward.gateBias.empty())
+            this->update(
+                block.feedForward.gateBias,
+                spulseStates.feedForwardGateBias,
+                blockGradients.feedForwardGateBias,
+                gradientScale);
+        if (!block.feedForward.upBias.empty())
+            this->update(
+                block.feedForward.upBias,
+                spulseStates.feedForwardUpBias,
+                blockGradients.feedForwardUpBias,
+                gradientScale);
+        if (!block.feedForward.downBias.empty())
+            this->update(
+                block.feedForward.downBias,
+                spulseStates.feedForwardDownBias,
+                blockGradients.feedForwardDownBias,
+                gradientScale);
+    }
 }
 
 void CudaSpulse::runSmokeDemo(int parameterRows, int parameterCols) {

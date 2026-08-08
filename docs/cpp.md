@@ -74,11 +74,11 @@ Tiny binaries: [`examples/train_tiny.cpp`](../examples/train_tiny.cpp), [`exampl
 
 | Value | Meaning |
 | ----- | ------- |
-| `Hybrid` | Hidden 2D block weights (v1) |
-| `Full` | Planned |
+| `Hybrid` | Hidden 2D block weights; Adam keeps embed/norms/biases/head |
+| `Full` | All trainable params; Adam idle while SPULSE is on |
 
-SPULSE is an optimizer (`setCudaPreferSpulse`); SBAO remains residency policy.
-On the host fused-half path, SPULSE keeps momentum `u` on the GPU by default and downloads half-precision deltas (HostSGD-shaped host apply). Set `CudaSpulse::hostLightweight` only as a VRAM fallback (drops device `u`).
+SPULSE is an optimizer (`setCudaPreferSpulse` / `setCudaSpulseCoverage`); SBAO remains residency policy.
+On the host fused-half path, Hybrid keeps momentum `u` on the GPU by default and downloads half-precision deltas (HostSGD-shaped host apply); Full still applies norms/biases/embed/head on device. Set `CudaSpulse::hostLightweight` only as a Hybrid VRAM fallback (drops device `u`; forced off for Full).
 Device `u` storage: `SpulseMomentumStorage::{Fp32,Fp16,Int8}` via `setCudaSpulseMomentumStorage` (Fp16/Int8 trade parity for VRAM).
 
 ---
@@ -180,6 +180,7 @@ Header: `Network/LanguageModel.hpp`
 | `setCudaPreferMixedPrecision(bool)` | FP16 GEMMs + loss scale when large |
 | `setCudaPreferInt8AdamMoments(bool)` | Low-VRAM Adam |
 | `setCudaPreferMuon(bool)` / `setCudaMuonNsSteps(int)` | Hidden-weight Muon |
+| `setCudaPreferSpulse(bool)` / `setCudaSpulseCoverage(SpulseCoverage)` | SPULSE Hybrid or Full |
 | `setCudaPreferCpuAdamOffload(bool)` | Host Adam / fused-half Adam |
 | `setCudaPreferHostSgd(bool)` | Host SGD masters |
 | `setCudaPreferSbao(bool)` / `setCudaSbaoMode(SbaoMode)` / `cudaSbaoModeResolved()` | Unified policy |

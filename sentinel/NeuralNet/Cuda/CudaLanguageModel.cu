@@ -153,6 +153,10 @@ void CudaLanguageModel::setPreferMuon(bool enabled) {
             blockStates.free();
         this->blockSpulseStates.clear();
         this->hostBlockSpulseStates.clear();
+        this->tokenEmbeddingSpulseState.free();
+        this->finalNormGammaSpulseState.free();
+        this->projectionWeightSpulseState.free();
+        this->projectionBiasSpulseState.free();
     }
     if (!enabled) {
         for (CudaTransformerBlockMuonStates& blockStates : this->blockMuonStates)
@@ -176,6 +180,10 @@ void CudaLanguageModel::setPreferSpulse(bool enabled) {
             blockStates.free();
         this->blockSpulseStates.clear();
         this->hostBlockSpulseStates.clear();
+        this->tokenEmbeddingSpulseState.free();
+        this->finalNormGammaSpulseState.free();
+        this->projectionWeightSpulseState.free();
+        this->projectionBiasSpulseState.free();
     }
 }
 
@@ -814,6 +822,14 @@ void CudaTransformerBlockAdamStates::freeMuonManagedWeights() {
     this->feedForwardDownWeight.free();
 }
 
+void CudaTransformerBlockAdamStates::freeSpulseFullAuxWeights() {
+    this->attentionNormGamma.free();
+    this->feedForwardNormGamma.free();
+    this->feedForwardGateBias.free();
+    this->feedForwardUpBias.free();
+    this->feedForwardDownBias.free();
+}
+
 void CudaTransformerBlockMuonStates::ensureFrom(const CudaTransformerBlock& block) {
     if (block.attention.qkvWeight.empty() || block.feedForward.gateUpWeight.empty())
         throw std::logic_error("CudaTransformerBlockMuonStates::ensureFrom requires fused QKV/gateUp weights");
@@ -944,38 +960,81 @@ void CudaLanguageModel::ensureTrainState() {
     }
 
     if (this->preferSpulse) {
-        if (CudaAdam::preferFp16GpuWeights && CudaSbao::pipelineHostWeightUpdate()) {
-            if (this->spulse.hostLightweight) {
-                // Lite fallback: energy scalars on host; no device momentum.
-                for (CudaTransformerBlockSpulseStates& blockStates : this->blockSpulseStates)
-                    blockStates.free();
-                this->blockSpulseStates.clear();
-                this->hostBlockSpulseStates.resize(this->blocks.size());
-            } else {
-                // Default host path: keep u + energy on GPU; D2H half deltas; host SGD axpy.
-                this->hostBlockSpulseStates.clear();
-                this->blockSpulseStates.resize(this->blocks.size());
-                for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
-                    this->blockSpulseStates[blockIndex].ensureFrom(
-                        this->blocks[blockIndex],
-                        this->spulse.momentumStorage,
-                        this->spulse.int8BlockSize);
-                    if (blockIndex < this->blockAdamStates.size())
-                        this->blockAdamStates[blockIndex].freeMuonManagedWeights();
-                }
-            }
-        } else if (CudaAdam::preferFp16GpuWeights) {
-            throw std::logic_error("CudaLanguageModel::ensureTrainState SPULSE with FP16 GPU weights requires host pipeline update");
+        const bool fullCoverage = this->spulse.ownsFullModelWeights();
+        // Full needs device SPULSE states for every trainable tensor; lite (no device u) is Hybrid-only.
+        if (fullCoverage)
+            this->spulse.hostLightweight = false;
+        const bool useHostLite =
+            CudaAdam::preferFp16GpuWeights
+            && CudaSbao::pipelineHostWeightUpdate()
+            && this->spulse.hostLightweight
+            && !fullCoverage;
+        if (useHostLite) {
+            // Lite fallback: energy scalars on host; no device momentum.
+            for (CudaTransformerBlockSpulseStates& blockStates : this->blockSpulseStates)
+                blockStates.free();
+            this->blockSpulseStates.clear();
+            this->hostBlockSpulseStates.resize(this->blocks.size());
+            this->tokenEmbeddingSpulseState.free();
+            this->finalNormGammaSpulseState.free();
+            this->projectionWeightSpulseState.free();
+            this->projectionBiasSpulseState.free();
+        } else if (CudaAdam::preferFp16GpuWeights && !CudaSbao::pipelineHostWeightUpdate()) {
+            throw std::logic_error(
+                "CudaLanguageModel::ensureTrainState SPULSE with FP16 GPU weights requires host pipeline update");
         } else {
+            // GPU-u path (Hybrid default host / Full / pure GPU-resident).
             this->hostBlockSpulseStates.clear();
             this->blockSpulseStates.resize(this->blocks.size());
             for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
                 this->blockSpulseStates[blockIndex].ensureFrom(
                     this->blocks[blockIndex],
                     this->spulse.momentumStorage,
-                    this->spulse.int8BlockSize);
-                if (blockIndex < this->blockAdamStates.size())
+                    this->spulse.int8BlockSize,
+                    /*includeAux=*/fullCoverage);
+                if (blockIndex < this->blockAdamStates.size()) {
                     this->blockAdamStates[blockIndex].freeMuonManagedWeights();
+                    if (fullCoverage)
+                        this->blockAdamStates[blockIndex].freeSpulseFullAuxWeights();
+                }
+            }
+            if (fullCoverage) {
+                this->tokenEmbeddingSpulseState.ensure(
+                    this->tokenEmbeddingWeight,
+                    this->spulse.momentumStorage,
+                    this->spulse.int8BlockSize);
+                this->finalNormGammaSpulseState.ensure(
+                    this->finalNorm.gamma,
+                    this->spulse.momentumStorage,
+                    this->spulse.int8BlockSize);
+                if (!this->tieEmbeddingProjection)
+                    this->projectionWeightSpulseState.ensure(
+                        this->projectionWeight,
+                        this->spulse.momentumStorage,
+                        this->spulse.int8BlockSize);
+                else
+                    this->projectionWeightSpulseState.free();
+                if (this->useBias && !this->projectionBias.empty())
+                    this->projectionBiasSpulseState.ensure(
+                        this->projectionBias,
+                        this->spulse.momentumStorage,
+                        this->spulse.int8BlockSize);
+                else
+                    this->projectionBiasSpulseState.free();
+
+                this->tokenEmbeddingState.free();
+                this->finalNormGammaState.free();
+                this->projectionWeightState.free();
+                this->projectionBiasState.free();
+                this->hostTokenEmbeddingState = AdamState{};
+                this->hostFinalNormGammaState = AdamState{};
+                this->hostProjectionWeightState = AdamState{};
+                this->hostProjectionBiasState = AdamState{};
+            } else {
+                this->tokenEmbeddingSpulseState.free();
+                this->finalNormGammaSpulseState.free();
+                this->projectionWeightSpulseState.free();
+                this->projectionBiasSpulseState.free();
             }
         }
     } else {
@@ -983,6 +1042,10 @@ void CudaLanguageModel::ensureTrainState() {
             blockStates.free();
         this->blockSpulseStates.clear();
         this->hostBlockSpulseStates.clear();
+        this->tokenEmbeddingSpulseState.free();
+        this->finalNormGammaSpulseState.free();
+        this->projectionWeightSpulseState.free();
+        this->projectionBiasSpulseState.free();
     }
 
     this->finalNormGammaGradient.ensureSize(this->finalNorm.gamma.rows, this->finalNorm.gamma.cols);
@@ -991,7 +1054,7 @@ void CudaLanguageModel::ensureTrainState() {
         this->materializeFp16GpuWorkingWeights();
 
     if (this->preferSpulse && CudaAdam::preferFp16GpuWeights && CudaSbao::pipelineHostWeightUpdate()
-        && this->spulse.hostLightweight) {
+        && this->spulse.hostLightweight && !this->spulse.ownsFullModelWeights()) {
         if (this->hostBlockAdamStates.size() != this->blocks.size())
             this->hostBlockAdamStates.resize(this->blocks.size());
         this->hostBlockSpulseStates.resize(this->blocks.size());
@@ -1346,10 +1409,27 @@ size_t CudaLanguageModel::estimatePendingTrainStaticBytes() const {
         } else if (this->preferSpulse) {
             // SPULSE: 1× momentum (same bucket as muon moments for estimate)
             muonWeightBytes += hiddenWeightBytes;
-            adamWeightBytes += auxWeightBytes;
+            if (this->spulse.ownsFullModelWeights())
+                muonWeightBytes += auxWeightBytes;
+            else
+                adamWeightBytes += auxWeightBytes;
         } else {
             adamWeightBytes += hiddenWeightBytes + auxWeightBytes;
         }
+    }
+
+    if (this->preferSpulse && this->spulse.ownsFullModelWeights()) {
+        // Embed / final norm / head leave Adam and join the SPULSE momentum bucket.
+        const size_t modelAux =
+            matrixBytes(this->tokenEmbeddingWeight)
+            + matrixBytes(this->finalNorm.gamma)
+            + matrixBytes(this->projectionBias)
+            + (this->tieEmbeddingProjection ? 0ull : matrixBytes(this->projectionWeight));
+        if (adamWeightBytes >= modelAux)
+            adamWeightBytes -= modelAux;
+        else
+            adamWeightBytes = 0;
+        muonWeightBytes += modelAux;
     }
 
     size_t pending = 0;
@@ -2804,7 +2884,9 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
 
     auto applySpulseBlockWeights = [this, &gradients, effectiveGradientScale]() {
         if (!this->preferSpulse) return;
-        if (CudaSbao::pipelineHostWeightUpdate()) return; // already applied during bwd
+        // Host fused-half already applied Hybrid 2D weights during bwd (GPU-u delta or lite).
+        if (CudaSbao::pipelineHostWeightUpdate())
+            return;
         if (this->blockSpulseStates.size() != this->blocks.size())
             throw std::logic_error("CudaLanguageModel::applyGradients SPULSE states not ready");
         for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
@@ -2816,7 +2898,44 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
         }
     };
 
+    auto applySpulseFullAuxWeights = [this, &gradients, effectiveGradientScale]() {
+        if (!this->preferSpulse || !this->spulse.ownsFullModelWeights()) return;
+        if (this->blockSpulseStates.size() != this->blocks.size())
+            throw std::logic_error("CudaLanguageModel::applyGradients SPULSE Full block states not ready");
+        for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+            this->spulse.applyFullBlockAuxWeights(
+                this->blocks[blockIndex],
+                gradients.blocks[blockIndex],
+                this->blockSpulseStates[blockIndex],
+                effectiveGradientScale,
+                this->useBias);
+        }
+        this->spulse.update(
+            this->tokenEmbeddingWeight,
+            this->tokenEmbeddingSpulseState,
+            gradients.tokenEmbedding,
+            effectiveGradientScale);
+        this->spulse.update(
+            this->finalNorm.gamma,
+            this->finalNormGammaSpulseState,
+            gradients.finalNormGamma,
+            effectiveGradientScale);
+        if (!this->tieEmbeddingProjection)
+            this->spulse.update(
+                this->projectionWeight,
+                this->projectionWeightSpulseState,
+                gradients.projectionWeight,
+                effectiveGradientScale);
+        if (this->useBias && !this->projectionBias.empty())
+            this->spulse.update(
+                this->projectionBias,
+                this->projectionBiasSpulseState,
+                gradients.projectionBias,
+                effectiveGradientScale);
+    };
+
     const bool skipLargeAdam = this->preferMuon || this->preferSpulse;
+    const bool skipAllAdam = this->preferSpulse && this->spulse.ownsFullModelWeights();
 
     if (CudaAdam::preferCpuOffload) {
         if (this->hostBlockAdamStates.size() != this->blocks.size())
@@ -2845,11 +2964,13 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
             offloadItems.push_back(item);
         };
 
-        if (!this->tieEmbeddingProjection)
-            pushOffload(this->projectionWeight, this->hostProjectionWeightState, &gradients.projectionWeight, &this->hostProjectionWeightMaster, nullptr);
-        if (this->useBias)
-            pushOffload(this->projectionBias, this->hostProjectionBiasState, &gradients.projectionBias, &this->hostProjectionBiasMaster, nullptr);
-        pushOffload(this->finalNorm.gamma, this->hostFinalNormGammaState, &gradients.finalNormGamma, &this->hostFinalNormGammaMaster, nullptr);
+        if (!skipAllAdam) {
+            if (!this->tieEmbeddingProjection)
+                pushOffload(this->projectionWeight, this->hostProjectionWeightState, &gradients.projectionWeight, &this->hostProjectionWeightMaster, nullptr);
+            if (this->useBias)
+                pushOffload(this->projectionBias, this->hostProjectionBiasState, &gradients.projectionBias, &this->hostProjectionBiasMaster, nullptr);
+            pushOffload(this->finalNorm.gamma, this->hostFinalNormGammaState, &gradients.finalNormGamma, &this->hostFinalNormGammaMaster, nullptr);
+        }
 
         for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
             CudaTransformerBlock& block = this->blocks[blockIndex];
@@ -2867,21 +2988,26 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
                 pushOffload(block.feedForward.upWeight, blockStates.feedForwardUpWeight, hostLarge ? nullptr : &blockGradients.feedForwardUpWeight, &blockStates.feedForwardUpWeightMaster, hostLarge ? &blockStates.feedForwardUpWeightGrad : nullptr);
                 pushOffload(block.feedForward.downWeight, blockStates.feedForwardDownWeight, hostLarge ? nullptr : &blockGradients.feedForwardDownWeight, &blockStates.feedForwardDownWeightMaster, hostLarge ? &blockStates.feedForwardDownWeightGrad : nullptr);
             }
-            pushOffload(block.attentionNorm.gamma, blockStates.attentionNormGamma, &blockGradients.attentionNormGamma, &blockStates.attentionNormGammaMaster, nullptr);
-            pushOffload(block.feedForwardNorm.gamma, blockStates.feedForwardNormGamma, &blockGradients.feedForwardNormGamma, &blockStates.feedForwardNormGammaMaster, nullptr);
-            if (this->useBias) {
-                pushOffload(block.feedForward.gateBias, blockStates.feedForwardGateBias, &blockGradients.feedForwardGateBias, &blockStates.feedForwardGateBiasMaster, nullptr);
-                pushOffload(block.feedForward.upBias, blockStates.feedForwardUpBias, &blockGradients.feedForwardUpBias, &blockStates.feedForwardUpBiasMaster, nullptr);
-                pushOffload(block.feedForward.downBias, blockStates.feedForwardDownBias, &blockGradients.feedForwardDownBias, &blockStates.feedForwardDownBiasMaster, nullptr);
+            if (!skipAllAdam) {
+                pushOffload(block.attentionNorm.gamma, blockStates.attentionNormGamma, &blockGradients.attentionNormGamma, &blockStates.attentionNormGammaMaster, nullptr);
+                pushOffload(block.feedForwardNorm.gamma, blockStates.feedForwardNormGamma, &blockGradients.feedForwardNormGamma, &blockStates.feedForwardNormGammaMaster, nullptr);
+                if (this->useBias) {
+                    pushOffload(block.feedForward.gateBias, blockStates.feedForwardGateBias, &blockGradients.feedForwardGateBias, &blockStates.feedForwardGateBiasMaster, nullptr);
+                    pushOffload(block.feedForward.upBias, blockStates.feedForwardUpBias, &blockGradients.feedForwardUpBias, &blockStates.feedForwardUpBiasMaster, nullptr);
+                    pushOffload(block.feedForward.downBias, blockStates.feedForwardDownBias, &blockGradients.feedForwardDownBias, &blockStates.feedForwardDownBiasMaster, nullptr);
+                }
             }
         }
 
-        pushOffload(this->tokenEmbeddingWeight, this->hostTokenEmbeddingState, &gradients.tokenEmbedding, &this->hostTokenEmbeddingMaster, nullptr);
+        if (!skipAllAdam)
+            pushOffload(this->tokenEmbeddingWeight, this->hostTokenEmbeddingState, &gradients.tokenEmbedding, &this->hostTokenEmbeddingMaster, nullptr);
         applyMuonBlockWeights();
         applySpulseBlockWeights();
+        applySpulseFullAuxWeights();
         {
             const auto t0 = std::chrono::steady_clock::now();
-            this->adam.updateCpuOffloadedMany(offloadItems.data(), static_cast<int>(offloadItems.size()), effectiveGradientScale);
+            if (!offloadItems.empty())
+                this->adam.updateCpuOffloadedMany(offloadItems.data(), static_cast<int>(offloadItems.size()), effectiveGradientScale);
             if (this->preferTrainPhaseTrace)
                 this->trainPhaseTimers.sgdSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         }
@@ -2951,11 +3077,13 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
         items.push_back(item);
     };
 
-    if (!this->tieEmbeddingProjection)
-        pushItem(this->projectionWeight, this->projectionWeightState, gradients.projectionWeight);
-    if (this->useBias)
-        pushItem(this->projectionBias, this->projectionBiasState, gradients.projectionBias);
-    pushItem(this->finalNorm.gamma, this->finalNormGammaState, gradients.finalNormGamma);
+    if (!skipAllAdam) {
+        if (!this->tieEmbeddingProjection)
+            pushItem(this->projectionWeight, this->projectionWeightState, gradients.projectionWeight);
+        if (this->useBias)
+            pushItem(this->projectionBias, this->projectionBiasState, gradients.projectionBias);
+        pushItem(this->finalNorm.gamma, this->finalNormGammaState, gradients.finalNormGamma);
+    }
 
     for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
         CudaTransformerBlock& block = this->blocks[blockIndex];
@@ -2971,16 +3099,19 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
             pushItem(block.feedForward.upWeight, blockStates.feedForwardUpWeight, blockGradients.feedForwardUpWeight);
             pushItem(block.feedForward.downWeight, blockStates.feedForwardDownWeight, blockGradients.feedForwardDownWeight);
         }
-        pushItem(block.attentionNorm.gamma, blockStates.attentionNormGamma, blockGradients.attentionNormGamma);
-        pushItem(block.feedForwardNorm.gamma, blockStates.feedForwardNormGamma, blockGradients.feedForwardNormGamma);
-        if (this->useBias) {
-            pushItem(block.feedForward.gateBias, blockStates.feedForwardGateBias, blockGradients.feedForwardGateBias);
-            pushItem(block.feedForward.upBias, blockStates.feedForwardUpBias, blockGradients.feedForwardUpBias);
-            pushItem(block.feedForward.downBias, blockStates.feedForwardDownBias, blockGradients.feedForwardDownBias);
+        if (!skipAllAdam) {
+            pushItem(block.attentionNorm.gamma, blockStates.attentionNormGamma, blockGradients.attentionNormGamma);
+            pushItem(block.feedForwardNorm.gamma, blockStates.feedForwardNormGamma, blockGradients.feedForwardNormGamma);
+            if (this->useBias) {
+                pushItem(block.feedForward.gateBias, blockStates.feedForwardGateBias, blockGradients.feedForwardGateBias);
+                pushItem(block.feedForward.upBias, blockStates.feedForwardUpBias, blockGradients.feedForwardUpBias);
+                pushItem(block.feedForward.downBias, blockStates.feedForwardDownBias, blockGradients.feedForwardDownBias);
+            }
         }
     }
 
-    pushItem(this->tokenEmbeddingWeight, this->tokenEmbeddingState, gradients.tokenEmbedding);
+    if (!skipAllAdam)
+        pushItem(this->tokenEmbeddingWeight, this->tokenEmbeddingState, gradients.tokenEmbedding);
 
     // Overlap Muon/SPULSE with Adam aux updates on a second stream when useful.
     if (this->preferMuon) {
@@ -2992,7 +3123,9 @@ void CudaLanguageModel::applyGradients(CudaLanguageModelGradients& gradients, fl
         CudaMatmul::throwIfCudaFailed(cudaStreamSynchronize(this->trainStream), "applyGradients muon stream sync");
     } else if (this->preferSpulse) {
         applySpulseBlockWeights();
-        this->adam.updateMany(items.data(), static_cast<int>(items.size()), effectiveGradientScale);
+        applySpulseFullAuxWeights();
+        if (!items.empty())
+            this->adam.updateMany(items.data(), static_cast<int>(items.size()), effectiveGradientScale);
     } else {
         this->adam.updateMany(items.data(), static_cast<int>(items.size()), effectiveGradientScale);
     }
@@ -3625,21 +3758,7 @@ void CudaLanguageModel::runSpulseTrainSmokeDemo(int vocabularySize, int embeddin
     CudaAmp::useLossScaling = false;
     CudaAdam::preferInt8Moments = false;
 
-    LanguageModel host(vocabularySize, embeddingDim, sequenceLength, Adam(0.001f), blockCount, headCount);
-    auto device = std::make_unique<CudaLanguageModel>();
-    device->uploadFrom(host);
-    device->adam = CudaAdam(0.001f);
-    device->spulse.learningRate = 0.001f;
-    device->preferTrainGraph = false;
-    device->setPreferSpulse(true);
-    device->setActivationCheckpointMode(ActivationCheckpointMode::Selective);
-    for (CudaTransformerBlock& block : device->blocks)
-        block.attention.preferFlashAttention = false;
-
-    device->maxPackedColumns = (std::max)(sequenceLength * 8, sequenceLength);
-    device->ensureTrainState();
-
-    const int packBatchSize = (std::max)(1, (std::min)(4, device->maxPackedColumns / sequenceLength));
+    const int packBatchSize = (std::max)(1, (std::min)(4, (std::max)(sequenceLength * 8, sequenceLength) / sequenceLength));
     std::vector<LanguageModelExample> examples(static_cast<size_t>(packBatchSize));
     unsigned rng = 733u;
     for (int exampleIndex = 0; exampleIndex < packBatchSize; ++exampleIndex) {
@@ -3656,51 +3775,77 @@ void CudaLanguageModel::runSpulseTrainSmokeDemo(int vocabularySize, int embeddin
     for (int exampleIndex = 0; exampleIndex < packBatchSize; ++exampleIndex)
         packPointers[static_cast<size_t>(exampleIndex)] = &examples[static_cast<size_t>(exampleIndex)];
 
-    auto runLoss = [&]() -> float {
-        device->epochLossSum.ensureSize(1, 1);
-        CudaOps::zeroInPlace(device->epochLossSum);
-        device->trainGradients.zeroInPlace();
-        device->accumulatePackedExamples(packPointers.data(), packBatchSize, device->trainGradients);
-        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "SPULSE train smoke loss sync");
-        return device->epochLossSum.download().at(0, 0) / static_cast<float>(packBatchSize);
+    auto runCoverage = [&](SpulseCoverage coverage) {
+        LanguageModel host(vocabularySize, embeddingDim, sequenceLength, Adam(0.001f), blockCount, headCount);
+        auto device = std::make_unique<CudaLanguageModel>();
+        device->uploadFrom(host);
+        device->adam = CudaAdam(0.001f);
+        device->spulse.learningRate = 0.001f;
+        device->preferTrainGraph = false;
+        device->spulse.coverage = coverage;
+        device->setPreferSpulse(true);
+        device->setActivationCheckpointMode(ActivationCheckpointMode::Selective);
+        for (CudaTransformerBlock& block : device->blocks)
+            block.attention.preferFlashAttention = false;
+
+        device->maxPackedColumns = (std::max)(sequenceLength * 8, sequenceLength);
+        device->ensureTrainState();
+        if (coverage == SpulseCoverage::Full) {
+            if (device->tokenEmbeddingSpulseState.empty() || device->finalNormGammaSpulseState.empty())
+                throw std::runtime_error("CudaLanguageModel::runSpulseTrainSmokeDemo Full missing model SPULSE states");
+            if (device->blockSpulseStates.empty() || device->blockSpulseStates[0].attentionNormGamma.empty())
+                throw std::runtime_error("CudaLanguageModel::runSpulseTrainSmokeDemo Full missing block aux SPULSE states");
+        }
+
+        auto runLoss = [&]() -> float {
+            device->epochLossSum.ensureSize(1, 1);
+            CudaOps::zeroInPlace(device->epochLossSum);
+            device->trainGradients.zeroInPlace();
+            device->accumulatePackedExamples(packPointers.data(), packBatchSize, device->trainGradients);
+            CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "SPULSE train smoke loss sync");
+            return device->epochLossSum.download().at(0, 0) / static_cast<float>(packBatchSize);
+        };
+
+        const float lossBefore = runLoss();
+        const int stepCount = 8;
+        for (int step = 0; step < stepCount; ++step) {
+            device->trainGradients.zeroInPlace();
+            device->accumulatePackedExamples(packPointers.data(), packBatchSize, device->trainGradients);
+            device->applyGradients(device->trainGradients, 1.0f / static_cast<float>(packBatchSize));
+        }
+        CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "SPULSE train smoke step sync");
+        const float lossAfter = runLoss();
+
+        bool anyNonFinite = !std::isfinite(lossBefore) || !std::isfinite(lossAfter);
+        Matrix embed = device->tokenEmbeddingWeight.download();
+        for (float value : embed.data) {
+            if (!std::isfinite(value)) {
+                anyNonFinite = true;
+                break;
+            }
+        }
+
+        SmokeLog::result(
+            "SPULSE train",
+            "vocab=%d embed=%d seq=%d blocks=%d pack=%d steps=%d  loss0=%.4f lossN=%.4f  finite=%s spulse=%s coverage=%s",
+            vocabularySize,
+            embeddingDim,
+            sequenceLength,
+            blockCount,
+            packBatchSize,
+            stepCount,
+            lossBefore,
+            lossAfter,
+            anyNonFinite ? "no" : "yes",
+            device->preferSpulse ? "on" : "off",
+            CudaSpulse::coverageName(device->spulse.coverage));
+
+        if (anyNonFinite)
+            throw std::runtime_error("CudaLanguageModel::runSpulseTrainSmokeDemo non-finite loss/weights");
     };
 
-    const float lossBefore = runLoss();
-    const int stepCount = 8;
-    for (int step = 0; step < stepCount; ++step) {
-        device->trainGradients.zeroInPlace();
-        device->accumulatePackedExamples(packPointers.data(), packBatchSize, device->trainGradients);
-        device->applyGradients(device->trainGradients, 1.0f / static_cast<float>(packBatchSize));
-    }
-    CudaMatmul::throwIfCudaFailed(cudaDeviceSynchronize(), "SPULSE train smoke step sync");
-    const float lossAfter = runLoss();
-
-    bool anyNonFinite = !std::isfinite(lossBefore) || !std::isfinite(lossAfter);
-    Matrix embed = device->tokenEmbeddingWeight.download();
-    for (float value : embed.data) {
-        if (!std::isfinite(value)) {
-            anyNonFinite = true;
-            break;
-        }
-    }
-
-    SmokeLog::result(
-        "SPULSE train",
-        "vocab=%d embed=%d seq=%d blocks=%d pack=%d steps=%d  loss0=%.4f lossN=%.4f  finite=%s spulse=%s coverage=%s",
-        vocabularySize,
-        embeddingDim,
-        sequenceLength,
-        blockCount,
-        packBatchSize,
-        stepCount,
-        lossBefore,
-        lossAfter,
-        anyNonFinite ? "no" : "yes",
-        device->preferSpulse ? "on" : "off",
-        CudaSpulse::coverageName(device->spulse.coverage));
-
-    if (anyNonFinite)
-        throw std::runtime_error("CudaLanguageModel::runSpulseTrainSmokeDemo non-finite loss/weights");
+    runCoverage(SpulseCoverage::Hybrid);
+    runCoverage(SpulseCoverage::Full);
 
     CudaAmp::preferMixedPrecision = previousAmp;
     CudaAmp::useLossScaling = previousLossScale;

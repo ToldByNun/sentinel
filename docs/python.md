@@ -54,8 +54,8 @@ SPULSE tensor ownership (optimizer, not SBAO). Host fused-half keeps momentum on
 
 | Value | Meaning |
 | ----- | ------- |
-| `Hybrid` | Hidden 2D block weights (default v1); Adam keeps embed/norms/biases/head |
-| `Full` | Planned — all params (not implemented yet) |
+| `Hybrid` | Hidden 2D block weights (default); Adam keeps embed/norms/biases/head |
+| `Full` | All trainable params; Adam idle while SPULSE is on |
 
 ### `SpulseMomentumStorage`
 
@@ -194,8 +194,8 @@ if S.cuda_available():
 | `cuda_train_enabled` | `bool` (ro) | |
 | `set_prefer_flash_attention` | `(enabled: bool) -> None` | |
 | `set_prefer_muon` | `(enabled: bool) -> None` | Muon on hidden 2D weights |
-| `set_prefer_spulse` | `(enabled: bool) -> None` | SPULSE hybrid (mutex with Muon); GPU + host fused-half |
-| `set_spulse_coverage` | `(coverage: SpulseCoverage) -> None` | Hybrid only for now |
+| `set_prefer_spulse` | `(enabled: bool) -> None` | SPULSE (mutex with Muon); GPU + host fused-half |
+| `set_spulse_coverage` | `(coverage: SpulseCoverage) -> None` | `Hybrid` (default) or `Full` |
 | `set_spulse_momentum_beta` / `set_spulse_fast_beta` / `set_spulse_slow_beta` | `(beta: float) -> None` | SPULSE EMA knobs |
 | `set_spulse_scale_clip` | `(scale_min, scale_max) -> None` | Clip dual-horizon scale |
 | `set_spulse_momentum_storage` | `(SpulseMomentumStorage) -> None` | Device `u` as Fp32 / Fp16 / Int8 |
