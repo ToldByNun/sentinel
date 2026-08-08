@@ -135,6 +135,17 @@ int main() {
         return 0;
     }
     free(hfImportSmokeEnv);
+    char* hfExportSmokeEnv = nullptr;
+    size_t hfExportSmokeLen = 0;
+    if (_dupenv_s(&hfExportSmokeEnv, &hfExportSmokeLen, "SENTINEL_HF_EXPORT_SMOKE") == 0
+        && hfExportSmokeEnv != nullptr
+        && hfExportSmokeEnv[0] == '1'
+        && hfExportSmokeEnv[1] == '\0') {
+        free(hfExportSmokeEnv);
+        LanguageModel::runHuggingFaceExportSmokeDemo();
+        return 0;
+    }
+    free(hfExportSmokeEnv);
     char* hfTokSmokeEnv = nullptr;
     size_t hfTokSmokeLen = 0;
     if (_dupenv_s(&hfTokSmokeEnv, &hfTokSmokeLen, "SENTINEL_HF_TOKENIZER_SMOKE") == 0
@@ -225,6 +236,12 @@ int main() {
     if (const char* hfImportSmoke = std::getenv("SENTINEL_HF_IMPORT_SMOKE")) {
         if (hfImportSmoke[0] == '1' && hfImportSmoke[1] == '\0') {
             LanguageModel::runHuggingFaceImportSmokeDemo();
+            return 0;
+        }
+    }
+    if (const char* hfExportSmoke = std::getenv("SENTINEL_HF_EXPORT_SMOKE")) {
+        if (hfExportSmoke[0] == '1' && hfExportSmoke[1] == '\0') {
+            LanguageModel::runHuggingFaceExportSmokeDemo();
             return 0;
         }
     }
@@ -709,6 +726,7 @@ int main() {
             HuggingFace::runConfigParseSmokeDemo();
             HuggingFace::runWeightMapSmokeDemo();
             LanguageModel::runHuggingFaceImportSmokeDemo();
+            LanguageModel::runHuggingFaceExportSmokeDemo();
             HuggingFace::Tokenizer::runTokenizerSmokeDemo();
             LanguageModel::runHuggingFaceRoundtripSmokeDemo();
             LanguageModel::runStreamingSmokeDemo();

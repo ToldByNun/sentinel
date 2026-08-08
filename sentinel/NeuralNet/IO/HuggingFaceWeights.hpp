@@ -55,6 +55,27 @@ SafeTensors::File loadMappedWeights(
     const Config& config,
     WeightLayoutFamily family = WeightLayoutFamily::LlamaMistralLike);
 
+/// <summary>
+/// remap a Sentinel-named safetensors File to HF tensor names for the given config/layout.
+/// Omits optional tensors that are absent (tied lm_head, unused biases).
+/// </summary>
+SafeTensors::File remapSentinelWeightsToHf(
+    const SafeTensors::File& sentinelWeights,
+    const Config& config,
+    WeightLayoutFamily family = WeightLayoutFamily::LlamaMistralLike);
+
+/// <summary>
+/// write a Transformers-compatible model directory:
+/// config.json + model.safetensors (HF names, F32).
+/// Optionally copies tokenizer*.json / vocab/merges / generation_config.json from tokenizerSourceDirectory.
+/// </summary>
+void saveDirectory(
+    const std::string& modelDirectory,
+    const Config& config,
+    const SafeTensors::File& sentinelWeights,
+    WeightLayoutFamily family = WeightLayoutFamily::LlamaMistralLike,
+    const std::string& tokenizerSourceDirectory = "");
+
 /// <summary>tiny sharded HF stub → remap shapes/values + tie/bias policy</summary>
 void runWeightMapSmokeDemo();
 

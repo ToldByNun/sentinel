@@ -317,5 +317,12 @@ NB_MODULE(_core, m) {
             &LanguageModel::loadHuggingFace,
             nb::arg("path"),
             nb::arg("learning_rate") = 3e-4f,
-            "Build + load a causal LM from a HuggingFace model directory (config.json + safetensors)");
+            "Build + load a causal LM from a HuggingFace model directory (config.json + safetensors)")
+        .def(
+            "save_huggingface",
+            &LanguageModel::saveHuggingFace,
+            nb::arg("path"),
+            nb::arg("model_type") = "llama",
+            nb::arg("tokenizer_source_directory") = "",
+            "Export a Transformers-compatible directory (config.json + model.safetensors; optional tokenizer copy)");
 }
