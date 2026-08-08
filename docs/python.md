@@ -21,6 +21,7 @@ On Windows, importing `sentinel` adds CUDA `bin\x64` / `bin` via `os.add_dll_dir
 | Name | Type | Description |
 | ---- | ---- | ----------- |
 | `cuda_available()` | `() -> bool` | True if a CUDA device is usable |
+| `resolve_huggingface(source)` | `str -> str` | Local path / Hub id / HF URL → local model dir (standard HF cache) |
 | `__version__` | `str` | Binding / core version (e.g. `"0.1.0"`) |
 
 ---
