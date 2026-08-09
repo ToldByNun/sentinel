@@ -4,9 +4,12 @@
 
 #include <stdexcept>
 
+#include "bindings_data.hpp"
 #include "bindings_ops.hpp"
 
 #include "NeuralNet/Cuda/CudaMatmul.hpp"
+#include "NeuralNet/Data/LanguageModelChunkSource.hpp"
+#include "NeuralNet/Layers/Dense.hpp"
 #include "NeuralNet/Data/LanguageModelDataset.hpp"
 #include "NeuralNet/IO/SentinelModelConfig.hpp"
 #include "NeuralNet/Layers/Embedding.hpp"
@@ -53,8 +56,6 @@ NB_MODULE(_core, m) {
     m.attr("__version__") = "0.1.0";
     m.def("cuda_available", &CudaMatmul::isAvailable, "True if a CUDA device is usable");
 
-    registerSentinelOps(m);
-
     nb::enum_<ActivationCheckpointMode>(m, "ActivationCheckpointMode")
         .value("Off", ActivationCheckpointMode::Off)
         .value("Full", ActivationCheckpointMode::Full)
@@ -74,6 +75,9 @@ NB_MODULE(_core, m) {
         .value("Fp32", SpulseMomentumStorage::Fp32)
         .value("Fp16", SpulseMomentumStorage::Fp16)
         .value("Int8", SpulseMomentumStorage::Int8);
+
+    // Matrix / layers / optimizers (uses SpulseCoverage enums above).
+    registerSentinelOps(m);
 
     nb::class_<BPETokenizer>(m, "BPETokenizer")
         .def(nb::init<>())
@@ -265,6 +269,9 @@ NB_MODULE(_core, m) {
             nb::arg("index"),
             nb::rv_policy::reference_internal);
 
+    // Chunk source / safetensors / Sequential (needs Dataset + Dense/MeanPool from ops).
+    registerSentinelData(m);
+
     languageModel
         .def(
             "__init__",
@@ -437,6 +444,18 @@ NB_MODULE(_core, m) {
             "lm_head_weight",
             [](LanguageModel& model) -> Matrix& { return model.lmHeadWeight(); },
             nb::rv_policy::reference_internal)
+        .def_prop_ro(
+            "output_projection",
+            [](LanguageModel& model) -> Dense& { return model.outputProjection; },
+            nb::rv_policy::reference_internal)
+        .def_prop_ro(
+            "token_embedding_state",
+            [](LanguageModel& model) -> AdamState& { return model.tokenEmbeddingState; },
+            nb::rv_policy::reference_internal)
+        .def_prop_ro(
+            "final_norm_gamma_state",
+            [](LanguageModel& model) -> AdamState& { return model.finalNormGammaState; },
+            nb::rv_policy::reference_internal)
         .def(
             "block",
             [](LanguageModel& model, size_t index) -> TransformerBlock& {
@@ -501,6 +520,21 @@ NB_MODULE(_core, m) {
             nb::arg("log_every_epochs") = 1,
             nb::arg("test") = nb::none(),
             "Train on an in-memory dataset (optional test set)")
+        .def(
+            "train_chunks",
+            nb::overload_cast<LanguageModelChunkSource&, int, int, int, int>(&LanguageModel::train),
+            nb::arg("source"),
+            nb::arg("epochs") = 1,
+            nb::arg("log_every_epochs") = 1,
+            nb::arg("batch_size") = 32,
+            nb::arg("gradient_accumulation_steps") = 4,
+            "Streamed epoch train from a LanguageModelChunkSource")
+        .def(
+            "probe_cuda_train_step_profile",
+            &LanguageModel::probeCudaTrainStepProfile,
+            nb::arg("sequence_length"),
+            nb::arg("warmup_steps") = 2,
+            nb::arg("timed_steps") = 4)
         .def(
             "generate",
             &LanguageModel::generate,

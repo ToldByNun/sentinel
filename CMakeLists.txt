@@ -209,6 +209,7 @@ if(SENTINEL_BUILD_PYTHON)
     nanobind_add_module(sentinel_core NB_STATIC
         "${CMAKE_CURRENT_SOURCE_DIR}/python/sentinel/_core.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/python/sentinel/bindings_ops.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/python/sentinel/bindings_data.cpp"
     )
     target_include_directories(sentinel_core PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/python/sentinel"

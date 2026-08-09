@@ -130,7 +130,7 @@ Full reference:
 
 Treat those pages as the supported surface. The `sentinel` demo harness (`main.cpp`) is for smokes/benches — not the API contract.
 
-**Python (summary):** `cuda_available`, `BPETokenizer`, `HfTokenizer`, `LanguageModelDataset`, `LanguageModel` (train / generate / checkpoints / `from_config`), mid-level ops (`Matrix`, `Adam`, `Softmax`, `CrossEntropy`, `accumulate_example` / `train_step`), `SentinelModelConfig`, `ActivationCheckpointMode`, `SbaoMode`.
+**Python (summary):** high-level `LanguageModel` train/generate/I/O **plus** mid-level ops — `Matrix`, Attention/FFN/layers, `Adam`/`Spulse`, Softmax/CE, `accumulate_example`/`train_step`, `LanguageModelChunkSource`, SafeTensors helpers, `SentinelModelConfig`.
 
 **C++ (summary):** `LanguageModel.hpp` (incl. `loadHuggingFace` / `loadSentinelModel`), `LanguageModelDataset.hpp`, `LanguageModelChunkSource.hpp` (streaming), `BPETokenizer.hpp`, `HfTokenizer.hpp`, `SafeTensors.hpp`, `SentinelModelConfig.hpp`, `HuggingFaceConfig.hpp` / `HuggingFaceWeights.hpp`, `CudaSbao.hpp`.
 

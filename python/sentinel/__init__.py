@@ -1,8 +1,8 @@
 """Sentinel — C++/CUDA full-train causal LM (pip: sentinel-lm).
 
 High-level: LanguageModel.train / generate / checkpoints.
-Mid-level ops: Matrix, Softmax, CrossEntropy, Adam, Embedding, TransformerBlock,
-accumulate_example / apply_gradients for custom host train loops.
+Mid-level: Matrix, layers (Attention/FFN/…), losses, Adam/SGD/Spulse,
+accumulate_example / apply_gradients, streaming ChunkSource, SafeTensors I/O.
 
 API docs: https://github.com/ToldByNun/sentinel/blob/main/docs/python.md
 """
@@ -59,32 +59,60 @@ def _add_cuda_dll_directories() -> None:
 _add_cuda_dll_directories()
 
 from ._core import (  # noqa: E402
+    CLASS_COUNT,
+    CLASS_CPP,
+    CLASS_JSON,
+    CLASS_PYTHON,
     ActivationCheckpointMode,
     Adam,
     AdamState,
     BPETokenizer,
+    CausalSelfAttention,
+    CausalSelfAttentionCache,
+    ClassificationDataset,
+    ClassificationExample,
+    CorpusRow,
     CrossEntropy,
+    Dense,
+    Dropout,
     Embedding,
+    FeedForward,
+    FeedForwardCache,
     HfTokenizer,
+    JsonlLoader,
     LanguageModel,
     LanguageModelCache,
+    LanguageModelChunkSource,
     LanguageModelDataset,
     LanguageModelExample,
     LanguageModelGradients,
+    MSE,
     Matrix,
+    MeanPool,
+    MuonState,
     RMSNorm,
     RMSNormCache,
+    ReLU,
+    RotaryEmbedding,
     SGD,
+    SafeTensorsFile,
     SbaoMode,
     SentinelModelConfig,
+    Sequential,
     SiLU,
     Softmax,
+    Spulse,
     SpulseCoverage,
     SpulseMomentumStorage,
+    SpulseState,
     TransformerBlock,
     TransformerBlockCache,
     TransformerBlockGradients,
+    UniformInit,
     cuda_available,
+    is_safetensors_file,
+    safetensors_load,
+    safetensors_save,
     __version__ as _core_version,
 )
 
@@ -139,11 +167,7 @@ def _language_model_train_step(
     *,
     grad_scale: float | None = None,
 ) -> float:
-    """Host microstep: accumulate examples → mean grads → Adam.
-
-    Returns mean loss. Prefer this (or accumulate_example/apply_gradients) over
-    enable_cuda_train when writing custom loops; CUDA packed train stays on train().
-    """
+    """Host microstep: accumulate examples → mean grads → Adam."""
     if not examples:
         return 0.0
     grads = LanguageModelGradients.zeros_from(self)
@@ -160,32 +184,60 @@ def _language_model_train_step(
 LanguageModel.train_step = _language_model_train_step  # type: ignore[attr-defined]
 
 __all__ = [
+    "CLASS_COUNT",
+    "CLASS_CPP",
+    "CLASS_JSON",
+    "CLASS_PYTHON",
     "ActivationCheckpointMode",
     "Adam",
     "AdamState",
     "BPETokenizer",
+    "CausalSelfAttention",
+    "CausalSelfAttentionCache",
+    "ClassificationDataset",
+    "ClassificationExample",
+    "CorpusRow",
     "CrossEntropy",
+    "Dense",
+    "Dropout",
     "Embedding",
+    "FeedForward",
+    "FeedForwardCache",
     "HfTokenizer",
+    "JsonlLoader",
     "LanguageModel",
     "LanguageModelCache",
+    "LanguageModelChunkSource",
     "LanguageModelDataset",
     "LanguageModelExample",
     "LanguageModelGradients",
+    "MSE",
     "Matrix",
+    "MeanPool",
+    "MuonState",
     "RMSNorm",
     "RMSNormCache",
+    "ReLU",
+    "RotaryEmbedding",
     "SGD",
+    "SafeTensorsFile",
     "SbaoMode",
     "SentinelModelConfig",
+    "Sequential",
     "SiLU",
     "Softmax",
+    "Spulse",
     "SpulseCoverage",
     "SpulseMomentumStorage",
+    "SpulseState",
     "TransformerBlock",
     "TransformerBlockCache",
     "TransformerBlockGradients",
+    "UniformInit",
     "cuda_available",
+    "is_safetensors_file",
+    "safetensors_load",
+    "safetensors_save",
     "__version__",
 ]
 
