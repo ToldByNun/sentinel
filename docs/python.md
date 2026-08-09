@@ -8,7 +8,7 @@ S.cuda_available()
 S.__version__
 ```
 
-Bindings live in [`python/sentinel/_core.cpp`](../python/sentinel/_core.cpp) and are re-exported from [`python/sentinel/__init__.py`](../python/sentinel/__init__.py).
+Bindings live in [`python/sentinel/_core.cpp`](../python/sentinel/_core.cpp), [`bindings_ops.cpp`](../python/sentinel/bindings_ops.cpp), [`bindings_data.cpp`](../python/sentinel/bindings_data.cpp) and are re-exported from [`python/sentinel/__init__.py`](../python/sentinel/__init__.py).
 
 HuggingFace checkpoint import / export (supported `model_type`s, rejects, VRAM): **[huggingface.md](huggingface.md)**.
 
@@ -22,6 +22,7 @@ On Windows, importing `sentinel` adds CUDA `bin\x64` / `bin` via `os.add_dll_dir
 | ---- | ---- | ----------- |
 | `cuda_available()` | `() -> bool` | True if a CUDA device is usable |
 | `__version__` | `str` | Binding / core version (e.g. `"0.1.0"`) |
+| `Matrix`, `Adam`, `Softmax`, … | classes | Mid-level ops — see [below](#mid-level-ops-custom-loops) |
 
 ---
 
@@ -281,7 +282,9 @@ cont = model.generate(prompt_ids, new_token_count=32, temperature=0.9, top_k=20,
 | Method | Signature | Notes |
 | ------ | --------- | ----- |
 | `train` | `(train, epochs=1, batch_size=32, gradient_accumulation_steps=1, log_every_epochs=1, test=None) -> None` | In-memory only |
-| `average_loss` | `(dataset) -> float` | |
+| `forward` | `(token_ids) -> Matrix` | Logits `vocab × seq` |
+| `example_loss` / `average_loss` | example or dataset → `float` | |
+| `accumulate_example` / `apply_gradients` / `train_step` | Host custom-loop step API | See [Mid-level ops](#mid-level-ops-custom-loops) |
 | `generate` | `(prompt_token_ids, new_token_count, temperature=1.0, top_k=40, seed=42) -> list[int]` | Returns **new** tokens only (not the prompt). `temperature <= 0` → greedy |
 
 ### Checkpoints
@@ -315,6 +318,10 @@ Requires `enable_cuda_train`. Unset `SENTINEL_PHASE_TRACE` when quoting tok/s.
 
 **From JSON/YAML config** — [`examples/python/train_from_config.py`](../examples/python/train_from_config.py) + [`examples/configs/`](../examples/configs/)
 
+**Custom host train loop** — [`examples/python/custom_train_loop.py`](../examples/python/custom_train_loop.py)
+
+**Layer / SafeTensors / Spulse ops** — [`examples/python/custom_layers_demo.py`](../examples/python/custom_layers_demo.py)
+
 **JSONL (in-memory)** — [`examples/python/train_jsonl.py`](../examples/python/train_jsonl.py)
 
 **HuggingFace fine-tune + export** — [`examples/python/finetune_hf.py`](../examples/python/finetune_hf.py) (details: [huggingface.md](huggingface.md))
@@ -333,13 +340,56 @@ model.set_activation_checkpoint_mode(S.ActivationCheckpointMode.Full)
 
 ---
 
-## Not exposed in Python (v0.1)
+## Mid-level ops (custom loops)
+
+Optional surface for custom host training / research — high-level `train()` remains the default path.
+
+```python
+logits = model.forward(ids)                          # vocab x seq Matrix
+probs = S.Softmax.apply(logits)
+loss = S.CrossEntropy.loss(probs, target_one_hot)
+
+grads = S.LanguageModelGradients.zeros_from(model)
+cache = S.LanguageModelCache()
+loss = model.accumulate_example(example, grads, cache)  # host Softmax+CE bwd
+grads.scale_in_place(1.0 / batch_size)
+model.apply_gradients(grads)                         # host Adam step
+
+# or:
+loss = model.train_step(dataset.examples)            # Python helper
+
+attn = S.CausalSelfAttention.create(64, 4, 128, kv_head_count=2)
+ffn = S.FeedForward.create_with_intermediate_size(64, 96)
+opt = S.Spulse(learning_rate=1e-2)                   # host SPULSE
+file = S.safetensors_load("w.safetensors")
+```
+
+| Type / API | Notes |
+| ---------- | ----- |
+| `Matrix` | `shape`, `to_list` / `from_list`, `to_numpy` / `from_numpy` (numpy optional), `gemm` / `multiply` / … |
+| `Softmax` / `SiLU` / `ReLU` / `CrossEntropy` / `MSE` | Activations + losses |
+| `UniformInit` | Symmetry-breaking fills |
+| `Adam` / `AdamState` / `SGD` / `MuonState` | Host optimizers (`model.optimizer` is the LM Adam) |
+| `Spulse` / `SpulseState` | Host dual-horizon SPULSE (`CudaSpulse::updateHost`) |
+| `Embedding` / `Dense` / `Dropout` / `MeanPool` / `RMSNorm` / `RotaryEmbedding` | Layers |
+| `CausalSelfAttention` / `FeedForward` | Full fwd/bwd (+ caches); GQA / sparse knobs on attention |
+| `TransformerBlock` | Block + `.attention` / `.feed_forward` accessors |
+| `LanguageModelExample` / `LanguageModelGradients` / `LanguageModelCache` | Step buffers |
+| `forward` / `example_loss` / `accumulate_example` / `apply_gradients` / `train_step` | Custom LM loop |
+| `train_chunks` / `LanguageModelChunkSource` | Streaming JSONL epochs |
+| `safetensors_load` / `safetensors_save` / `SafeTensorsFile` | Low-level weight I/O |
+| `Sequential` / `ClassificationDataset` | Small classifier stack (embed→pool→MLP) |
+| `token_embedding` / `final_norm` / `block(i)` / `lm_head_weight` / `output_projection` | Inspect / mutate weights |
+
+`accumulate_example` / `apply_gradients` / `train_step` / host `Spulse.update` are **host** paths. Packed CUDA train stays on `enable_cuda_train` + `train()`. `enable_cuda()` still accelerates `forward` / `generate`.
+
+Examples: [`custom_train_loop.py`](../examples/python/custom_train_loop.py), [`custom_layers_demo.py`](../examples/python/custom_layers_demo.py).
+
+## Not exposed in Python (yet)
 
 | C++ | Status |
 | --- | ------ |
-| `LanguageModelChunkSource` / streaming train | C++ only (unless you added bindings) |
-| `forward` → logits `Matrix` | C++ only |
-| `setCudaPreferMixedPrecision`, `setCudaLogitChunkRows`, `setCudaMuonNsSteps`, `setTieEmbeddingProjection` | C++ only |
-| `probeCudaTrainStepProfile` | C++ only |
+| Direct `CudaMatrix` / device Muon/Adam objects | Prefer host `Matrix` + high-level CUDA train |
+| Arrow chunk reader | C++ only |
 
 Tokenizer I/O (`.sbpe`) is exposed — see `BPETokenizer` above.
