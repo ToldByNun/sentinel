@@ -25,7 +25,7 @@ python examples/python/train_tiny.py
 | Use | Avoid treating as API |
 | --- | --------------------- |
 | `NeuralNet/Network/LanguageModel.hpp` + Data/Tokenizer/IO headers | One-off flags inside `sentinel/main.cpp` |
-| `python/sentinel/` + bindings in `python/sentinel/_core.cpp` | Ad-hoc probe scripts unless documented |
+| `python/sentinel/` + `_core.cpp` / `bindings_ops.cpp` / `bindings_data.cpp` | Ad-hoc probe scripts unless documented |
 
 If you add a user-facing knob, expose it on `LanguageModel` (and Python if it belongs in v0.1) and mention it in the README API table.
 
