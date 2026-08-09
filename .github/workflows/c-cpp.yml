@@ -6,7 +6,7 @@ on:
     branches: [ "main", "master" ]
 
 jobs:
-  build:
+  build-and-test:
     strategy:
       fail-fast: false
       matrix:
@@ -16,12 +16,17 @@ jobs:
           - os: windows-2022
             name: Windows
     runs-on: ${{ matrix.os }}
-    name: Build (${{ matrix.name }})
-    timeout-minutes: 60
+    name: Build & Test (${{ matrix.name }})
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Setup CMake
         uses: jwlawson/actions-setup-cmake@v2
@@ -32,18 +37,25 @@ jobs:
         uses: seanmiddleditch/gha-setup-ninja@v5
 
       # Linux: toolkit via apt (matches repo CUDA 13.x floor).
-      - name: Install CUDA 13 (Linux)
+      - name: Install CUDA + deps (Linux)
         if: runner.os == 'Linux'
         shell: bash
         run: |
           wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update
-          sudo apt-get install -y cuda-nvcc-13-0 cuda-cudart-dev-13-0 libcublas-dev-13-0
+          sudo apt-get install -y \
+            cuda-nvcc-13-0 \
+            cuda-cudart-dev-13-0 \
+            libcublas-dev-13-0 \
+            libomp-dev \
+            g++ \
+            git
           echo "/usr/local/cuda-13.0/bin" >> "$GITHUB_PATH"
+          echo "/usr/local/cuda-13.0/lib64" >> "$GITHUB_PATH"
           echo "CUDA_PATH=/usr/local/cuda-13.0" >> "$GITHUB_ENV"
           echo "CUDA_HOME=/usr/local/cuda-13.0" >> "$GITHUB_ENV"
-          # Symlink expected by many tools
+          echo "LD_LIBRARY_PATH=/usr/local/cuda-13.0/lib64:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
           sudo ln -sfn /usr/local/cuda-13.0 /usr/local/cuda
 
       # Windows: MSVC first so nvcc can locate cl.exe.
@@ -79,6 +91,9 @@ jobs:
           if (-not $cuda) { throw "CUDA toolkit not found after install" }
           Write-Host "Using CUDA_PATH=$cuda"
           "$cuda\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          if (Test-Path "$cuda\bin\x64") {
+            "$cuda\bin\x64" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          }
           "CUDA_PATH=$cuda" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "CUDA_HOME=$cuda" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
@@ -88,6 +103,7 @@ jobs:
           cmake --version
           ninja --version
           nvcc --version
+          python --version
           if ($env:OS -match "Windows") {
             Get-Command cl | Format-List
             Get-Command nvcc | Format-List
@@ -99,7 +115,10 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DSENTINEL_CUDA_ARCHITECTURES=75
+            -DSENTINEL_CUDA_ARCHITECTURES=75 \
+            -DSENTINEL_BUILD_DEMO=ON \
+            -DSENTINEL_BUILD_EXAMPLES=ON \
+            -DSENTINEL_BUILD_PYTHON=OFF
 
       - name: Configure (Windows)
         if: runner.os == 'Windows'
@@ -109,6 +128,9 @@ jobs:
           cmake -S . -B build -G Ninja
           -DCMAKE_BUILD_TYPE=Release
           -DSENTINEL_CUDA_ARCHITECTURES=75
+          -DSENTINEL_BUILD_DEMO=ON
+          -DSENTINEL_BUILD_EXAMPLES=ON
+          -DSENTINEL_BUILD_PYTHON=OFF
           -DCMAKE_C_COMPILER=cl
           -DCMAKE_CXX_COMPILER=cl
           -DCMAKE_CUDA_HOST_COMPILER=cl
@@ -117,14 +139,90 @@ jobs:
         shell: pwsh
         run: cmake --build build --parallel --config Release
 
-      # - name: Run tiny examples
-      #  shell: pwsh
-      #  working-directory: build/bin
-      #  run: |
-      #    Get-ChildItem
-      #    $train = if (Test-Path "./sentinel_train_tiny.exe") { "./sentinel_train_tiny.exe" } else { "./sentinel_train_tiny" }
-      #    $gen   = if (Test-Path "./sentinel_generate.exe")   { "./sentinel_generate.exe" }   else { "./sentinel_generate" }
-      #    & $train tiny_ci.snlm
-      #    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      #    & $gen tiny_ci.snlm "the cat"
-      #    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run C++ tiny examples
+        shell: pwsh
+        working-directory: build/bin
+        run: |
+          Get-ChildItem
+          $train = if (Test-Path "./sentinel_train_tiny.exe") { "./sentinel_train_tiny.exe" } else { "./sentinel_train_tiny" }
+          $gen   = if (Test-Path "./sentinel_generate.exe")   { "./sentinel_generate.exe" }   else { "./sentinel_generate" }
+          & $train tiny_ci.snlm
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $gen tiny_ci.snlm "the cat"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run host smoke demos
+        shell: pwsh
+        working-directory: build/bin
+        run: |
+          $exe = if (Test-Path "./sentinel.exe") { "./sentinel.exe" } else { "./sentinel" }
+          # Host-only gates (no GPU on GHA). CUDA GQA is skipped intentionally.
+          $smokes = @(
+            "SENTINEL_SAFETENSORS_HALF_SMOKE",
+            "SENTINEL_PYTORCH_BIN_SMOKE",
+            "SENTINEL_INTERMEDIATE_SIZE_SMOKE",
+            "SENTINEL_ROPE_THETA_SMOKE",
+            "SENTINEL_BIAS_POLICY_SMOKE",
+            "SENTINEL_KV_HEAD_COUNT_SMOKE",
+            "SENTINEL_GQA_HOST_SMOKE",
+            "SENTINEL_MODEL_CONFIG_SMOKE",
+            "SENTINEL_HF_CONFIG_SMOKE",
+            "SENTINEL_HF_WEIGHT_MAP_SMOKE",
+            "SENTINEL_HF_IMPORT_SMOKE",
+            "SENTINEL_HF_EXPORT_SMOKE",
+            "SENTINEL_HF_TOKENIZER_SMOKE",
+            "SENTINEL_HF_ROUNDTRIP_SMOKE"
+          )
+          foreach ($name in $smokes) {
+            Write-Host "=== $name ==="
+            Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+            Set-Item -Path "Env:$name" -Value "1"
+            try {
+              & $exe
+              if ($LASTEXITCODE -ne 0) {
+                throw "$name failed with exit code $LASTEXITCODE"
+              }
+            } finally {
+              Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+            }
+          }
+
+      - name: pip install + import
+        shell: pwsh
+        env:
+          CMAKE_GENERATOR: Ninja
+          CMAKE_BUILD_PARALLEL_LEVEL: "4"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install scikit-build-core nanobind
+          if ($env:OS -match "Windows") {
+            python -m pip install . `
+              --no-build-isolation `
+              -C cmake.define.SENTINEL_CUDA_ARCHITECTURES=75 `
+              -C cmake.define.CMAKE_C_COMPILER=cl `
+              -C cmake.define.CMAKE_CXX_COMPILER=cl `
+              -C cmake.define.CMAKE_CUDA_HOST_COMPILER=cl
+          } else {
+            python -m pip install . `
+              --no-build-isolation `
+              -C cmake.define.SENTINEL_CUDA_ARCHITECTURES=75
+          }
+          python -c "import sentinel as S; print('import', S.__version__, 'cuda', S.cuda_available())"
+
+      - name: Python host smoke
+        shell: pwsh
+        run: |
+          python examples/python/ci_host_smoke.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python examples/python/train_tiny.py tiny_py_ci.snlm
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python examples/python/generate.py tiny_py_ci.snlm "the cat"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python examples/python/train_from_config.py --config examples/configs/tiny.json --out tiny_cfg_ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python examples/python/custom_train_loop.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python examples/python/custom_layers_demo.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python examples/python/finetune_hf.py --demo --out hf_demo_ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

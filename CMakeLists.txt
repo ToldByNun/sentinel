@@ -40,8 +40,35 @@ endif()
 find_package(CUDAToolkit REQUIRED)
 find_package(OpenMP)
 find_package(Threads REQUIRED)
-find_package(ZLIB REQUIRED)
 include(GNUInstallDirs)
+
+# Bundle a static zlib so Windows wheels/exes do not need zlib1.dll on PATH.
+# Override with -DSENTINEL_SYSTEM_ZLIB=ON to use find_package(ZLIB) instead.
+option(SENTINEL_SYSTEM_ZLIB "Use system/find_package zlib instead of bundled static zlib" OFF)
+if(SENTINEL_SYSTEM_ZLIB)
+    find_package(ZLIB REQUIRED)
+    set(SENTINEL_ZLIB_TARGET ZLIB::ZLIB)
+else()
+    include(FetchContent)
+    FetchContent_Declare(
+        sentinel_zlib
+        GIT_REPOSITORY https://github.com/madler/zlib.git
+        GIT_TAG v1.3.1
+        GIT_SHALLOW TRUE
+    )
+    set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(sentinel_zlib)
+    if(TARGET zlibstatic)
+        set(SENTINEL_ZLIB_TARGET zlibstatic)
+    elseif(TARGET zlib)
+        set(SENTINEL_ZLIB_TARGET zlib)
+    else()
+        message(FATAL_ERROR "Bundled zlib did not create zlibstatic/zlib target")
+    endif()
+    # Keep bundled zlib out of the default 'all' install/export surface.
+    set_target_properties(${SENTINEL_ZLIB_TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
 
 set(SENTINEL_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/sentinel")
 
@@ -135,13 +162,19 @@ target_compile_definitions(sentinel PUBLIC
 )
 
 # CUDA + host deps are PUBLIC so static consumers pick them up via Sentinel::sentinel.
+# Bundled zlib is BUILD_INTERFACE-only so install(EXPORT) does not require exporting
+# zlibstatic; final build-tree link lines (exe / Python module) still pull it in.
 target_link_libraries(sentinel PUBLIC
     CUDA::cudart_static
     CUDA::cublasLt
     CUDA::cublas
     Threads::Threads
-    ZLIB::ZLIB
 )
+if(SENTINEL_SYSTEM_ZLIB)
+    target_link_libraries(sentinel PUBLIC ZLIB::ZLIB)
+else()
+    target_link_libraries(sentinel PRIVATE $<BUILD_INTERFACE:${SENTINEL_ZLIB_TARGET}>)
+endif()
 
 if(UNIX AND NOT APPLE)
     target_link_libraries(sentinel PUBLIC ${CMAKE_DL_LIBS} rt)

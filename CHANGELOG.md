@@ -10,7 +10,15 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- `LanguageModel::generate` now returns **newly sampled tokens only** (was prompt+continuation); matches docs/examples and fixes double-prompt decode in callers.
+- Python `SentinelModelConfig.save(path)` binding had swapped args vs `SentinelModel::saveConfig(path, config)` (broke `train_from_config.py`).
+- Linux build: `PytorchStateDict.cpp` missing `#include <variant>` and GCC most-vexing-parse on `Value(std::monostate)` (broke CI compile).
+- Bundle static **zlib** via FetchContent (default) so Windows wheels/imports do not need `zlib1.dll`; opt out with `-DSENTINEL_SYSTEM_ZLIB=ON`.
 - CUDA packed train: epoch shuffle + **window-local** length packing (was global short→long curriculum) and Adam-step pack caps so effective batch matches `batch×accum`. SERA harness default LR `3e-4`, batch `32` (was `1e-3` / `64`) for stable descending train/test loss.
+
+### CI
+
+- Expand [`.github/workflows/c-cpp.yml`](.github/workflows/c-cpp.yml) beyond compile-only: C++ `train_tiny`/`generate`, all host `SENTINEL_*_SMOKE` gates, `pip install` + import, and Python host examples (`ci_host_smoke.py`, train/generate/config/custom/HF demo).
 
 ### Added
 

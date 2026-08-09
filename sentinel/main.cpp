@@ -1273,19 +1273,14 @@ int main() {
             const std::vector<int>& fullPrompt = promptChunk.examples[0].inputTokenIds;
             const int promptLen = (std::min)(generatePromptTokens, static_cast<int>(fullPrompt.size()));
             std::vector<int> prompt(fullPrompt.begin(), fullPrompt.begin() + promptLen);
+            // generate() returns newly sampled tokens only (not the prompt).
             const std::vector<int> greedy = model.generate(prompt, generateNewTokens, 0.0f, 0, 7u);
             const std::vector<int> sampled = model.generate(prompt, generateNewTokens, 0.8f, 40, 7u);
 
-            // continuation-only decode for README-friendly samples
-            auto continuation = [&tokenizer](const std::vector<int>& full, size_t promptSize) -> std::string {
-                if (full.size() <= promptSize) return "";
-                return tokenizer.decode(std::vector<int>(full.begin() + static_cast<std::ptrdiff_t>(promptSize), full.end()));
-            };
-
             SmokeLog::section("generate");
             std::cout << "  prompt:  " << truncatePreview(tokenizer.decode(prompt), 240) << '\n';
-            std::cout << "  greedy:  " << truncatePreview(continuation(greedy, prompt.size()), 400) << '\n';
-            std::cout << "  sample:  " << truncatePreview(continuation(sampled, prompt.size()), 400) << '\n';
+            std::cout << "  greedy:  " << truncatePreview(tokenizer.decode(greedy), 400) << '\n';
+            std::cout << "  sample:  " << truncatePreview(tokenizer.decode(sampled), 400) << '\n';
 
             SmokeLog::result(
                 "scale-100M",

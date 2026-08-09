@@ -15,6 +15,7 @@ API reference: [docs/python.md](../docs/python.md) · [docs/cpp.md](../docs/cpp.
 | [`python/generate.py`](python/generate.py) | Load checkpoint (or train toy) → sample |
 | [`python/train_jsonl.py`](python/train_jsonl.py) | Load JSONL texts → train → save weights |
 | [`python/finetune_hf.py`](python/finetune_hf.py) | HF import → JSONL fine-tune → `save_huggingface` export (`--demo` offline stub) |
+| [`python/ci_host_smoke.py`](python/ci_host_smoke.py) | Host-only CI gate (import, train, config, HF export) — no GPU |
 
 ```bash
 pip install -e . --no-build-isolation   # from repo root
