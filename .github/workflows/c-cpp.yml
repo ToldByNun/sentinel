@@ -226,3 +226,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python examples/python/finetune_hf.py --demo --out hf_demo_ci
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python examples/python/train_chunks.py examples/data/sample.jsonl --out chunks_ci.snlm --epochs 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python examples/python/train_chunks.py examples/data/sample.jsonl --out chunks_manual_ci.snlm --epochs 1 --manual-chunks
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

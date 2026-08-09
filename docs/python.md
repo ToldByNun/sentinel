@@ -152,7 +152,7 @@ For JSONL → list of strings without streaming, use [`examples/python/train_jso
 
 ## `LanguageModelChunkSource` (streaming)
 
-Streams `.jsonl` or HF Arrow dirs via the C++ `TextRowReader`. JSONL rows use the **`problem_statement`** string field (SERA-style) — the same as C++ `JsonlLoader`. Python demo scripts that load texts into memory accept broader aliases; the bound chunk source does not.
+First-class Python streaming for `.jsonl` or HF Arrow dirs (via C++ `TextRowReader`). JSONL string fields: **`problem_statement`**, **`text`**, or **`content`** (same as `JsonlLoader`).
 
 ```python
 source = S.LanguageModelChunkSource(
@@ -170,23 +170,32 @@ tok.train(sample, vocab_size=8000)
 source.set_tokenizer(tok)          # BPETokenizer only; must outlive the source
 source.materialize()
 model.train_chunks(source, epochs=2, batch_size=32, gradient_accumulation_steps=4)
+
+# Or iterate chunks yourself (host custom loop):
+for chunk in source.iter_train_chunks():
+    model.train_step(chunk.examples)
 ```
+
+Runnable example: [`examples/python/train_chunks.py`](../examples/python/train_chunks.py).
 
 | Method / property | Notes |
 | ----------------- | ----- |
 | ctor | `path`, `maximum_text_characters=0`, `maximum_token_count=0`, `chunk_example_count=64`, `train_ratio=0.9`, `seed=42`, `test_reservoir_cap=256` |
 | `set_tokenizer` | **`BPETokenizer` only** (keep alive for the source lifetime) |
-| `prepare_tokenizer_sample` | First N train-hash texts; rewinds |
-| `materialize` / `prepare_test_reservoir` | One corpus pass → cached token ids + test reservoir |
+| `prepare_tokenizer_sample` | First N train-hash texts; rewinds (releases GIL) |
+| `materialize` / `prepare_test_reservoir` | One corpus pass → cached token ids + test reservoir (releases GIL) |
 | `rewind_train` | Start a new epoch (length-sorts materialized examples) |
 | `sort_train_by_length` | Stable short→long sort |
-| `fill_train_dataset` | Copy all train examples into a `LanguageModelDataset` |
-| `next_train_chunk` | Fill a dataset with the next chunk; `False` when exhausted |
+| `fill_train_dataset` / `train_dataset()` | Copy all train examples into a `LanguageModelDataset` |
+| `next_train_chunk(out)` | Fill `out`; `False` when exhausted |
+| `take_train_chunk()` | `(dataset\|None, more)` — Pythonic next-chunk |
+| `iter_train_chunks(rewind=True)` / `__iter__` | Yield `LanguageModelDataset` chunks for one epoch |
+| `is_train_row(row_index)` | Train vs test partition for a corpus row index |
 | `test_dataset` | Reservoir after materialize |
 | `file_path`, `chunk_example_count`, `train_ratio` | Config mirrors |
 | `train_example_count`, `train_prediction_count`, `is_materialized` | After materialize |
 
-Also: `JsonlLoader.load(path, maximum_rows=50)`, `try_parse_line`, `source_to_label`, and `CorpusRow` (`text`, `source`) for SERA-style JSONL inspection.
+Also: `JsonlLoader.load(path, maximum_rows=50)`, `try_parse_line`, `source_to_label`, and `CorpusRow` (`text`, `source`) for JSONL inspection.
 
 ---
 
@@ -338,7 +347,7 @@ cont = model.generate(prompt_ids, new_token_count=32, temperature=0.9, top_k=20,
 | Method | Signature | Notes |
 | ------ | --------- | ----- |
 | `train` | `(train, epochs=1, batch_size=32, gradient_accumulation_steps=1, log_every_epochs=1, test=None) -> None` | In-memory dataset |
-| `train_chunks` | `(source, epochs=1, log_every_epochs=1, batch_size=32, gradient_accumulation_steps=4) -> None` | Streaming `LanguageModelChunkSource` (default accum **4**) |
+| `train_chunks` | `(source, epochs=1, log_every_epochs=1, batch_size=32, gradient_accumulation_steps=4) -> None` | Streaming `LanguageModelChunkSource` (default accum **4**; releases GIL) |
 | `forward` | `(token_ids) -> Matrix` | Logits `vocab × seq` |
 | `example_loss` / `average_loss` | example or dataset → `float` | |
 | `accumulate_example` / `apply_gradients` / `train_step` | Host custom-loop step API | See [Mid-level ops](#mid-level-ops-custom-loops) |

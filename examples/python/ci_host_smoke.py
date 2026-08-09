@@ -1,7 +1,8 @@
 """Host-only CI smoke for the Python bindings (no GPU required).
 
 Covers: import, BPE I/O, LanguageModel train/checkpoint/safetensors,
-native sentinel-model config, mid-level Matrix ops, HF demo fine-tune export.
+streaming ChunkSource, native sentinel-model config, mid-level Matrix ops,
+HF demo fine-tune export.
 
   python examples/python/ci_host_smoke.py
 """
@@ -123,23 +124,85 @@ def test_hf_demo_export(tmp: Path) -> None:
     print("hf export/import ok")
 
 
-def test_chunk_source_api() -> None:
-    # Binding surface only — materialize needs problem_statement JSONL.
+def test_streaming_train(tmp: Path) -> None:
+    """End-to-end LanguageModelChunkSource + train_chunks + iter_train_chunks."""
     _expect(hasattr(S, "LanguageModelChunkSource"), "LanguageModelChunkSource missing")
     _expect(hasattr(S.LanguageModel, "train_chunks"), "train_chunks missing")
     _expect(hasattr(S, "JsonlLoader"), "JsonlLoader missing")
-    print("streaming bindings present")
+    _expect(callable(getattr(S.LanguageModelChunkSource, "iter_train_chunks", None)), "iter_train_chunks missing")
+    _expect(callable(getattr(S.LanguageModelChunkSource, "take_train_chunk", None)), "take_train_chunk missing")
+
+    jsonl = tmp / "stream.jsonl"
+    rows = [
+        '{"text": "alpha beta gamma delta epsilon zeta"}',
+        '{"content": "one two three four five six seven"}',
+        '{"problem_statement": "red blue green yellow orange purple", "source": "Sera-T1"}',
+        '{"text": "cat dog bird fish mouse horse"}',
+        '{"text": "train test val split batch epoch"}',
+        '{"text": "cuda kernel launch grid block warp"}',
+        '{"text": "token embed rope attention mlp"}',
+        '{"text": "loss scale adam moments muon"}',
+    ]
+    jsonl.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    loaded = S.JsonlLoader.load(str(jsonl), maximum_rows=0)
+    _expect(len(loaded) >= 8, f"JsonlLoader aliases failed, got {len(loaded)} rows")
+
+    source = S.LanguageModelChunkSource(
+        str(jsonl),
+        maximum_text_characters=0,
+        maximum_token_count=32,
+        chunk_example_count=3,
+        train_ratio=0.75,
+        seed=7,
+        test_reservoir_cap=2,
+    )
+    sample = source.prepare_tokenizer_sample(8)
+    _expect(len(sample) >= 2, "prepare_tokenizer_sample empty")
+    tok = S.BPETokenizer()
+    tok.train(sample, vocab_size=64)
+    source.set_tokenizer(tok)
+    source.materialize()
+    _expect(source.is_materialized, "not materialized")
+    _expect(source.train_example_count > 0, "no train examples")
+    _expect(isinstance(source.is_train_row(0), bool), "is_train_row should return bool")
+
+    model = S.LanguageModel(
+        vocabulary_size=tok.vocab_size,
+        embedding_dim=32,
+        maximum_position_count=32,
+        learning_rate=1e-3,
+        block_count=1,
+        head_count=2,
+    )
+    model.train_chunks(source, epochs=1, batch_size=2, gradient_accumulation_steps=1)
+
+    chunks = list(source.iter_train_chunks())
+    _expect(len(chunks) >= 1, "iter_train_chunks empty")
+    total = sum(chunk.size for chunk in chunks)
+    _expect(total == source.train_example_count, "chunk sum != train_example_count")
+
+    # Manual chunk step path (host custom loop over the stream).
+    step_loss = model.train_step(chunks[0].examples)
+    _expect(step_loss == step_loss, "train_step on chunk NaN")  # not NaN
+
+    train_ds = source.train_dataset()
+    _expect(train_ds.size == source.train_example_count, "train_dataset size mismatch")
+    print(
+        f"streaming ok train={source.train_example_count} test={source.test_dataset.size} "
+        f"chunks={len(chunks)} jsonl_rows={len(loaded)}"
+    )
 
 
 def main() -> None:
     test_import()
     test_matrix_ops()
-    test_chunk_source_api()
     with tempfile.TemporaryDirectory(prefix="sentinel_ci_") as tmp_name:
         tmp = Path(tmp_name)
         test_bpe_and_tiny_train(tmp)
         test_from_config(tmp)
         test_hf_demo_export(tmp)
+        test_streaming_train(tmp)
     print("ci_host_smoke: all checks passed")
 
 

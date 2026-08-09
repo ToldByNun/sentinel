@@ -5,8 +5,8 @@ JSONL lines may be:
   - raw non-empty text (treated as the sample string)
 
 This script loads texts into memory via LanguageModelDataset.build.
-For streaming epochs use LanguageModelChunkSource + model.train_chunks
-(JSONL field: problem_statement). See docs/python.md.
+For streaming epochs use examples/python/train_chunks.py
+(LanguageModelChunkSource + train_chunks / iter_train_chunks).
 
   python examples/python/train_jsonl.py examples/data/sample.jsonl --out run.safetensors
 """

@@ -150,7 +150,7 @@ Public host step helpers on `LanguageModel.hpp`: `LanguageModelCache`, `Language
 
 Header: `Data/LanguageModelChunkSource.hpp` — also wrapped in Python (`LanguageModelChunkSource` + `train_chunks`).
 
-Streams `.jsonl` or HF Arrow dirs via `createTextRowReader`. JSONL rows use the **`problem_statement`** string field (SERA-style); see `JsonlLoader`.
+Streams `.jsonl` or HF Arrow dirs via `createTextRowReader`. JSONL string fields: **`problem_statement`**, **`text`**, or **`content`** (see `JsonlLoader`).
 
 ```cpp
 LanguageModelChunkSource source(
