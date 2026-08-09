@@ -161,7 +161,7 @@ Clear errors on import / config parse — do not expect silent fallbacks.
 | Other tokenizers | WordPiece, Unigram, Metaspace (Llama-2 SentencePiece) |
 | Multimodal / vision | not in scope |
 
-Also out of scope for now: bit-identical loss vs Transformers, GGUF, and separate brand importers (`loadHuggingFaceLlama`, …).
+Also out of scope for now: bit-identical loss vs Transformers, and separate brand importers (`loadHuggingFaceLlama`, …). For GGUF see [gguf.md](gguf.md).
 
 ---
 

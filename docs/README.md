@@ -7,6 +7,7 @@ Library reference for **v0.1**. High-level install and quickstarts live in the r
 | [Python API](python.md) | `pip install sentinel-lm` → `import sentinel` |
 | [C++ API](cpp.md) | CMake `find_package(Sentinel)` → `Sentinel::sentinel` |
 | [HuggingFace import / export](huggingface.md) | HF causal-LM load/save + tokenizer + Hub resolve + fine-tune notes |
+| [GGUF import / export](gguf.md) | GGUF v3 load/save (llama.cpp names, F32/F16/BF16) |
 
 **Not API:** `sentinel/main.cpp` smoke/scale harness flags, ad-hoc probe scripts unless linked from these pages.
 
@@ -16,4 +17,5 @@ docs/
   python.md        Python bindings (high-level + mid-level + streaming)
   cpp.md           C++ headers & patterns
   huggingface.md   HF checkpoint import / export
+  gguf.md          GGUF import / export
 ```

@@ -192,6 +192,17 @@ int main() {
         return 0;
     }
     free(hfRoundSmokeEnv);
+    char* ggufSmokeEnv = nullptr;
+    size_t ggufSmokeLen = 0;
+    if (_dupenv_s(&ggufSmokeEnv, &ggufSmokeLen, "SENTINEL_GGUF_SMOKE") == 0
+        && ggufSmokeEnv != nullptr
+        && ggufSmokeEnv[0] == '1'
+        && ggufSmokeEnv[1] == '\0') {
+        free(ggufSmokeEnv);
+        LanguageModel::runGgufExportSmokeDemo();
+        return 0;
+    }
+    free(ggufSmokeEnv);
     char* gqaSmokeEnv = nullptr;
     size_t gqaSmokeLen = 0;
     if (_dupenv_s(&gqaSmokeEnv, &gqaSmokeLen, "SENTINEL_GQA_HOST_SMOKE") == 0
@@ -290,6 +301,12 @@ int main() {
     if (const char* hfRoundSmoke = std::getenv("SENTINEL_HF_ROUNDTRIP_SMOKE")) {
         if (hfRoundSmoke[0] == '1' && hfRoundSmoke[1] == '\0') {
             LanguageModel::runHuggingFaceRoundtripSmokeDemo();
+            return 0;
+        }
+    }
+    if (const char* ggufSmoke = std::getenv("SENTINEL_GGUF_SMOKE")) {
+        if (ggufSmoke[0] == '1' && ggufSmoke[1] == '\0') {
+            LanguageModel::runGgufExportSmokeDemo();
             return 0;
         }
     }
@@ -766,6 +783,7 @@ int main() {
             LanguageModel::runHuggingFaceExportSmokeDemo();
             HuggingFace::Tokenizer::runTokenizerSmokeDemo();
             LanguageModel::runHuggingFaceRoundtripSmokeDemo();
+            LanguageModel::runGgufExportSmokeDemo();
             LanguageModel::runStreamingSmokeDemo();
             SafeTensors::runHalfLoadSmokeDemo();
             PytorchStateDict::runSmokeDemo();

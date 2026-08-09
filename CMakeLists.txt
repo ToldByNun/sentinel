@@ -90,6 +90,7 @@ set(SENTINEL_CXX_SOURCES
     "${SENTINEL_ROOT}/NeuralNet/IO/HuggingFaceConfig.cpp"
     "${SENTINEL_ROOT}/NeuralNet/IO/HuggingFaceResolve.cpp"
     "${SENTINEL_ROOT}/NeuralNet/IO/HuggingFaceWeights.cpp"
+    "${SENTINEL_ROOT}/NeuralNet/IO/Gguf.cpp"
     "${SENTINEL_ROOT}/NeuralNet/Utils/TextUtil.cpp"
     "${SENTINEL_ROOT}/NeuralNet/Layers/Dense.cpp"
     "${SENTINEL_ROOT}/NeuralNet/Layers/Dropout.cpp"

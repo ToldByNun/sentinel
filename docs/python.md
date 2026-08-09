@@ -363,6 +363,8 @@ cont = model.generate(prompt_ids, new_token_count=32, temperature=0.9, top_k=20,
 | `load_safetensors` | `(path) -> None` | Architecture must already match |
 | `load_huggingface` | `(path, learning_rate=3e-4) -> LanguageModel` | Static: local HF dir → sized model + weights |
 | `save_huggingface` | `(path, model_type="llama", tokenizer_source_directory="", weight_format="safetensors") -> None` | Export Transformers-compatible dir. `weight_format`: `"safetensors"` \| `"bin"` \| `"both"` |
+| `load_gguf` | `(path, learning_rate=3e-4) -> LanguageModel` | Static: GGUF v3 → sized model + weights (F32/F16/BF16; see [gguf.md](gguf.md)) |
+| `save_gguf` | `(path, architecture="llama") -> None` | Export GGUF v3 F32 (`llama` / `mistral` / `qwen2`) |
 | `from_config` / `load_sentinel_model` / `from_sentinel_config` | native `sentinel-model` JSON/YAML (+ optional weights) | |
 | `sentinel_config` / `save_sentinel_config` | snapshot / write native config | |
 
@@ -390,6 +392,7 @@ Requires `enable_cuda_train`. Unset `SENTINEL_PHASE_TRACE` when quoting tok/s.
 | [`custom_layers_demo.py`](../examples/python/custom_layers_demo.py) | Attention / FFN / Spulse / SafeTensors |
 | [`train_jsonl.py`](../examples/python/train_jsonl.py) | In-memory JSONL train |
 | [`finetune_hf.py`](../examples/python/finetune_hf.py) | HF import → JSONL fine-tune → `save_huggingface` |
+| [`gguf_roundtrip.py`](../examples/python/gguf_roundtrip.py) | `save_gguf` → `load_gguf` roundtrip |
 
 **Large model on 16 GB (HostSGD)**
 

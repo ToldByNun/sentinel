@@ -171,7 +171,8 @@ jobs:
             "SENTINEL_HF_IMPORT_SMOKE",
             "SENTINEL_HF_EXPORT_SMOKE",
             "SENTINEL_HF_TOKENIZER_SMOKE",
-            "SENTINEL_HF_ROUNDTRIP_SMOKE"
+            "SENTINEL_HF_ROUNDTRIP_SMOKE",
+            "SENTINEL_GGUF_SMOKE"
           )
           foreach ($name in $smokes) {
             Write-Host "=== $name ==="
@@ -229,4 +230,6 @@ jobs:
           python examples/python/train_chunks.py examples/data/sample.jsonl --out chunks_ci.snlm --epochs 1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python examples/python/train_chunks.py examples/data/sample.jsonl --out chunks_manual_ci.snlm --epochs 1 --manual-chunks
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python examples/python/gguf_roundtrip.py --out gguf_ci.gguf
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -317,6 +317,18 @@ public:
         const std::string& tokenizerSourceDirectory = "",
         const std::string& weightFormat = "safetensors");
 
+    /// <summary>
+    /// build a LanguageModel from a GGUF file (llama / mistral / qwen2 F32/F16/BF16)
+    /// and load remapped weights; quantized packs throw
+    /// </summary>
+    static LanguageModel loadGguf(const std::string& path, float learningRate = 3e-4f);
+
+    /// <summary>
+    /// export a GGUF v3 file (F32, llama.cpp tensor names + metadata).
+    /// architecture must be allowlisted (llama / mistral / qwen2).
+    /// </summary>
+    void saveGguf(const std::string& path, const std::string& architecture = "llama");
+
     /// <summary>save/load roundtrip smoke on a tiny model</summary>
     static void runCheckpointSmokeDemo();
 
@@ -343,6 +355,9 @@ public:
 
     /// <summary>HF stub dir: import + HfTokenizer encode + host microtrain; shapes/finite gate</summary>
     static void runHuggingFaceRoundtripSmokeDemo();
+
+    /// <summary>saveGguf → loadGguf weight/config/logits parity</summary>
+    static void runGgufExportSmokeDemo();
 
     /// <summary>JSONL chunk source smoke: tiny file, one streamed epoch</summary>
     static void runStreamingSmokeDemo();

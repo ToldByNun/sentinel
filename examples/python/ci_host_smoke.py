@@ -124,6 +124,39 @@ def test_hf_demo_export(tmp: Path) -> None:
     print("hf export/import ok")
 
 
+def test_gguf_roundtrip(tmp: Path) -> None:
+    _expect(hasattr(S.LanguageModel, "load_gguf"), "load_gguf missing")
+    _expect(hasattr(S.LanguageModel, "save_gguf"), "save_gguf missing")
+
+    model = S.LanguageModel(
+        vocabulary_size=64,
+        embedding_dim=32,
+        maximum_position_count=32,
+        learning_rate=3e-3,
+        block_count=1,
+        head_count=4,
+        intermediate_size=64,
+        use_bias=False,
+        kv_head_count=2,
+    )
+    model.set_tie_embedding(True)
+    before = model.forward([1, 2, 3, 4])
+
+    gguf_path = tmp / "toy.gguf"
+    model.save_gguf(str(gguf_path), architecture="llama")
+    _expect(gguf_path.is_file(), "GGUF file not written")
+
+    loaded = S.LanguageModel.load_gguf(str(gguf_path), learning_rate=3e-3)
+    _expect(loaded.kv_head_count == 2, "GGUF reimport kv_head_count")
+    _expect(loaded.intermediate_size == 64, "GGUF reimport intermediate_size")
+    _expect(not loaded.use_bias, "GGUF reimport use_bias")
+    _expect(loaded.tie_embedding, "GGUF reimport tie_embedding")
+
+    after = loaded.forward([1, 2, 3, 4])
+    _expect(after.rows == before.rows and after.cols == before.cols, "GGUF logits shape")
+    print("gguf export/import ok")
+
+
 def test_streaming_train(tmp: Path) -> None:
     """End-to-end LanguageModelChunkSource + train_chunks + iter_train_chunks."""
     _expect(hasattr(S, "LanguageModelChunkSource"), "LanguageModelChunkSource missing")
@@ -202,6 +235,7 @@ def main() -> None:
         test_bpe_and_tiny_train(tmp)
         test_from_config(tmp)
         test_hf_demo_export(tmp)
+        test_gguf_roundtrip(tmp)
         test_streaming_train(tmp)
     print("ci_host_smoke: all checks passed")
 
