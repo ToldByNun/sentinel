@@ -7,7 +7,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "sentinel-lm"
-version = "0.1.0"
+version = "0.2.0"
 description = "C++/CUDA full-train causal language model framework (Python bindings)"
 readme = "README.md"
 requires-python = ">=3.10"
