@@ -2,7 +2,7 @@
 
 Minimal programs that use the **library API** (not the `main.cpp` harness). No external dataset required unless you pass your own JSONL.
 
-API reference: [docs/python.md](../docs/python.md) · [docs/cpp.md](../docs/cpp.md)
+API reference: [docs/python.md](../docs/python.md) · [docs/cpp.md](../docs/cpp.md) · [docs/huggingface.md](../docs/huggingface.md)
 
 ## Python
 
@@ -30,18 +30,34 @@ python examples/python/finetune_hf.py --demo --out hf_demo_out
 
 ### Native model configs
 
-[`configs/`](configs/) — `format: "sentinel-model"` JSON/YAML (arch + optional `weights`). Load with `LanguageModel.from_config(...)` / `load_sentinel_model`. See [docs/python.md](../docs/python.md).
+[`configs/`](configs/) — `format: "sentinel-model"` JSON/YAML (arch + optional `weights`):
 
-### JSONL shape (Python example)
+| File | Shape |
+| ---- | ----- |
+| [`tiny.json`](configs/tiny.json) / [`tiny.yaml`](configs/tiny.yaml) | 2×64 toy |
+| [`base-768.json`](configs/base-768.json) | 12×768 / vocab 32k |
 
-Each non-empty line is either:
+Load with `LanguageModel.from_config(...)` / `load_sentinel_model`. See [docs/python.md](../docs/python.md).
+
+### JSONL shape
+
+**In-memory demos** (`train_jsonl.py`, `finetune_hf.py`) accept each non-empty line as either:
 
 - a JSON object with a string field `text`, `content`, or `problem_statement`, or
 - a raw text line
 
-The C++ streaming path (`LanguageModelChunkSource` + `JsonlLoader`) currently expects **`problem_statement`** (SERA-style). The Python example accepts the common aliases above so small demos are less awkward.
+**Streaming** (`LanguageModelChunkSource` / C++ `JsonlLoader`, also bound in Python) expects the **`problem_statement`** field (SERA-style). Example:
 
-Streaming / chunked epoch loops over large corpora use the C++ `LanguageModelChunkSource` API (and Python bindings if you exposed them). Keep `{stem}.sbpe` next to checkpoints for generate.
+```python
+source = S.LanguageModelChunkSource("corpus.jsonl", maximum_token_count=512)
+sample = source.prepare_tokenizer_sample(2000)
+tok.train(sample, vocab_size=8000)
+source.set_tokenizer(tok)   # BPETokenizer only
+source.materialize()
+model.train_chunks(source, epochs=1)
+```
+
+Keep `{stem}.sbpe` next to checkpoints for generate.
 
 ## C++
 

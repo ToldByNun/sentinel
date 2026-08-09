@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Docs
+
+- Refresh all markdown API docs to match v0.1 bindings/headers: Python streaming (`LanguageModelChunkSource` / `train_chunks` / `JsonlLoader`), mid-level ops tables, missing `LanguageModel` device setters, native config helpers, C++ SPULSE knobs + smoke env list, HF Hub resolve notes (`HuggingFaceResolve` / local-only `load_huggingface`), CMake `SENTINEL_INSTALL`, and examples/README consistency.
+
 ### Fixed
 
 - CUDA packed train: epoch shuffle + **window-local** length packing (was global short→long curriculum) and Adam-step pack caps so effective batch matches `batch×accum`. SERA harness default LR `3e-4`, batch `32` (was `1e-3` / `64`) for stable descending train/test loss.
@@ -50,7 +54,7 @@ First library-oriented release surface.
 
 ### Notes
 
-- Python v0.1 exposes **in-memory** datasets (`LanguageModelDataset`). Streaming JSONL/Arrow epochs are C++ (`LanguageModelChunkSource`) unless wrapped in bindings.
+- Python v0.1 exposes in-memory datasets (`LanguageModelDataset`) **and** streaming (`LanguageModelChunkSource` + `train_chunks`). Raw `ArrowChunkReader` remains C++-internal.
 - Throughput numbers in the README are indicative (RTX 5070 Ti 16 GB); re-measure on your machine.
 - SafeTensors half-load smoke: `SENTINEL_SAFETENSORS_HALF_SMOKE=1` when running the `sentinel` harness.
 - Intermediate-size smoke: `SENTINEL_INTERMEDIATE_SIZE_SMOKE=1`.

@@ -4,8 +4,9 @@ JSONL lines may be:
   - {"text": "..."} / {"content": "..."} / {"problem_statement": "..."}
   - raw non-empty text (treated as the sample string)
 
-Streaming ChunkSource (C++) is not wrapped in Python yet — this loads texts
-into memory via LanguageModelDataset.build.
+This script loads texts into memory via LanguageModelDataset.build.
+For streaming epochs use LanguageModelChunkSource + model.train_chunks
+(JSONL field: problem_statement). See docs/python.md.
 
   python examples/python/train_jsonl.py examples/data/sample.jsonl --out run.safetensors
 """
