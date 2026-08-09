@@ -25,6 +25,7 @@
 #include "../IO/SentinelModelConfig.hpp"
 #include "../IO/HuggingFaceConfig.hpp"
 #include "../IO/HuggingFaceWeights.hpp"
+#include "../IO/Gguf.hpp"
 #include "../Losses/CrossEntropy.hpp"
 #include "../Tokenizer/BPETokenizer.hpp"
 #include "../Tokenizer/HfTokenizer.hpp"
@@ -2014,6 +2015,110 @@ void LanguageModel::saveHuggingFace(
         exportFormat);
 }
 
+LanguageModel LanguageModel::loadGguf(const std::string& path, float learningRate) {
+    if (path.empty())
+        throw std::invalid_argument("LanguageModel::loadGguf empty path");
+    if (!(learningRate > 0.0f))
+        throw std::invalid_argument("LanguageModel::loadGguf learningRate must be > 0");
+
+    const Gguf::Config config = Gguf::loadConfig(path);
+    LanguageModel model(
+        config.vocabSize,
+        config.hiddenSize,
+        config.maxPositionEmbeddings,
+        Adam(learningRate),
+        config.numHiddenLayers,
+        config.numAttentionHeads,
+        config.intermediateSize,
+        config.ropeTheta,
+        config.useBias,
+        config.numKeyValueHeads);
+
+    model.finalNorm.epsilon = config.rmsNormEps;
+    for (TransformerBlock& block : model.blocks) {
+        block.attentionNorm.epsilon = config.rmsNormEps;
+        block.feedForwardNorm.epsilon = config.rmsNormEps;
+    }
+
+    if (config.tieWordEmbeddings != model.tieEmbeddingProjection)
+        model.setTieEmbeddingProjection(config.tieWordEmbeddings);
+
+    const SafeTensors::File mapped = Gguf::loadMappedWeights(path, config);
+    model.loadSafeTensors(mapped);
+    return model;
+}
+
+void LanguageModel::saveGguf(const std::string& path, const std::string& architecture) {
+    if (path.empty())
+        throw std::invalid_argument("LanguageModel::saveGguf empty path");
+    if (this->blocks.empty())
+        throw std::logic_error("LanguageModel::saveGguf no blocks");
+    if (!Gguf::isSupportedArchitecture(architecture))
+        throw std::invalid_argument(
+            "LanguageModel::saveGguf unsupported architecture='" + architecture
+            + "' (allowlist: llama, mistral, qwen2)");
+
+    if (this->cudaEnabled() && this->device != nullptr && !this->deviceStale)
+        this->device->downloadTo(*this);
+    else if (this->cudaTrainEnabled() && this->device != nullptr)
+        this->device->downloadTo(*this);
+
+    SafeTensors::File sentinelWeights;
+    sentinelWeights.metadata["format"] = "sentinel";
+    sentinelWeights.metadata["arch"] = "causal_lm_rope_swiglu";
+    sentinelWeights.metadata["vocab_size"] = std::to_string(this->tokenEmbedding.vocabSize());
+    sentinelWeights.metadata["embedding_dim"] = std::to_string(this->tokenEmbedding.embeddingDim());
+    sentinelWeights.metadata["max_position"] = std::to_string(this->maximumPositionCount);
+    sentinelWeights.metadata["block_count"] = std::to_string(this->blocks.size());
+    sentinelWeights.metadata["head_count"] = std::to_string(this->blocks[0].attention.headCount);
+    sentinelWeights.metadata["kv_head_count"] = std::to_string(this->kvHeadCount());
+    sentinelWeights.metadata["intermediate_size"] = std::to_string(this->intermediateSize());
+    sentinelWeights.metadata["rope_theta"] = std::to_string(this->ropeTheta());
+    sentinelWeights.metadata["use_bias"] = this->useBias() ? "1" : "0";
+    sentinelWeights.metadata["tie_embedding"] = this->tieEmbeddingProjection ? "1" : "0";
+
+    SafeTensors::putMatrix(sentinelWeights, "token_embedding.weight", this->tokenEmbedding.weight);
+    for (size_t blockIndex = 0; blockIndex < this->blocks.size(); ++blockIndex) {
+        const TransformerBlock& block = this->blocks[blockIndex];
+        const std::string prefix = "blocks." + std::to_string(blockIndex) + ".";
+        SafeTensors::putMatrix(sentinelWeights, prefix + "attn.q_proj.weight", block.attention.queryWeight);
+        SafeTensors::putMatrix(sentinelWeights, prefix + "attn.k_proj.weight", block.attention.keyWeight);
+        SafeTensors::putMatrix(sentinelWeights, prefix + "attn.v_proj.weight", block.attention.valueWeight);
+        SafeTensors::putMatrix(sentinelWeights, prefix + "attn.o_proj.weight", block.attention.outputWeight);
+        SafeTensors::putMatrix(sentinelWeights, prefix + "attn_norm.weight", block.attentionNorm.gamma);
+        SafeTensors::putMatrix(sentinelWeights, prefix + "ffn_norm.weight", block.feedForwardNorm.gamma);
+        SafeTensors::putMatrix(sentinelWeights, prefix + "ffn.gate_proj.weight", block.feedForward.gateWeight);
+        SafeTensors::putMatrix(sentinelWeights, prefix + "ffn.up_proj.weight", block.feedForward.upWeight);
+        SafeTensors::putMatrix(sentinelWeights, prefix + "ffn.down_proj.weight", block.feedForward.downWeight);
+        if (this->useBias()) {
+            SafeTensors::putMatrix(sentinelWeights, prefix + "ffn.gate_proj.bias", block.feedForward.gateBias);
+            SafeTensors::putMatrix(sentinelWeights, prefix + "ffn.up_proj.bias", block.feedForward.upBias);
+            SafeTensors::putMatrix(sentinelWeights, prefix + "ffn.down_proj.bias", block.feedForward.downBias);
+        }
+    }
+    SafeTensors::putMatrix(sentinelWeights, "final_norm.weight", this->finalNorm.gamma);
+    if (!this->tieEmbeddingProjection)
+        SafeTensors::putMatrix(sentinelWeights, "lm_head.weight", this->outputProjection.weight);
+    if (this->useBias())
+        SafeTensors::putMatrix(sentinelWeights, "lm_head.bias", this->outputProjection.bias);
+
+    Gguf::Config config;
+    config.architecture = architecture;
+    config.vocabSize = this->tokenEmbedding.vocabSize();
+    config.hiddenSize = this->tokenEmbedding.embeddingDim();
+    config.intermediateSize = this->intermediateSize();
+    config.numHiddenLayers = static_cast<int>(this->blocks.size());
+    config.numAttentionHeads = this->blocks[0].attention.headCount;
+    config.numKeyValueHeads = this->kvHeadCount();
+    config.maxPositionEmbeddings = this->maximumPositionCount;
+    config.rmsNormEps = this->finalNorm.epsilon;
+    config.ropeTheta = this->ropeTheta();
+    config.tieWordEmbeddings = this->tieEmbeddingProjection;
+    config.useBias = this->useBias();
+
+    Gguf::save(path, config, sentinelWeights);
+}
+
 void LanguageModel::runCheckpointSmokeDemo() {
     LanguageModel model(64, 32, 16, Adam(0.001f), 1, 2);
     model.enableCuda();
@@ -2401,6 +2506,72 @@ void LanguageModel::runHuggingFaceExportSmokeDemo() {
     SmokeLog::result(
         "LanguageModel saveHuggingFace",
         "safe+bin+tokenizer=ok  reload=ok  binOnly=ok  logitsDiff=%.2e  reject=model_type",
+        maxDiff);
+}
+
+void LanguageModel::runGgufExportSmokeDemo() {
+    namespace fs = std::filesystem;
+    Gguf::runConfigParseSmokeDemo();
+    Gguf::runWeightMapSmokeDemo();
+
+    const fs::path path = fs::temp_directory_path() / "sentinel_gguf_export_smoke.gguf";
+
+    LanguageModel model(32, 16, 64, Adam(1e-3f), 2, 4, 32, 5000.0f, false, 2);
+    model.setTieEmbeddingProjection(true);
+    model.finalNorm.epsilon = 1.0e-5f;
+    for (TransformerBlock& block : model.blocks) {
+        block.attentionNorm.epsilon = 1.0e-5f;
+        block.feedForwardNorm.epsilon = 1.0e-5f;
+    }
+    model.tokenEmbedding.weight.data[0] = 0.125f;
+    model.blocks[0].attention.keyWeight.data[0] = 0.25f;
+    model.blocks[1].feedForward.downWeight.data[0] = 0.375f;
+    model.finalNorm.gamma.data[0] = 0.5f;
+
+    const Matrix logitsBefore = model.forward({ 1, 2, 3, 4 });
+    model.saveGguf(path.string(), "llama");
+
+    if (!Gguf::isGgufFile(path.string()))
+        throw std::runtime_error("GGUF export smoke: isGgufFile false");
+
+    const Gguf::Config cfg = Gguf::loadConfig(path.string());
+    if (cfg.architecture != "llama" || cfg.vocabSize != 32 || cfg.hiddenSize != 16
+        || cfg.numKeyValueHeads != 2 || cfg.intermediateSize != 32
+        || !cfg.tieWordEmbeddings || cfg.useBias
+        || std::fabs(cfg.ropeTheta - 5000.0f) > 1.0e-3f)
+        throw std::runtime_error("GGUF export smoke: config mismatch");
+
+    LanguageModel reloaded = LanguageModel::loadGguf(path.string(), 1e-3f);
+    if (std::fabs(reloaded.tokenEmbedding.weight.data[0] - 0.125f) > 1.0e-6f
+        || std::fabs(reloaded.blocks[0].attention.keyWeight.data[0] - 0.25f) > 1.0e-6f
+        || std::fabs(reloaded.blocks[1].feedForward.downWeight.data[0] - 0.375f) > 1.0e-6f
+        || std::fabs(reloaded.finalNorm.gamma.data[0] - 0.5f) > 1.0e-6f)
+        throw std::runtime_error("GGUF export smoke: reloaded weights mismatch");
+    if (!reloaded.tieEmbeddingProjection || reloaded.useBias() || reloaded.kvHeadCount() != 2)
+        throw std::runtime_error("GGUF export smoke: reloaded tie/bias/kv mismatch");
+
+    const Matrix logitsAfter = reloaded.forward({ 1, 2, 3, 4 });
+    if (logitsAfter.rows != logitsBefore.rows || logitsAfter.cols != logitsBefore.cols)
+        throw std::runtime_error("GGUF export smoke: logits shape mismatch");
+    float maxDiff = 0.0f;
+    for (size_t i = 0; i < logitsBefore.data.size(); ++i)
+        maxDiff = (std::max)(maxDiff, std::fabs(logitsBefore.data[i] - logitsAfter.data[i]));
+    if (maxDiff > 1.0e-5f)
+        throw std::runtime_error("GGUF export smoke: logits drifted after export/import");
+
+    bool rejected = false;
+    try {
+        model.saveGguf(path.string(), "gpt2");
+    } catch (const std::exception&) {
+        rejected = true;
+    }
+    if (!rejected)
+        throw std::runtime_error("GGUF export smoke: should reject unsupported architecture");
+
+    fs::remove(path);
+    SmokeLog::result(
+        "LanguageModel saveGguf/loadGguf",
+        "roundtrip=ok  logitsDiff=%.2e  reject=architecture",
         maxDiff);
 }
 

@@ -2,7 +2,7 @@
 
 Minimal programs that use the **library API** (not the `main.cpp` harness). No external dataset required unless you pass your own JSONL.
 
-API reference: [docs/python.md](../docs/python.md) · [docs/cpp.md](../docs/cpp.md) · [docs/huggingface.md](../docs/huggingface.md)
+API reference: [docs/python.md](../docs/python.md) · [docs/cpp.md](../docs/cpp.md) · [docs/huggingface.md](../docs/huggingface.md) · [docs/gguf.md](../docs/gguf.md)
 
 ## Python
 
@@ -16,7 +16,8 @@ API reference: [docs/python.md](../docs/python.md) · [docs/cpp.md](../docs/cpp.
 | [`python/train_jsonl.py`](python/train_jsonl.py) | Load JSONL texts → train → save weights |
 | [`python/train_chunks.py`](python/train_chunks.py) | Stream JSONL/Arrow via `LanguageModelChunkSource` + `train_chunks` / `iter_train_chunks` |
 | [`python/finetune_hf.py`](python/finetune_hf.py) | HF import → JSONL fine-tune → `save_huggingface` export (`--demo` offline stub) |
-| [`python/ci_host_smoke.py`](python/ci_host_smoke.py) | Host-only CI gate (import, train, streaming, config, HF export) — no GPU |
+| [`python/gguf_roundtrip.py`](python/gguf_roundtrip.py) | `save_gguf` → `load_gguf` roundtrip |
+| [`python/ci_host_smoke.py`](python/ci_host_smoke.py) | Host-only CI gate (import, train, streaming, config, HF/GGUF export) — no GPU |
 
 ```bash
 pip install -e . --no-build-isolation   # from repo root
@@ -28,6 +29,7 @@ python examples/python/generate.py tiny_demo.snlm "the cat"
 python examples/python/train_jsonl.py examples/data/sample.jsonl --out run.safetensors
 python examples/python/train_chunks.py examples/data/sample.jsonl --out chunks_demo.snlm
 python examples/python/finetune_hf.py --demo --out hf_demo_out
+python examples/python/gguf_roundtrip.py --out toy.gguf
 # python examples/python/finetune_hf.py /path/to/hf_model examples/data/sample.jsonl --out hf_finetuned
 ```
 

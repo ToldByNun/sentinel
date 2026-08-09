@@ -251,9 +251,11 @@ Set offload / SBAO preferences **before** `enableCudaTrain()` when pack and chec
 | `saveSafeTensors(path)` / `loadSafeTensors(path)` | Weights + metadata (`IO/SafeTensors.hpp`) |
 | `loadSafeTensors(const SafeTensors::File&)` | In-memory file (load only) |
 | `loadHuggingFace(dir, lr=3e-4)` | Static: local HF dir → size + remap weights; see [huggingface.md](huggingface.md) |
+| `loadGguf(path, lr=3e-4)` | Static: GGUF file → size + remap weights; see [gguf.md](gguf.md) |
 | `fromSentinelConfig` / `loadSentinelModel` | Static: native `sentinel-model` JSON/YAML; optional `weights` |
 | `sentinelConfig` / `saveSentinelConfig` | Snapshot / write native model config |
 | `saveHuggingFace(dir, modelType="llama", tokenizerSource="", weightFormat="safetensors")` | Export Transformers-compatible dir. `weightFormat`: `safetensors` \| `bin` \| `both` |
+| `saveGguf(path, architecture="llama")` | Export GGUF v3 F32 (`llama` / `mistral` / `qwen2`) |
 
 Safetensors names follow HF-style keys (`token_embedding.weight`, `blocks.{i}.attn.*`, `ffn.*`, `final_norm.weight`, `lm_head.*`).
 
@@ -298,6 +300,7 @@ Examples: [`examples/configs/`](../examples/configs/) (`tiny.json`, `tiny.yaml`,
 | `IO/HuggingFaceConfig.hpp` | Minimal `config.json` parse/serialize; allowlist `llama`/`mistral`/`qwen2` |
 | `IO/HuggingFaceWeights.hpp` | HF↔Sentinel tensor remap + shard index; safetensors + `.bin` |
 | `IO/HuggingFaceResolve.hpp` | Hub / URL / local path → local directory (`resolveModelDirectory`) — **not** called by `loadHuggingFace` |
+| `IO/Gguf.hpp` | GGUF v3 load/save + remap (`loadConfig` / `loadMappedWeights` / `save`) |
 | `Tokenizer/HfTokenizer.hpp` | HF `tokenizer.json` ByteLevel BPE |
 | `Data/TextRowReader.hpp` / `JsonlLoader.hpp` / `ArrowChunkReader.hpp` | Corpus I/O |
 | `Data/ClassificationDataset.hpp` / `Network/Sequential.hpp` | Small classifier stack |
@@ -352,4 +355,4 @@ Optional fixture: `SENTINEL_PYTORCH_BIN_FIXTURE` for the PyTorch ZIP smoke. Unse
 
 ## Python parity
 
-Train / generate / checkpoint knobs, streaming `LanguageModelChunkSource` (`train_chunks`), SafeTensors helpers, mid-level layers/optimizers, and native config are also on the [Python API](python.md). Still C++-only: raw `ArrowChunkReader`, `HuggingFaceResolve`, low-level HF config/weight-map helpers, `PytorchStateDict`, and harness smoke entry points.
+Train / generate / checkpoint knobs, streaming `LanguageModelChunkSource` (`train_chunks`), SafeTensors / GGUF helpers, mid-level layers/optimizers, and native config are also on the [Python API](python.md). Still C++-only: raw `ArrowChunkReader`, `HuggingFaceResolve`, low-level HF/GGUF config/weight-map helpers, `PytorchStateDict`, and harness smoke entry points.

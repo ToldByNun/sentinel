@@ -148,7 +148,7 @@ Treat those pages as the supported surface. The `sentinel` demo harness (`main.c
 
 **Python (summary):** high-level `LanguageModel` train / `train_chunks` / generate / I/O **plus** mid-level ops — `Matrix`, Attention/FFN/layers, `Adam`/`Spulse`, Softmax/CE, `accumulate_example`/`train_step`, `LanguageModelChunkSource` / `JsonlLoader`, SafeTensors helpers, `SentinelModelConfig`.
 
-**C++ (summary):** `LanguageModel.hpp` (incl. `loadHuggingFace` / `loadSentinelModel`), `LanguageModelDataset.hpp`, `LanguageModelChunkSource.hpp` (streaming), `BPETokenizer.hpp`, `HfTokenizer.hpp`, `SafeTensors.hpp`, `SentinelModelConfig.hpp`, `HuggingFaceConfig.hpp` / `HuggingFaceWeights.hpp` / `HuggingFaceResolve.hpp`, `CudaSbao.hpp`.
+**C++ (summary):** `LanguageModel.hpp` (incl. `loadHuggingFace` / `loadGguf` / `loadSentinelModel`), `LanguageModelDataset.hpp`, `LanguageModelChunkSource.hpp` (streaming), `BPETokenizer.hpp`, `HfTokenizer.hpp`, `SafeTensors.hpp`, `Gguf.hpp`, `SentinelModelConfig.hpp`, `HuggingFaceConfig.hpp` / `HuggingFaceWeights.hpp` / `HuggingFaceResolve.hpp`, `CudaSbao.hpp`.
 
 ## Training knobs (short)
 
@@ -179,6 +179,7 @@ model.set_activation_checkpoint_mode(S.ActivationCheckpointMode.Full)
 | ------ | -------- |
 | `.snlm` | Native weights + optional optimizer (Adam/Muon) |
 | `.safetensors` | Weights only, HF-compatible names + arch metadata |
+| `.gguf` | GGUF v3 (llama.cpp names; F32 export, F32/F16/BF16 import) — see [docs/gguf.md](docs/gguf.md) |
 | `model.json` / `.yaml` | Native `sentinel-model` arch config (+ optional `weights` path) |
 | `.sbpe` | BPE tokenizer (`BPETokenizer::save` / `load`) — keep as `{stem}.sbpe` next to weights |
 

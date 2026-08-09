@@ -579,6 +579,18 @@ NB_MODULE(_core, m) {
             nb::arg("weight_format") = "safetensors",
             "Export a Transformers-compatible directory (config.json + safetensors and/or pytorch_model.bin; optional tokenizer copy)")
         .def_static(
+            "load_gguf",
+            &LanguageModel::loadGguf,
+            nb::arg("path"),
+            nb::arg("learning_rate") = 3e-4f,
+            "Build + load a causal LM from a GGUF file (llama/mistral/qwen2, F32/F16/BF16)")
+        .def(
+            "save_gguf",
+            &LanguageModel::saveGguf,
+            nb::arg("path"),
+            nb::arg("architecture") = "llama",
+            "Export a GGUF v3 file (F32, llama.cpp tensor names; architecture: llama|mistral|qwen2)")
+        .def_static(
             "load_sentinel_model",
             &LanguageModel::loadSentinelModel,
             nb::arg("path"),
