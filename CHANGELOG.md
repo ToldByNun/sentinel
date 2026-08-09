@@ -10,7 +10,13 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- Linux build: `PytorchStateDict.cpp` missing `#include <variant>` and GCC most-vexing-parse on `Value(std::monostate)` (broke CI compile).
+- Windows / publish CI: install **zlib** via vcpkg (`CMAKE_TOOLCHAIN_FILE`) and `zlib1g-dev` on Linux; `find_dependency(ZLIB)` in exported CMake package config.
 - CUDA packed train: epoch shuffle + **window-local** length packing (was global short→long curriculum) and Adam-step pack caps so effective batch matches `batch×accum`. SERA harness default LR `3e-4`, batch `32` (was `1e-3` / `64`) for stable descending train/test loss.
+
+### CI
+
+- Expand [`.github/workflows/c-cpp.yml`](.github/workflows/c-cpp.yml) beyond compile-only: C++ `train_tiny`/`generate`, all host `SENTINEL_*_SMOKE` gates, `pip install` + import, and Python host examples (`ci_host_smoke.py`, train/generate/config/custom/HF demo).
 
 ### Added
 

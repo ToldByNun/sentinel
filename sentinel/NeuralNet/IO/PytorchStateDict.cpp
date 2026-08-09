@@ -18,6 +18,7 @@
 #include <memory>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 #include <zlib.h>
 
@@ -417,7 +418,8 @@ struct Value {
     std::shared_ptr<Dict> dictValue;
 
     Value() = default;
-    Value(std::monostate) : kind(Kind::None) {}
+    // Named parameter avoids GCC most-vexing-parse on Value(std::monostate).
+    Value(std::monostate /*none*/) : kind(Kind::None) {}
     Value(bool value) : kind(Kind::Bool), boolValue(value) {}
     Value(std::int64_t value) : kind(Kind::Int), intValue(value) {}
     Value(std::string value) : kind(Kind::String), stringValue(std::move(value)) {}
