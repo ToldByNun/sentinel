@@ -531,6 +531,7 @@ NB_MODULE(_core, m) {
             nb::arg("log_every_epochs") = 1,
             nb::arg("batch_size") = 32,
             nb::arg("gradient_accumulation_steps") = 4,
+            nb::call_guard<nb::gil_scoped_release>(),
             "Streamed epoch train from a LanguageModelChunkSource")
         .def(
             "probe_cuda_train_step_profile",

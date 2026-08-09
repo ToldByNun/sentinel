@@ -183,6 +183,36 @@ def _language_model_train_step(
 
 LanguageModel.train_step = _language_model_train_step  # type: ignore[attr-defined]
 
+
+def _chunk_source_iter_train_chunks(self: LanguageModelChunkSource, *, rewind: bool = True):
+    """Yield materialized train chunks for one epoch (LanguageModelDataset)."""
+    if not self.is_materialized:
+        raise RuntimeError("LanguageModelChunkSource.iter_train_chunks requires materialize()")
+    if rewind:
+        self.rewind_train()
+    while True:
+        chunk, more = self.take_train_chunk()
+        if chunk is None:
+            break
+        yield chunk
+        if not more:
+            break
+
+
+def _chunk_source_train_dataset(self: LanguageModelChunkSource) -> LanguageModelDataset:
+    """Copy all materialized train examples into a LanguageModelDataset."""
+    if not self.is_materialized:
+        raise RuntimeError("LanguageModelChunkSource.train_dataset requires materialize()")
+    out = LanguageModelDataset()
+    self.rewind_train()
+    self.fill_train_dataset(out)
+    return out
+
+
+LanguageModelChunkSource.iter_train_chunks = _chunk_source_iter_train_chunks  # type: ignore[attr-defined]
+LanguageModelChunkSource.train_dataset = _chunk_source_train_dataset  # type: ignore[attr-defined]
+LanguageModelChunkSource.__iter__ = _chunk_source_iter_train_chunks  # type: ignore[attr-defined]
+
 __all__ = [
     "CLASS_COUNT",
     "CLASS_CPP",

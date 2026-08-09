@@ -59,7 +59,8 @@ void registerSentinelData(nb::module_& m) {
             nb::arg("chunk_example_count") = 64,
             nb::arg("train_ratio") = 0.9f,
             nb::arg("seed") = 42u,
-            nb::arg("test_reservoir_cap") = 256)
+            nb::arg("test_reservoir_cap") = 256,
+            "Stream JSONL / HF Arrow corpora (text|content|problem_statement fields)")
         .def(
             "set_tokenizer",
             [](LanguageModelChunkSource& source, const BPETokenizer& tokenizer) {
@@ -67,12 +68,17 @@ void registerSentinelData(nb::module_& m) {
             },
             nb::arg("tokenizer"),
             nb::keep_alive<1, 2>(),
-            "Tokenizer must outlive the chunk source")
+            "Tokenizer must outlive the chunk source (BPETokenizer)")
         .def(
             "prepare_tokenizer_sample",
             &LanguageModelChunkSource::prepareTokenizerSample,
-            nb::arg("max_rows"))
-        .def("materialize", &LanguageModelChunkSource::materialize)
+            nb::arg("max_rows"),
+            nb::call_guard<nb::gil_scoped_release>())
+        .def(
+            "materialize",
+            &LanguageModelChunkSource::materialize,
+            nb::call_guard<nb::gil_scoped_release>(),
+            "One corpus pass: encode train examples + fill test reservoir")
         .def("prepare_test_reservoir", &LanguageModelChunkSource::prepareTestReservoir)
         .def("rewind_train", &LanguageModelChunkSource::rewindTrain)
         .def("sort_train_by_length", &LanguageModelChunkSource::sortTrainByLength)
@@ -85,6 +91,21 @@ void registerSentinelData(nb::module_& m) {
             &LanguageModelChunkSource::nextTrainChunk,
             nb::arg("out"),
             "Fill out with the next train chunk; returns False when exhausted")
+        .def(
+            "take_train_chunk",
+            [](LanguageModelChunkSource& source) -> nb::object {
+                LanguageModelDataset chunk;
+                const bool more = source.nextTrainChunk(chunk);
+                if (chunk.examples.empty())
+                    return nb::make_tuple(nb::none(), more);
+                return nb::make_tuple(nb::cast(std::move(chunk)), more);
+            },
+            "Return (dataset|None, more) for the next train chunk")
+        .def(
+            "is_train_row",
+            &LanguageModelChunkSource::isTrainRow,
+            nb::arg("row_index"),
+            "True when row_index belongs to the train partition")
         .def_prop_ro(
             "test_dataset",
             [](const LanguageModelChunkSource& source) -> const LanguageModelDataset& {

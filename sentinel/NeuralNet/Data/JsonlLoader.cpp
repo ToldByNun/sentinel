@@ -41,7 +41,12 @@ std::string JsonlLoader::extractString(const std::string& line, const std::strin
 bool JsonlLoader::tryParseLine(const std::string& line, CorpusRow& out) {
     if (line.empty()) return false;
 
+    // Prefer SERA-style problem_statement; accept in-memory demo aliases too.
     out.text = JsonlLoader::extractString(line, "problem_statement");
+    if (out.text.empty())
+        out.text = JsonlLoader::extractString(line, "text");
+    if (out.text.empty())
+        out.text = JsonlLoader::extractString(line, "content");
     out.source = JsonlLoader::extractString(line, "source");
     return !out.text.empty();
 }

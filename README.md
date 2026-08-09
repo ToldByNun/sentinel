@@ -131,7 +131,7 @@ model.train(train, /*test=*/{}, 4, 1, 4, 1);
 model.saveSafeTensors("toy.safetensors");
 ```
 
-Streaming corpora (JSONL / HF Arrow): `LanguageModelChunkSource` + `train` / `train_chunks` on **C++ and Python**. JSONL rows use the `problem_statement` field (SERA-style). See [examples/README.md](examples/README.md).
+Streaming corpora (JSONL / HF Arrow): `LanguageModelChunkSource` + `train` / `train_chunks` on **C++ and Python** (`iter_train_chunks` / `take_train_chunk` helpers). JSONL fields: `problem_statement`, `text`, or `content`. See [examples/python/train_chunks.py](examples/python/train_chunks.py).
 
 ## Docs / Public API (v0.1)
 

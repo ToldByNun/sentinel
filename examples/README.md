@@ -14,8 +14,9 @@ API reference: [docs/python.md](../docs/python.md) · [docs/cpp.md](../docs/cpp.
 | [`python/custom_layers_demo.py`](python/custom_layers_demo.py) | Attention / FFN / Spulse / SafeTensors bindings smoke |
 | [`python/generate.py`](python/generate.py) | Load checkpoint (or train toy) → sample |
 | [`python/train_jsonl.py`](python/train_jsonl.py) | Load JSONL texts → train → save weights |
+| [`python/train_chunks.py`](python/train_chunks.py) | Stream JSONL/Arrow via `LanguageModelChunkSource` + `train_chunks` / `iter_train_chunks` |
 | [`python/finetune_hf.py`](python/finetune_hf.py) | HF import → JSONL fine-tune → `save_huggingface` export (`--demo` offline stub) |
-| [`python/ci_host_smoke.py`](python/ci_host_smoke.py) | Host-only CI gate (import, train, config, HF export) — no GPU |
+| [`python/ci_host_smoke.py`](python/ci_host_smoke.py) | Host-only CI gate (import, train, streaming, config, HF export) — no GPU |
 
 ```bash
 pip install -e . --no-build-isolation   # from repo root
@@ -25,6 +26,7 @@ python examples/python/custom_train_loop.py
 python examples/python/custom_layers_demo.py
 python examples/python/generate.py tiny_demo.snlm "the cat"
 python examples/python/train_jsonl.py examples/data/sample.jsonl --out run.safetensors
+python examples/python/train_chunks.py examples/data/sample.jsonl --out chunks_demo.snlm
 python examples/python/finetune_hf.py --demo --out hf_demo_out
 # python examples/python/finetune_hf.py /path/to/hf_model examples/data/sample.jsonl --out hf_finetuned
 ```
@@ -47,7 +49,7 @@ Load with `LanguageModel.from_config(...)` / `load_sentinel_model`. See [docs/py
 - a JSON object with a string field `text`, `content`, or `problem_statement`, or
 - a raw text line
 
-**Streaming** (`LanguageModelChunkSource` / C++ `JsonlLoader`, also bound in Python) expects the **`problem_statement`** field (SERA-style). Example:
+**Streaming** (`LanguageModelChunkSource` / `JsonlLoader`) accepts JSON string fields **`problem_statement`**, **`text`**, or **`content`**. Example:
 
 ```python
 source = S.LanguageModelChunkSource("corpus.jsonl", maximum_token_count=512)
@@ -56,7 +58,10 @@ tok.train(sample, vocab_size=8000)
 source.set_tokenizer(tok)   # BPETokenizer only
 source.materialize()
 model.train_chunks(source, epochs=1)
+# or: for chunk in source.iter_train_chunks(): model.train_step(chunk.examples)
 ```
+
+See [`python/train_chunks.py`](python/train_chunks.py).
 
 Keep `{stem}.sbpe` next to checkpoints for generate.
 
