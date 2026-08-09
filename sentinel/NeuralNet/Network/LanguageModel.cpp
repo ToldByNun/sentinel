@@ -1334,6 +1334,7 @@ std::vector<int> LanguageModel::generate(const std::vector<int>& promptTokenIds,
     if (newTokenCount < 0) throw std::invalid_argument("LanguageModel::generate newTokenCount must be >= 0");
 
     std::vector<int> tokenIds = promptTokenIds;
+    const size_t promptLength = tokenIds.size();
     for (int step = 0; step < newTokenCount; ++step) {
         if (static_cast<int>(tokenIds.size()) >= this->maximumPositionCount) break;
 
@@ -1342,7 +1343,8 @@ std::vector<int> LanguageModel::generate(const std::vector<int>& promptTokenIds,
         tokenIds.push_back(nextTokenId);
     }
 
-    return tokenIds;
+    // Public contract: return newly sampled tokens only (examples prepend the prompt).
+    return std::vector<int>(tokenIds.begin() + static_cast<std::ptrdiff_t>(promptLength), tokenIds.end());
 }
 
 namespace {
@@ -2711,10 +2713,9 @@ void LanguageModel::runHuggingFaceRoundtripSmokeDemo() {
     }
 
     const std::vector<int> generated = model.generate(encoded, /*newTokenCount=*/2, /*temperature=*/0.0f);
-    if (generated.size() != encoded.size() + 2)
+    if (generated.size() != 2)
         throw std::runtime_error("HF roundtrip smoke: generate length mismatch");
-    for (size_t i = encoded.size(); i < generated.size(); ++i) {
-        const int id = generated[i];
+    for (int id : generated) {
         if (id < 0 || id >= model.tokenEmbedding.vocabSize())
             throw std::runtime_error("HF roundtrip smoke: generated id out of range");
     }
