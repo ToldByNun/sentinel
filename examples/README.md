@@ -9,6 +9,7 @@ API reference: [docs/python.md](../docs/python.md) · [docs/cpp.md](../docs/cpp.
 | Script | What it does |
 | ------ | ------------ |
 | [`python/train_tiny.py`](python/train_tiny.py) | In-memory toy corpus → train → `.snlm` + `.safetensors` |
+| [`python/train_from_config.py`](python/train_from_config.py) | Size model from [`configs/tiny.json`](configs/tiny.json) → train → config + weights |
 | [`python/generate.py`](python/generate.py) | Load checkpoint (or train toy) → sample |
 | [`python/train_jsonl.py`](python/train_jsonl.py) | Load JSONL texts → train → save weights |
 | [`python/finetune_hf.py`](python/finetune_hf.py) | HF import → JSONL fine-tune → `save_huggingface` export (`--demo` offline stub) |
@@ -16,11 +17,16 @@ API reference: [docs/python.md](../docs/python.md) · [docs/cpp.md](../docs/cpp.
 ```bash
 pip install -e . --no-build-isolation   # from repo root
 python examples/python/train_tiny.py
+python examples/python/train_from_config.py --config examples/configs/tiny.yaml
 python examples/python/generate.py tiny_demo.snlm "the cat"
 python examples/python/train_jsonl.py examples/data/sample.jsonl --out run.safetensors
 python examples/python/finetune_hf.py --demo --out hf_demo_out
 # python examples/python/finetune_hf.py /path/to/hf_model examples/data/sample.jsonl --out hf_finetuned
 ```
+
+### Native model configs
+
+[`configs/`](configs/) — `format: "sentinel-model"` JSON/YAML (arch + optional `weights`). Load with `LanguageModel.from_config(...)` / `load_sentinel_model`. See [docs/python.md](../docs/python.md).
 
 ### JSONL shape (Python example)
 

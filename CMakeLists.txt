@@ -59,6 +59,7 @@ set(SENTINEL_CXX_SOURCES
     "${SENTINEL_ROOT}/NeuralNet/Initializers/UniformInit.cpp"
     "${SENTINEL_ROOT}/NeuralNet/IO/SafeTensors.cpp"
     "${SENTINEL_ROOT}/NeuralNet/IO/PytorchStateDict.cpp"
+    "${SENTINEL_ROOT}/NeuralNet/IO/SentinelModelConfig.cpp"
     "${SENTINEL_ROOT}/NeuralNet/IO/HuggingFaceConfig.cpp"
     "${SENTINEL_ROOT}/NeuralNet/IO/HuggingFaceResolve.cpp"
     "${SENTINEL_ROOT}/NeuralNet/IO/HuggingFaceWeights.cpp"

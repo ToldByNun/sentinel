@@ -130,9 +130,9 @@ Full reference:
 
 Treat those pages as the supported surface. The `sentinel` demo harness (`main.cpp`) is for smokes/benches — not the API contract.
 
-**Python (summary):** `cuda_available`, `BPETokenizer`, `HfTokenizer`, `LanguageModelDataset.build`, `LanguageModel` (train / generate / checkpoints / `load_huggingface`), `ActivationCheckpointMode`, `SbaoMode`.
+**Python (summary):** `cuda_available`, `BPETokenizer`, `HfTokenizer`, `LanguageModelDataset.build`, `LanguageModel` (train / generate / checkpoints / `load_huggingface` / `from_config`), `SentinelModelConfig`, `ActivationCheckpointMode`, `SbaoMode`.
 
-**C++ (summary):** `LanguageModel.hpp` (incl. `loadHuggingFace`), `LanguageModelDataset.hpp`, `LanguageModelChunkSource.hpp` (streaming), `BPETokenizer.hpp`, `HfTokenizer.hpp`, `SafeTensors.hpp`, `HuggingFaceConfig.hpp` / `HuggingFaceWeights.hpp`, `CudaSbao.hpp`.
+**C++ (summary):** `LanguageModel.hpp` (incl. `loadHuggingFace` / `loadSentinelModel`), `LanguageModelDataset.hpp`, `LanguageModelChunkSource.hpp` (streaming), `BPETokenizer.hpp`, `HfTokenizer.hpp`, `SafeTensors.hpp`, `SentinelModelConfig.hpp`, `HuggingFaceConfig.hpp` / `HuggingFaceWeights.hpp`, `CudaSbao.hpp`.
 
 ## Training knobs (short)
 
@@ -163,11 +163,14 @@ model.set_activation_checkpoint_mode(S.ActivationCheckpointMode.Full)
 | ------ | -------- |
 | `.snlm` | Native weights + optional optimizer (Adam/Muon) |
 | `.safetensors` | Weights only, HF-compatible names + arch metadata |
+| `model.json` / `.yaml` | Native `sentinel-model` arch config (+ optional `weights` path) |
 | `.sbpe` | BPE tokenizer (`BPETokenizer::save` / `load`) — keep as `{stem}.sbpe` next to weights |
 
 ```python
+model = S.LanguageModel.from_config("examples/configs/tiny.json")
 model.save_checkpoint("run.snlm", include_optimizer=True)
 model.save_safetensors("run.safetensors")
+model.save_sentinel_config("run.json")  # weights left empty; set cfg.weights if desired
 tok.save("run.sbpe")
 model.load_checkpoint("run.safetensors")  # also accepts .safetensors
 tok.load("run.sbpe")

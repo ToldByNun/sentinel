@@ -11,6 +11,7 @@
 #include "../Cuda/CudaSbao.hpp"
 #include "../Optimizers/Spulse.hpp"
 #include "../IO/SafeTensors.hpp"
+#include "../IO/SentinelModelConfig.hpp"
 #include "../Optimizers/Adam.hpp"
 
 #include <memory>
@@ -267,6 +268,27 @@ public:
     static LanguageModel loadHuggingFace(const std::string& modelDirectory, float learningRate = 3e-4f);
 
     /// <summary>
+    /// build from a native <c>sentinel-model</c> config; optional weights path is resolved
+    /// relative to <c>baseDirectory</c> (empty weights → random init).
+    /// </summary>
+    static LanguageModel fromSentinelConfig(
+        const SentinelModel::Config& config,
+        const std::string& baseDirectory = "",
+        bool loadWeights = true);
+
+    /// <summary>
+    /// load model.json / model.yaml / model.yml (or a concrete config file) and build;
+    /// relative <c>weights</c> resolve next to the config.
+    /// </summary>
+    static LanguageModel loadSentinelModel(const std::string& pathOrDirectory, bool loadWeights = true);
+
+    /// <summary>snapshot architecture + optimizer LR into a native config (weights left empty)</summary>
+    SentinelModel::Config sentinelConfig() const;
+
+    /// <summary>write model.json / .yaml next to path (extension or directory → model.json)</summary>
+    void saveSentinelConfig(const std::string& pathOrDirectory) const;
+
+    /// <summary>
     /// export a Transformers-compatible directory: config.json + weights (HF names, F32).
     /// modelType must be allowlisted (llama / mistral / qwen2).
     /// weightFormat: "safetensors" (default), "bin" (pytorch_model.bin), or "both".
@@ -292,6 +314,9 @@ public:
 
     /// <summary>kv_head_count ctor + safetensors metadata mismatch gate</summary>
     static void runKvHeadCountSmokeDemo();
+
+    /// <summary>native sentinel-model config → fromSentinelConfig + optional weights roundtrip</summary>
+    static void runSentinelModelConfigSmokeDemo();
 
     /// <summary>HF dir → loadHuggingFace sizes + weights + forward sanity</summary>
     static void runHuggingFaceImportSmokeDemo();

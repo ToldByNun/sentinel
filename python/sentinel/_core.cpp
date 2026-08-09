@@ -6,6 +6,7 @@
 
 #include "NeuralNet/Cuda/CudaMatmul.hpp"
 #include "NeuralNet/Data/LanguageModelDataset.hpp"
+#include "NeuralNet/IO/SentinelModelConfig.hpp"
 #include "NeuralNet/Network/LanguageModel.hpp"
 #include "NeuralNet/Optimizers/Adam.hpp"
 #include "NeuralNet/Tokenizer/BPETokenizer.hpp"
@@ -111,6 +112,51 @@ NB_MODULE(_core, m) {
         .def_prop_ro("unk_token_id", &HuggingFace::Tokenizer::unkTokenId)
         .def_prop_ro("is_loaded", &HuggingFace::Tokenizer::isLoaded)
         .def_prop_ro("ignore_merges", &HuggingFace::Tokenizer::ignoreMerges);
+
+    nb::class_<SentinelModel::Config>(m, "SentinelModelConfig")
+        .def(nb::init<>())
+        .def_rw("format", &SentinelModel::Config::format)
+        .def_rw("vocab_size", &SentinelModel::Config::vocabSize)
+        .def_rw("embedding_dim", &SentinelModel::Config::embeddingDim)
+        .def_rw("max_position", &SentinelModel::Config::maxPosition)
+        .def_rw("block_count", &SentinelModel::Config::blockCount)
+        .def_rw("head_count", &SentinelModel::Config::headCount)
+        .def_rw("kv_head_count", &SentinelModel::Config::kvHeadCount)
+        .def_rw("intermediate_size", &SentinelModel::Config::intermediateSize)
+        .def_rw("rope_theta", &SentinelModel::Config::ropeTheta)
+        .def_rw("use_bias", &SentinelModel::Config::useBias)
+        .def_rw("tie_embedding", &SentinelModel::Config::tieEmbedding)
+        .def_rw("rms_norm_eps", &SentinelModel::Config::rmsNormEps)
+        .def_rw("learning_rate", &SentinelModel::Config::learningRate)
+        .def_rw("weights", &SentinelModel::Config::weights)
+        .def_static(
+            "parse_json",
+            &SentinelModel::parseConfigJson,
+            nb::arg("text"),
+            "Parse a sentinel-model JSON string")
+        .def_static(
+            "parse_yaml",
+            &SentinelModel::parseConfigYaml,
+            nb::arg("text"),
+            "Parse a flat sentinel-model YAML string")
+        .def_static(
+            "load",
+            &SentinelModel::loadConfig,
+            nb::arg("path"),
+            "Load model.json / model.yaml / model.yml from a path or directory")
+        .def(
+            "to_json",
+            &SentinelModel::serializeConfigJson,
+            "Serialize to sentinel-model JSON")
+        .def(
+            "to_yaml",
+            &SentinelModel::serializeConfigYaml,
+            "Serialize to flat sentinel-model YAML")
+        .def(
+            "save",
+            &SentinelModel::saveConfig,
+            nb::arg("path"),
+            "Write config (.json / .yaml / .yml, or directory → model.json)");
 
     nb::class_<LanguageModelDataset>(m, "LanguageModelDataset")
         .def(nb::init<>())
@@ -347,5 +393,27 @@ NB_MODULE(_core, m) {
             nb::arg("model_type") = "llama",
             nb::arg("tokenizer_source_directory") = "",
             nb::arg("weight_format") = "safetensors",
-            "Export a Transformers-compatible directory (config.json + safetensors and/or pytorch_model.bin; optional tokenizer copy)");
+            "Export a Transformers-compatible directory (config.json + safetensors and/or pytorch_model.bin; optional tokenizer copy)")
+        .def_static(
+            "load_sentinel_model",
+            &LanguageModel::loadSentinelModel,
+            nb::arg("path"),
+            nb::arg("load_weights") = true,
+            "Build from a sentinel-model JSON/YAML config (relative weights resolve next to the config)")
+        .def_static(
+            "from_sentinel_config",
+            &LanguageModel::fromSentinelConfig,
+            nb::arg("config"),
+            nb::arg("base_directory") = "",
+            nb::arg("load_weights") = true,
+            "Build from a SentinelModelConfig; optional weights relative to base_directory")
+        .def(
+            "sentinel_config",
+            &LanguageModel::sentinelConfig,
+            "Snapshot architecture + learning_rate into a SentinelModelConfig (weights empty)")
+        .def(
+            "save_sentinel_config",
+            &LanguageModel::saveSentinelConfig,
+            nb::arg("path"),
+            "Write a sentinel-model JSON/YAML config for this LanguageModel");
 }

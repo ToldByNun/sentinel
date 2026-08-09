@@ -1,0 +1,16 @@
+{
+  "format": "sentinel-model",
+  "vocab_size": 32000,
+  "embedding_dim": 768,
+  "max_position": 512,
+  "block_count": 12,
+  "head_count": 12,
+  "kv_head_count": 12,
+  "intermediate_size": 0,
+  "rope_theta": 10000,
+  "use_bias": true,
+  "tie_embedding": true,
+  "rms_norm_eps": 1e-5,
+  "learning_rate": 3e-4,
+  "weights": null
+}
