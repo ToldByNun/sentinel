@@ -96,7 +96,7 @@ jobs:
             libcublas-dev-13-0 \
             g++ \
             libomp-dev \
-            zlib1g-dev
+            git
           echo "/usr/local/cuda-13.0/bin" >> "$GITHUB_PATH"
           echo "/usr/local/cuda-13.0/lib64" >> "$GITHUB_PATH"
           echo "CUDA_PATH=/usr/local/cuda-13.0" >> "$GITHUB_ENV"
@@ -116,18 +116,6 @@ jobs:
         with:
           cuda: "13.0.2"
           method: network
-
-      - name: Install zlib (Windows / vcpkg)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          if (-not $env:VCPKG_INSTALLATION_ROOT) {
-            throw "VCPKG_INSTALLATION_ROOT not set on runner"
-          }
-          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install zlib:x64-windows --disable-metrics
-          $toolchain = Join-Path $env:VCPKG_INSTALLATION_ROOT "scripts\buildsystems\vcpkg.cmake"
-          if (-not (Test-Path $toolchain)) { throw "vcpkg toolchain missing: $toolchain" }
-          "CMAKE_TOOLCHAIN_FILE=$toolchain" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Re-export CUDA onto PATH (Windows)
         if: runner.os == 'Windows'
@@ -211,11 +199,7 @@ jobs:
           CMAKE_BUILD_PARALLEL_LEVEL: "4"
         run: |
           python -m pip install --upgrade pip build
-          if "%CMAKE_TOOLCHAIN_FILE%"=="" (
-            echo CMAKE_TOOLCHAIN_FILE unset — zlib/vcpkg required
-            exit /b 1
-          )
-          python -m build --wheel --outdir dist -C cmake.define.CMAKE_TOOLCHAIN_FILE=%CMAKE_TOOLCHAIN_FILE%
+          python -m build --wheel --outdir dist
 
       - name: List dist
         shell: bash
