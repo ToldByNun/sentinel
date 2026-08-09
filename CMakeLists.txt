@@ -162,15 +162,19 @@ target_compile_definitions(sentinel PUBLIC
 )
 
 # CUDA + host deps are PUBLIC so static consumers pick them up via Sentinel::sentinel.
-# zlib is PRIVATE: bundled static zlib is archived into libsentinel; system zlib
-# still needs to be available to final linkers (CMake propagates for static libs).
+# Bundled zlib is BUILD_INTERFACE-only so install(EXPORT) does not require exporting
+# zlibstatic; final build-tree link lines (exe / Python module) still pull it in.
 target_link_libraries(sentinel PUBLIC
     CUDA::cudart_static
     CUDA::cublasLt
     CUDA::cublas
     Threads::Threads
 )
-target_link_libraries(sentinel PRIVATE ${SENTINEL_ZLIB_TARGET})
+if(SENTINEL_SYSTEM_ZLIB)
+    target_link_libraries(sentinel PUBLIC ZLIB::ZLIB)
+else()
+    target_link_libraries(sentinel PRIVATE $<BUILD_INTERFACE:${SENTINEL_ZLIB_TARGET}>)
+endif()
 
 if(UNIX AND NOT APPLE)
     target_link_libraries(sentinel PUBLIC ${CMAKE_DL_LIBS} rt)
