@@ -166,7 +166,10 @@ NB_MODULE(_core, m) {
             "Serialize to flat sentinel-model YAML")
         .def(
             "save",
-            &SentinelModel::saveConfig,
+            [](const SentinelModel::Config& config, const std::string& path) {
+                // Free function is saveConfig(path, config); wrap so method is config.save(path).
+                SentinelModel::saveConfig(path, config);
+            },
             nb::arg("path"),
             "Write config (.json / .yaml / .yml, or directory → model.json)");
 
