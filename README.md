@@ -1,4 +1,14 @@
-# Sentinel
+<p align="center">
+  <a href="https://github.com/ToldByNun/sentinel">
+    <picture>
+      <img alt="Prime Intellect" src="assets/logo/sentinel.png" width="312" style="max-width: 100%;">
+    </picture>
+  </a>
+</p>
+
+<h3 align="center">
+Sentinel
+</h3>
 
 **Sentinel** is a C++/CUDA library for **full-train** causal language models on a single consumer GPU — no LoRA, no PyTorch/TensorFlow runtime, no cuDNN.
 
