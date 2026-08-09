@@ -4,7 +4,7 @@ Sentinel can **import** HuggingFace causal LM checkpoints that fit the engine su
 
 This is **not** a Llama-only importer/exporter. Public APIs are HF-generic (`loadHuggingFace` / `saveHuggingFace`, `load_huggingface` / `save_huggingface`, `HfTokenizer`). Llama / Mistral / Qwen2-style repos are the **first supported layout family** because they share tensor names and math.
 
-API details: [Python](python.md) · [C++](cpp.md). End-to-end fine-tune: [`examples/python/finetune_hf.py`](../examples/python/finetune_hf.py).
+API details: [Python](python.md) · [C++](cpp.md). End-to-end fine-tune: [`examples/python/finetune_hf.py`](../examples/python/finetune_hf.py). C++ Hub/path resolution: `HuggingFace::resolveModelDirectory` / `resolveTokenizerDirectory` (`IO/HuggingFaceResolve.hpp`).
 
 ---
 
@@ -190,4 +190,5 @@ With the `sentinel` demo binary:
 | `HuggingFace::Tokenizer` (`Tokenizer/HfTokenizer.hpp`) | `HfTokenizer` |
 | `HuggingFace::loadConfig` / `saveConfig` | (C++ only) |
 | `HuggingFace::loadMappedWeights` / `saveDirectory` | (C++ only) |
+| `HuggingFace::resolveModelDirectory` / `resolveTokenizerDirectory` (`IO/HuggingFaceResolve.hpp`) | (C++ only; Python Hub fetch via `finetune_hf.py` + `huggingface_hub`) |
 | `PytorchStateDict::load` / `save` | (C++ only; used by HF import/export) |

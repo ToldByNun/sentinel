@@ -8,6 +8,10 @@ All notable changes to this project are documented here.
 
 - CUDA packed train: epoch shuffle + **window-local** length packing (was global short→long curriculum) and Adam-step pack caps so effective batch matches `batch×accum`. SERA harness default LR `3e-4`, batch `32` (was `1e-3` / `64`) for stable descending train/test loss.
 
+### Changed
+
+- **Docs refreshed** to match the current public surface: Python mid-level ops, streaming `LanguageModelChunkSource` / `train_chunks`, SafeTensors helpers, `Sequential` / classification, `sentinel-model` config, SPULSE Full/Hybrid, HF import/export. Removed stale “ChunkSource C++-only” notes from README / examples / API pages.
+
 ### Added
 
 - **Python mid-level ops bindings** (expanded): `Matrix`, activations/losses (`Softmax`/`SiLU`/`ReLU`/`CrossEntropy`/`MSE`), `UniformInit`, `Adam`/`AdamState`/`SGD`/`MuonState`, host `Spulse`/`SpulseState`, layers (`Embedding`/`Dense`/`Dropout`/`MeanPool`/`RMSNorm`/`RotaryEmbedding`/`CausalSelfAttention`/`FeedForward`/`TransformerBlock` + caches), LM step API (`forward`/`accumulate_example`/`apply_gradients`/`train_step`), streaming (`LanguageModelChunkSource`/`train_chunks`), SafeTensors I/O, `Sequential`/`ClassificationDataset`. Examples: [`custom_train_loop.py`](examples/python/custom_train_loop.py), [`custom_layers_demo.py`](examples/python/custom_layers_demo.py).
@@ -50,7 +54,7 @@ First library-oriented release surface.
 
 ### Notes
 
-- Python v0.1 exposes **in-memory** datasets (`LanguageModelDataset`). Streaming JSONL/Arrow epochs are C++ (`LanguageModelChunkSource`) unless wrapped in bindings.
+- Python v0.1 started with in-memory datasets (`LanguageModelDataset`). Streaming (`LanguageModelChunkSource` / `train_chunks`) and mid-level ops landed later — see **[Unreleased]**.
 - Throughput numbers in the README are indicative (RTX 5070 Ti 16 GB); re-measure on your machine.
 - SafeTensors half-load smoke: `SENTINEL_SAFETENSORS_HALF_SMOKE=1` when running the `sentinel` harness.
 - Intermediate-size smoke: `SENTINEL_INTERMEDIATE_SIZE_SMOKE=1`.

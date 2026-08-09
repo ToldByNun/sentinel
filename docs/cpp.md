@@ -14,7 +14,9 @@ Includes are rooted at the NeuralNet tree, e.g.:
 #include "NeuralNet/Data/LanguageModelDataset.hpp"
 #include "NeuralNet/Data/LanguageModelChunkSource.hpp"
 #include "NeuralNet/Tokenizer/BPETokenizer.hpp"
+#include "NeuralNet/Tokenizer/HfTokenizer.hpp"
 #include "NeuralNet/Optimizers/Adam.hpp"
+#include "NeuralNet/IO/SentinelModelConfig.hpp"
 #include "NeuralNet/Cuda/CudaSbao.hpp"
 #include "NeuralNet/Cuda/CudaMatmul.hpp"   // CudaMatmul::isAvailable()
 ```
@@ -118,7 +120,7 @@ Device train paths typically use `buildOneHot=false` (token-id CE).
 
 ## `LanguageModelChunkSource` (streaming)
 
-Header: `Data/LanguageModelChunkSource.hpp` — **not wrapped in Python**.
+Header: `Data/LanguageModelChunkSource.hpp` — also wrapped in Python (`LanguageModelChunkSource` / `train_chunks`).
 
 Streams `.jsonl` or HF Arrow dirs via `createTextRowReader`. JSONL rows use the **`problem_statement`** string field (SERA-style); see `JsonlLoader`.
 
@@ -141,12 +143,14 @@ model.train(source, /*epochs=*/2, /*logEvery=*/1, /*batch=*/32, /*accum=*/4);
 
 | Method | Notes |
 | ------ | ----- |
-| `setTokenizer` | Required before materialize / encode |
+| `setTokenizer` | Required before materialize / encode (`BPETokenizer*`; must outlive source) |
 | `prepareTokenizerSample` | First N train-hash texts; rewinds |
 | `materialize` | One corpus pass → cached token ids |
 | `rewindTrain` / `nextTrainChunk` | Epoch iteration |
+| `sortTrainByLength` | Length sort for packing |
 | `fillTrainDataset` | Copy all train examples into a dataset |
 | `testDataset` | Reservoir after materialize |
+| `prepareTestReservoir` | Build/refresh test reservoir |
 
 ---
 
@@ -181,6 +185,8 @@ Header: `Network/LanguageModel.hpp`
 | `setCudaPreferInt8AdamMoments(bool)` | Low-VRAM Adam |
 | `setCudaPreferMuon(bool)` / `setCudaMuonNsSteps(int)` | Hidden-weight Muon |
 | `setCudaPreferSpulse(bool)` / `setCudaSpulseCoverage(SpulseCoverage)` | SPULSE Hybrid or Full |
+| `setCudaSpulseMomentumBeta` / `FastBeta` / `SlowBeta` / `ScaleClip` | SPULSE EMA knobs |
+| `setCudaSpulseMomentumStorage(SpulseMomentumStorage)` | Device `u`: Fp32 / Fp16 / Int8 |
 | `setCudaPreferCpuAdamOffload(bool)` | Host Adam / fused-half Adam |
 | `setCudaPreferHostSgd(bool)` | Host SGD masters |
 | `setCudaPreferSbao(bool)` / `setCudaSbaoMode(SbaoMode)` / `cudaSbaoModeResolved()` | Unified policy |
@@ -204,6 +210,7 @@ Set offload / SBAO preferences **before** `enableCudaTrain()` when pack and chec
 | `train(LanguageModelChunkSource&, …)` | Streaming epochs |
 | `averageLoss` / `exampleLoss` | |
 | `forward(tokenIds)` | Logits `Matrix` (device if enabled) |
+| `accumulateExample` / `applyGradients` | Public host custom-loop step API (also bound in Python) |
 | `generate(prompt, newTokens, temperature=1, topK=40, seed=42)` | New tokens only; `temperature <= 0` greedy |
 
 ### Checkpoints / I/O
@@ -216,7 +223,6 @@ Set offload / SBAO preferences **before** `enableCudaTrain()` when pack and chec
 | `loadHuggingFace(dir, lr=3e-4)` | Static: parse HF `config.json`, size model, remap/load safetensors or modern `pytorch_model.bin`; see [huggingface.md](huggingface.md) |
 | `fromSentinelConfig` / `loadSentinelModel` | Static: native `sentinel-model` JSON/YAML (`IO/SentinelModelConfig.hpp`); optional `weights` |
 | `sentinelConfig` / `saveSentinelConfig` | Snapshot / write native model config |
-| `accumulateExample` / `applyGradients` | Public host custom-loop step API (also bound in Python) |
 | `saveHuggingFace(dir, modelType="llama", tokenizerSource="", weightFormat="safetensors")` | Export Transformers-compatible dir (`config.json` + `model.safetensors` and/or `pytorch_model.bin`; optional tokenizer copy). `weightFormat`: `safetensors` \| `bin` \| `both` |
 
 Focused smoke: `SENTINEL_HF_ROUNDTRIP_SMOKE=1` — stub HF dir → import + `HfTokenizer` encode + 1 host train step + generate (finite gate).
@@ -238,17 +244,23 @@ Unset env `SENTINEL_PHASE_TRACE` when quoting throughput.
 
 | Header | Role |
 | ------ | ---- |
+| `Math/Matrix.hpp` | Host matrix + GEMM helpers (Python: `Matrix`) |
+| `Activations/*` / `Losses/*` | Softmax, SiLU, ReLU, CrossEntropy, MSE |
 | `Optimizers/Adam.hpp` / `SGD.hpp` | Host optimizers |
+| `Cuda/CudaSPULSE.hpp` | Device + host SPULSE (`CudaSpulse` / coverage / momentum storage) |
+| `Layers/*` | Embedding, Dense, Dropout, MeanPool, RMSNorm, Rotary, Attention, FFN, TransformerBlock |
+| `Network/Sequential.hpp` | Small classifier stack (embed→pool→MLP) |
 | `IO/SafeTensors.hpp` | Weight file format — **load** F32/BF16/F16 → host F32; **save** F32 |
 | `IO/SentinelModelConfig.hpp` | Native `format: "sentinel-model"` JSON/YAML (flat YAML); size + optional weights |
 | `IO/PytorchStateDict.hpp` | Modern torch ZIP state-dict — **load** F32/F16/BF16 → host F32; **save** F32 (no libtorch; zlib) |
 | `IO/HuggingFaceConfig.hpp` | Minimal `config.json` parse/serialize; allowlist `llama`/`mistral`/`qwen2`; rejects MoE / sliding-window / quantized |
-| `IO/HuggingFaceWeights.hpp` | HF↔Sentinel tensor remap + shard index (`loadMappedWeights` / `saveDirectory`); safetensors + `.bin`; first family: Llama/Mistral-like names |
+| `IO/HuggingFaceWeights.hpp` | HF↔Sentinel tensor remap + shard index (`loadMappedWeights` / `saveDirectory`); safetensors + `.bin` |
+| `IO/HuggingFaceResolve.hpp` | Resolve local path / Hub repo id / URL → local dir (`resolveModelDirectory` / `resolveTokenizerDirectory`) |
 | `Tokenizer/HfTokenizer.hpp` | HF `tokenizer.json` ByteLevel BPE (`HuggingFace::Tokenizer`); `.sbpe` stays on `BPETokenizer` |
-| `Data/TextRowReader.hpp` / `JsonlLoader.hpp` / `ArrowChunkReader.hpp` | Corpus I/O |
+| `Data/TextRowReader.hpp` / `JsonlLoader.hpp` / `ArrowChunkReader.hpp` | Corpus I/O (Arrow used inside ChunkSource) |
+| `Data/ClassificationDataset.hpp` | Labeled corpus helpers for `Sequential` |
 | `Cuda/CudaMatmul.hpp` | `CudaMatmul::isAvailable()` |
 | `Cuda/CudaSbao.hpp` | SBAO policy + fused-half offload helpers |
-| `Layers/*` | Block primitives (usually not app-facing) |
 
 ---
 
@@ -266,4 +278,6 @@ Useful options: `SENTINEL_BUILD_SHARED`, `SENTINEL_CUDA_ARCHITECTURES`, `SENTINE
 
 ## Python parity
 
-Most train/generate/checkpoint knobs are also on the [Python API](python.md). Gaps may include streaming `ChunkSource`, `forward` logits, and some fine-grained CUDA setters. Tokenizer **`.sbpe`** I/O is available on both sides; HF `tokenizer.json` is `HfTokenizer` / `HuggingFace::Tokenizer` — see [huggingface.md](huggingface.md).
+High-level train/generate/checkpoint knobs, streaming (`LanguageModelChunkSource` / `train_chunks`), mid-level `Matrix`/layers/optimizers, SafeTensors helpers, `SentinelModelConfig`, and HF load/save are on the [Python API](python.md).
+
+Still C++-only (typical): direct `CudaMatrix` / device optimizer objects, `HuggingFace::loadConfig` / `loadMappedWeights` / `resolveModelDirectory`, standalone `ArrowChunkReader`, some harness probes. HF `tokenizer.json` is `HfTokenizer` / `HuggingFace::Tokenizer` — see [huggingface.md](huggingface.md).

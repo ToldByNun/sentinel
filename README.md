@@ -115,7 +115,7 @@ model.train(train, /*test=*/{}, 4, 1, 4, 1);
 model.saveSafeTensors("toy.safetensors");
 ```
 
-Streaming corpora (JSONL / HF Arrow) use `LanguageModelChunkSource` on the **C++** API — not yet wrapped in Python. See [examples/README.md](examples/README.md).
+Streaming corpora (JSONL / HF Arrow): `LanguageModelChunkSource` + `train` / Python `train_chunks`. See [docs/python.md](docs/python.md) and [examples/README.md](examples/README.md).
 
 ## Docs / Public API (v0.1)
 
@@ -126,13 +126,13 @@ Full reference:
 | **[docs/](docs/README.md)** | Index |
 | **[docs/python.md](docs/python.md)** | Python (`import sentinel`) |
 | **[docs/cpp.md](docs/cpp.md)** | C++ (`Sentinel::sentinel`) |
-| **[docs/huggingface.md](docs/huggingface.md)** | HF causal-LM import + tokenizer |
+| **[docs/huggingface.md](docs/huggingface.md)** | HF causal-LM import / export + tokenizer |
 
 Treat those pages as the supported surface. The `sentinel` demo harness (`main.cpp`) is for smokes/benches — not the API contract.
 
 **Python (summary):** high-level `LanguageModel` train/generate/I/O **plus** mid-level ops — `Matrix`, Attention/FFN/layers, `Adam`/`Spulse`, Softmax/CE, `accumulate_example`/`train_step`, `LanguageModelChunkSource`, SafeTensors helpers, `SentinelModelConfig`.
 
-**C++ (summary):** `LanguageModel.hpp` (incl. `loadHuggingFace` / `loadSentinelModel`), `LanguageModelDataset.hpp`, `LanguageModelChunkSource.hpp` (streaming), `BPETokenizer.hpp`, `HfTokenizer.hpp`, `SafeTensors.hpp`, `SentinelModelConfig.hpp`, `HuggingFaceConfig.hpp` / `HuggingFaceWeights.hpp`, `CudaSbao.hpp`.
+**C++ (summary):** `LanguageModel.hpp` (incl. `loadHuggingFace` / `loadSentinelModel` / `accumulateExample`), `LanguageModelDataset.hpp`, `LanguageModelChunkSource.hpp` (streaming), `BPETokenizer.hpp`, `HfTokenizer.hpp`, `SafeTensors.hpp`, `SentinelModelConfig.hpp`, `HuggingFaceConfig.hpp` / `HuggingFaceWeights.hpp` / `HuggingFaceResolve.hpp`, `CudaSbao.hpp`, `CudaSPULSE.hpp`, `Layers/*` / `Math/Matrix.hpp`.
 
 ## Training knobs (short)
 

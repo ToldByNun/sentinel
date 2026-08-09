@@ -39,9 +39,9 @@ Each non-empty line is either:
 - a JSON object with a string field `text`, `content`, or `problem_statement`, or
 - a raw text line
 
-The C++ streaming path (`LanguageModelChunkSource` + `JsonlLoader`) currently expects **`problem_statement`** (SERA-style). The Python example accepts the common aliases above so small demos are less awkward.
+The streaming path (`LanguageModelChunkSource` + `JsonlLoader`, C++ and Python) currently expects **`problem_statement`** (SERA-style). The Python `train_jsonl.py` example accepts the common aliases above so small demos are less awkward.
 
-Streaming / chunked epoch loops over large corpora use the C++ `LanguageModelChunkSource` API (and Python bindings if you exposed them). Keep `{stem}.sbpe` next to checkpoints for generate.
+Streaming / chunked epoch loops: `LanguageModelChunkSource` + C++ `LanguageModel::train(source, …)` or Python `model.train_chunks(source, …)`. Keep `{stem}.sbpe` next to checkpoints for generate.
 
 ## C++
 

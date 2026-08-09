@@ -25,9 +25,9 @@ python examples/python/train_tiny.py
 | Use | Avoid treating as API |
 | --- | --------------------- |
 | `NeuralNet/Network/LanguageModel.hpp` + Data/Tokenizer/IO headers | One-off flags inside `sentinel/main.cpp` |
-| `python/sentinel/` + bindings in `python/sentinel/_core.cpp` | Ad-hoc probe scripts unless documented |
+| `python/sentinel/` + bindings in `_core.cpp`, `bindings_ops.cpp`, `bindings_data.cpp` | Ad-hoc probe scripts unless documented |
 
-If you add a user-facing knob, expose it on `LanguageModel` (and Python if it belongs in v0.1) and mention it in the README API table.
+If you add a user-facing knob, expose it on `LanguageModel` (and Python if it belongs in v0.1) and update [`docs/`](docs/README.md) in the same PR.
 
 ## CUDA / throughput changes
 
@@ -44,7 +44,7 @@ Unset `SENTINEL_PHASE_TRACE` when quoting tok/s (trace skews wall time).
 ## Docs
 
 - User entry point: [`README.md`](README.md)
-- API reference: [`docs/`](docs/README.md) — [Python](docs/python.md), [C++](docs/cpp.md)
+- API reference: [`docs/`](docs/README.md) — [Python](docs/python.md), [C++](docs/cpp.md), [HuggingFace](docs/huggingface.md)
 - Examples: [`examples/README.md`](examples/README.md)
 - Benchmarks: [`benchmarks/README.md`](benchmarks/README.md)
 - Release notes: [`CHANGELOG.md`](CHANGELOG.md)
