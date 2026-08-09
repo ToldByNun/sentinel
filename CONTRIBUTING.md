@@ -44,12 +44,12 @@ Unset `SENTINEL_PHASE_TRACE` when quoting tok/s (trace skews wall time).
 ## Docs
 
 - User entry point: [`README.md`](README.md)
-- API reference: [`docs/`](docs/README.md) — [Python](docs/python.md), [C++](docs/cpp.md)
+- API reference: [`docs/`](docs/README.md) — [Python](docs/python.md), [C++](docs/cpp.md), [HuggingFace](docs/huggingface.md)
 - Examples: [`examples/README.md`](examples/README.md)
 - Benchmarks: [`benchmarks/README.md`](benchmarks/README.md)
 - Release notes: [`CHANGELOG.md`](CHANGELOG.md)
 
-When you change a public method, update the matching docs page in the same PR.
+When you change a public method, update the matching docs page in the same PR. Keep README / examples / docs in sync on streaming (`LanguageModelChunkSource`), HF import/export, and native `sentinel-model` config.
 
 ## Style
 

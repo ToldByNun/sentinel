@@ -62,6 +62,7 @@ target_link_libraries(my_app PRIVATE Sentinel::sentinel)
 | `SENTINEL_BUILD_DEMO` | `ON` | `sentinel` harness (`main.cpp`) |
 | `SENTINEL_BUILD_EXAMPLES` | `ON` | `sentinel_train_tiny`, `sentinel_generate` |
 | `SENTINEL_BUILD_PYTHON` | `OFF` (`ON` via pip) | nanobind `sentinel._core` |
+| `SENTINEL_INSTALL` | `ON` | Install / `find_package` export rules |
 
 **Requirements:** Windows or Linux x86_64 · C++20 · CMake ≥ 3.24 · CUDA 13.x · GeForce 20/30/40/50 (`sm_75` … `sm_120`) · OpenMP · Python ≥ 3.10 only for the pip package.
 
@@ -115,7 +116,7 @@ model.train(train, /*test=*/{}, 4, 1, 4, 1);
 model.saveSafeTensors("toy.safetensors");
 ```
 
-Streaming corpora (JSONL / HF Arrow) use `LanguageModelChunkSource` on the **C++** API — not yet wrapped in Python. See [examples/README.md](examples/README.md).
+Streaming corpora (JSONL / HF Arrow): `LanguageModelChunkSource` + `train` / `train_chunks` on **C++ and Python**. JSONL rows use the `problem_statement` field (SERA-style). See [examples/README.md](examples/README.md).
 
 ## Docs / Public API (v0.1)
 
@@ -126,13 +127,13 @@ Full reference:
 | **[docs/](docs/README.md)** | Index |
 | **[docs/python.md](docs/python.md)** | Python (`import sentinel`) |
 | **[docs/cpp.md](docs/cpp.md)** | C++ (`Sentinel::sentinel`) |
-| **[docs/huggingface.md](docs/huggingface.md)** | HF causal-LM import + tokenizer |
+| **[docs/huggingface.md](docs/huggingface.md)** | HF causal-LM import / export + tokenizer |
 
 Treat those pages as the supported surface. The `sentinel` demo harness (`main.cpp`) is for smokes/benches — not the API contract.
 
-**Python (summary):** high-level `LanguageModel` train/generate/I/O **plus** mid-level ops — `Matrix`, Attention/FFN/layers, `Adam`/`Spulse`, Softmax/CE, `accumulate_example`/`train_step`, `LanguageModelChunkSource`, SafeTensors helpers, `SentinelModelConfig`.
+**Python (summary):** high-level `LanguageModel` train / `train_chunks` / generate / I/O **plus** mid-level ops — `Matrix`, Attention/FFN/layers, `Adam`/`Spulse`, Softmax/CE, `accumulate_example`/`train_step`, `LanguageModelChunkSource` / `JsonlLoader`, SafeTensors helpers, `SentinelModelConfig`.
 
-**C++ (summary):** `LanguageModel.hpp` (incl. `loadHuggingFace` / `loadSentinelModel`), `LanguageModelDataset.hpp`, `LanguageModelChunkSource.hpp` (streaming), `BPETokenizer.hpp`, `HfTokenizer.hpp`, `SafeTensors.hpp`, `SentinelModelConfig.hpp`, `HuggingFaceConfig.hpp` / `HuggingFaceWeights.hpp`, `CudaSbao.hpp`.
+**C++ (summary):** `LanguageModel.hpp` (incl. `loadHuggingFace` / `loadSentinelModel`), `LanguageModelDataset.hpp`, `LanguageModelChunkSource.hpp` (streaming), `BPETokenizer.hpp`, `HfTokenizer.hpp`, `SafeTensors.hpp`, `SentinelModelConfig.hpp`, `HuggingFaceConfig.hpp` / `HuggingFaceWeights.hpp` / `HuggingFaceResolve.hpp`, `CudaSbao.hpp`.
 
 ## Training knobs (short)
 

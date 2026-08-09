@@ -56,6 +56,7 @@ Desktop WDDM / pack budget matter — re-measure after train-path changes. Headl
 ```bash
 # Unset SENTINEL_PHASE_TRACE for real tok/s
 python benchmarks/_lib/probe_4b_safe.py
+python benchmarks/_lib/probe_sbao_mid.py   # mid-size SBAO residency probe
 ```
 
 ### Adam vs Muon (12×768)
