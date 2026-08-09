@@ -234,6 +234,20 @@ public:
     /// <summary>mean loss over the dataset</summary>
     float averageLoss(const LanguageModelDataset& dataset);
 
+    /// <summary>
+    /// host forward + Softmax/CE backward into <c>gradients</c> (OpenMP-safe; weights read-only).
+    /// Allocate with <c>LanguageModelGradients::zerosFrom</c> first. Does not use the CUDA train path.
+    /// </summary>
+    float accumulateExample(
+        const LanguageModelExample& example,
+        LanguageModelGradients& gradients,
+        LanguageModelCache& cache) const;
+
+    /// <summary>
+    /// one host Adam step from averaged (or raw) gradients; marks the CUDA mirror stale when present.
+    /// </summary>
+    void applyGradients(const LanguageModelGradients& gradients);
+
     /// <summary>train with parallel gradient accumulation</summary>
     void train(const LanguageModelDataset& dataset, int epochs, int logEveryEpochs = 1);
 
@@ -355,14 +369,8 @@ private:
     /// <summary>forward using only stack local caches (safe under OpenMP)</summary>
     Matrix forwardLocal(const std::vector<int>& tokenIds, LanguageModelCache& cache) const;
 
-    /// <summary>forward + backward into thread local gradient bucket (weights stay read only)</summary>
-    float accumulateExample(const LanguageModelExample& example, LanguageModelGradients& gradients, LanguageModelCache& cache) const;
-
     /// <summary>train one in-memory slice (OpenMP); returns sum of per-example losses</summary>
     float trainOnExamples(const LanguageModelDataset& dataset, int batchSize, std::vector<LanguageModelGradients>& threadGradients, std::vector<LanguageModelCache>& threadCaches, LanguageModelGradients& merged);
-
-    /// <summary>one Adam step from averaged batch gradients</summary>
-    void applyGradients(const LanguageModelGradients& gradients);
 };
 
 #endif // LANGUAGEMODEL_HPP

@@ -216,6 +216,7 @@ Set offload / SBAO preferences **before** `enableCudaTrain()` when pack and chec
 | `loadHuggingFace(dir, lr=3e-4)` | Static: parse HF `config.json`, size model, remap/load safetensors or modern `pytorch_model.bin`; see [huggingface.md](huggingface.md) |
 | `fromSentinelConfig` / `loadSentinelModel` | Static: native `sentinel-model` JSON/YAML (`IO/SentinelModelConfig.hpp`); optional `weights` |
 | `sentinelConfig` / `saveSentinelConfig` | Snapshot / write native model config |
+| `accumulateExample` / `applyGradients` | Public host custom-loop step API (also bound in Python) |
 | `saveHuggingFace(dir, modelType="llama", tokenizerSource="", weightFormat="safetensors")` | Export Transformers-compatible dir (`config.json` + `model.safetensors` and/or `pytorch_model.bin`; optional tokenizer copy). `weightFormat`: `safetensors` \| `bin` \| `both` |
 
 Focused smoke: `SENTINEL_HF_ROUNDTRIP_SMOKE=1` — stub HF dir → import + `HfTokenizer` encode + 1 host train step + generate (finite gate).

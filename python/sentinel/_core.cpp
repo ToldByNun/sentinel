@@ -4,9 +4,15 @@
 
 #include <stdexcept>
 
+#include "bindings_ops.hpp"
+
 #include "NeuralNet/Cuda/CudaMatmul.hpp"
 #include "NeuralNet/Data/LanguageModelDataset.hpp"
 #include "NeuralNet/IO/SentinelModelConfig.hpp"
+#include "NeuralNet/Layers/Embedding.hpp"
+#include "NeuralNet/Layers/RMSNorm.hpp"
+#include "NeuralNet/Layers/TransformerBlock.hpp"
+#include "NeuralNet/Math/Matrix.hpp"
 #include "NeuralNet/Network/LanguageModel.hpp"
 #include "NeuralNet/Optimizers/Adam.hpp"
 #include "NeuralNet/Tokenizer/BPETokenizer.hpp"
@@ -43,9 +49,11 @@ LanguageModel makeLanguageModel(
 } // namespace
 
 NB_MODULE(_core, m) {
-    m.doc() = "Sentinel C++/CUDA language-model bindings";
+    m.doc() = "Sentinel C++/CUDA language-model bindings (high-level train + mid-level ops)";
     m.attr("__version__") = "0.1.0";
     m.def("cuda_available", &CudaMatmul::isAvailable, "True if a CUDA device is usable");
+
+    registerSentinelOps(m);
 
     nb::enum_<ActivationCheckpointMode>(m, "ActivationCheckpointMode")
         .value("Off", ActivationCheckpointMode::Off)
@@ -158,6 +166,41 @@ NB_MODULE(_core, m) {
             nb::arg("path"),
             "Write config (.json / .yaml / .yml, or directory → model.json)");
 
+    // Forward-declare LanguageModel so LanguageModelGradients.zeros_from can reference it.
+    nb::class_<LanguageModel> languageModel(m, "LanguageModel");
+
+    nb::class_<LanguageModelExample>(m, "LanguageModelExample")
+        .def(nb::init<>())
+        .def_rw("input_token_ids", &LanguageModelExample::inputTokenIds)
+        .def_rw("target_token_ids", &LanguageModelExample::targetTokenIds)
+        .def_rw("target_one_hot", &LanguageModelExample::targetOneHot);
+
+    nb::class_<LanguageModelCache>(m, "LanguageModelCache")
+        .def(nb::init<>());
+
+    nb::class_<LanguageModelGradients>(m, "LanguageModelGradients")
+        .def(nb::init<>())
+        .def_rw("token_embedding", &LanguageModelGradients::tokenEmbedding)
+        .def_rw("final_norm_gamma", &LanguageModelGradients::finalNormGamma)
+        .def_rw("projection_weight", &LanguageModelGradients::projectionWeight)
+        .def_rw("projection_bias", &LanguageModelGradients::projectionBias)
+        .def(
+            "block_gradients",
+            [](LanguageModelGradients& gradients, size_t index) -> TransformerBlockGradients& {
+                if (index >= gradients.blocks.size())
+                    throw std::out_of_range("LanguageModelGradients.block_gradients index");
+                return gradients.blocks[index];
+            },
+            nb::arg("index"),
+            nb::rv_policy::reference_internal)
+        .def_prop_ro(
+            "block_count",
+            [](const LanguageModelGradients& gradients) { return gradients.blocks.size(); })
+        .def_static("zeros_from", &LanguageModelGradients::zerosFrom, nb::arg("model"))
+        .def("zero_in_place", &LanguageModelGradients::zeroInPlace)
+        .def("add_in_place", &LanguageModelGradients::addInPlace, nb::arg("other"))
+        .def("scale_in_place", &LanguageModelGradients::scaleInPlace, nb::arg("scalar"));
+
     nb::class_<LanguageModelDataset>(m, "LanguageModelDataset")
         .def(nb::init<>())
         .def_static(
@@ -188,11 +231,41 @@ NB_MODULE(_core, m) {
             nb::arg("maximum_token_count") = 0,
             nb::arg("build_one_hot") = false,
             "Encode texts (BPETokenizer or HfTokenizer) and build shifted next-token examples")
+        .def_static(
+            "from_token_ids",
+            &LanguageModelDataset::fromTokenIds,
+            nb::arg("token_ids"),
+            nb::arg("vocabulary_size"),
+            nb::arg("build_one_hot") = true,
+            "Shift one token sequence into a LanguageModelExample")
+        .def_static(
+            "make_one_hot_sequence",
+            &LanguageModelDataset::makeOneHotSequence,
+            nb::arg("target_token_ids"),
+            nb::arg("vocabulary_size"))
         .def_prop_ro("size", &LanguageModelDataset::size)
         .def_prop_ro("total_prediction_count", &LanguageModelDataset::totalPredictionCount)
-        .def_rw("vocabulary_size", &LanguageModelDataset::vocabularySize);
+        .def_rw("vocabulary_size", &LanguageModelDataset::vocabularySize)
+        .def_prop_ro(
+            "examples",
+            [](LanguageModelDataset& dataset) -> std::vector<LanguageModelExample>& {
+                return dataset.examples;
+            },
+            nb::rv_policy::reference_internal)
+        .def(
+            "__len__",
+            [](const LanguageModelDataset& dataset) { return dataset.examples.size(); })
+        .def(
+            "__getitem__",
+            [](LanguageModelDataset& dataset, size_t index) -> LanguageModelExample& {
+                if (index >= dataset.examples.size())
+                    throw std::out_of_range("LanguageModelDataset index");
+                return dataset.examples[index];
+            },
+            nb::arg("index"),
+            nb::rv_policy::reference_internal);
 
-    nb::class_<LanguageModel>(m, "LanguageModel")
+    languageModel
         .def(
             "__init__",
             [](LanguageModel* self,
@@ -314,6 +387,23 @@ NB_MODULE(_core, m) {
             nb::arg("warmup_steps") = 3,
             nb::arg("timed_steps") = 8,
             "Synthetic packed-train throughput probe (tok/s)")
+        .def(
+            "set_prefer_mixed_precision",
+            &LanguageModel::setCudaPreferMixedPrecision,
+            nb::arg("enabled"))
+        .def(
+            "set_muon_ns_steps",
+            &LanguageModel::setCudaMuonNsSteps,
+            nb::arg("steps"))
+        .def(
+            "set_logit_chunk_rows",
+            &LanguageModel::setCudaLogitChunkRows,
+            nb::arg("rows"))
+        .def(
+            "set_tie_embedding",
+            &LanguageModel::setTieEmbeddingProjection,
+            nb::arg("enabled"))
+        .def("sync_device", &LanguageModel::syncDevice)
         .def_prop_ro("cuda_enabled", &LanguageModel::cudaEnabled)
         .def_prop_ro("cuda_train_enabled", &LanguageModel::cudaTrainEnabled)
         .def_prop_ro("parameter_count", &LanguageModel::parameterElementCount)
@@ -322,10 +412,66 @@ NB_MODULE(_core, m) {
         .def_prop_ro("use_bias", &LanguageModel::useBias)
         .def_prop_ro("kv_head_count", &LanguageModel::kvHeadCount)
         .def_prop_ro("max_packed_columns", &LanguageModel::cudaMaxPackedColumns)
+        .def_prop_ro(
+            "tie_embedding",
+            [](const LanguageModel& model) { return model.tieEmbeddingProjection; })
+        .def_prop_ro(
+            "max_position",
+            [](const LanguageModel& model) { return model.maximumPositionCount; })
+        .def_prop_ro(
+            "block_count",
+            [](const LanguageModel& model) { return model.blocks.size(); })
+        .def_prop_ro(
+            "optimizer",
+            [](LanguageModel& model) -> Adam& { return model.optimizer; },
+            nb::rv_policy::reference_internal)
+        .def_prop_ro(
+            "token_embedding",
+            [](LanguageModel& model) -> Embedding& { return model.tokenEmbedding; },
+            nb::rv_policy::reference_internal)
+        .def_prop_ro(
+            "final_norm",
+            [](LanguageModel& model) -> RMSNorm& { return model.finalNorm; },
+            nb::rv_policy::reference_internal)
+        .def_prop_ro(
+            "lm_head_weight",
+            [](LanguageModel& model) -> Matrix& { return model.lmHeadWeight(); },
+            nb::rv_policy::reference_internal)
+        .def(
+            "block",
+            [](LanguageModel& model, size_t index) -> TransformerBlock& {
+                if (index >= model.blocks.size())
+                    throw std::out_of_range("LanguageModel.block index");
+                return model.blocks[index];
+            },
+            nb::arg("index"),
+            nb::rv_policy::reference_internal,
+            "Reference to transformer block i")
+        .def(
+            "forward",
+            &LanguageModel::forward,
+            nb::arg("token_ids"),
+            "Causal LM logits (vocab x seq); uses CUDA mirror when enable_cuda() is active")
+        .def(
+            "example_loss",
+            &LanguageModel::exampleLoss,
+            nb::arg("example"))
         .def(
             "average_loss",
             &LanguageModel::averageLoss,
             nb::arg("dataset"))
+        .def(
+            "accumulate_example",
+            &LanguageModel::accumulateExample,
+            nb::arg("example"),
+            nb::arg("gradients"),
+            nb::arg("cache"),
+            "Host fwd+bwd into gradients (Softmax+CE). Allocate with LanguageModelGradients.zeros_from first.")
+        .def(
+            "apply_gradients",
+            &LanguageModel::applyGradients,
+            nb::arg("gradients"),
+            "One host Adam step from gradients; marks CUDA mirror stale when present")
         .def(
             "train",
             [](LanguageModel& model,

@@ -10,6 +10,7 @@ API reference: [docs/python.md](../docs/python.md) · [docs/cpp.md](../docs/cpp.
 | ------ | ------------ |
 | [`python/train_tiny.py`](python/train_tiny.py) | In-memory toy corpus → train → `.snlm` + `.safetensors` |
 | [`python/train_from_config.py`](python/train_from_config.py) | Size model from [`configs/tiny.json`](configs/tiny.json) → train → config + weights |
+| [`python/custom_train_loop.py`](python/custom_train_loop.py) | Mid-level ops: `forward` / `accumulate_example` / `Adam` (no `train()`) |
 | [`python/generate.py`](python/generate.py) | Load checkpoint (or train toy) → sample |
 | [`python/train_jsonl.py`](python/train_jsonl.py) | Load JSONL texts → train → save weights |
 | [`python/finetune_hf.py`](python/finetune_hf.py) | HF import → JSONL fine-tune → `save_huggingface` export (`--demo` offline stub) |
@@ -18,6 +19,7 @@ API reference: [docs/python.md](../docs/python.md) · [docs/cpp.md](../docs/cpp.
 pip install -e . --no-build-isolation   # from repo root
 python examples/python/train_tiny.py
 python examples/python/train_from_config.py --config examples/configs/tiny.yaml
+python examples/python/custom_train_loop.py
 python examples/python/generate.py tiny_demo.snlm "the cat"
 python examples/python/train_jsonl.py examples/data/sample.jsonl --out run.safetensors
 python examples/python/finetune_hf.py --demo --out hf_demo_out

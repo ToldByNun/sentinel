@@ -1,7 +1,8 @@
 """Sentinel — C++/CUDA full-train causal LM (pip: sentinel-lm).
 
-Public surface: BPETokenizer, HfTokenizer, LanguageModelDataset, LanguageModel,
-SentinelModelConfig, ActivationCheckpointMode, SbaoMode, SpulseCoverage, cuda_available.
+High-level: LanguageModel.train / generate / checkpoints.
+Mid-level ops: Matrix, Softmax, CrossEntropy, Adam, Embedding, TransformerBlock,
+accumulate_example / apply_gradients for custom host train loops.
 
 API docs: https://github.com/ToldByNun/sentinel/blob/main/docs/python.md
 """
@@ -11,7 +12,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import Any, Union
+from typing import Any, Sequence, Union
 
 
 def _add_cuda_dll_directories() -> None:
@@ -23,7 +24,6 @@ def _add_cuda_dll_directories() -> None:
         value = os.environ.get(key)
         if value:
             roots.append(value)
-    # CUDA 13+ often keeps cublasLt under bin\\x64; older layouts use bin.
     versioned = [
         v
         for k, v in os.environ.items()
@@ -60,16 +60,55 @@ _add_cuda_dll_directories()
 
 from ._core import (  # noqa: E402
     ActivationCheckpointMode,
-    SbaoMode,
-    SpulseCoverage,
+    Adam,
+    AdamState,
     BPETokenizer,
+    CrossEntropy,
+    Embedding,
     HfTokenizer,
     LanguageModel,
+    LanguageModelCache,
     LanguageModelDataset,
+    LanguageModelExample,
+    LanguageModelGradients,
+    Matrix,
+    RMSNorm,
+    RMSNormCache,
+    SGD,
+    SbaoMode,
     SentinelModelConfig,
+    SiLU,
+    Softmax,
+    SpulseCoverage,
+    SpulseMomentumStorage,
+    TransformerBlock,
+    TransformerBlockCache,
+    TransformerBlockGradients,
     cuda_available,
     __version__ as _core_version,
 )
+
+
+def _matrix_to_numpy(self: Matrix):
+    """Copy into a numpy float32 array shaped (rows, cols). Requires numpy."""
+    import numpy as np
+
+    return np.asarray(self.to_list(), dtype=np.float32).reshape(self.rows, self.cols)
+
+
+def _matrix_from_numpy(cls, array) -> Matrix:
+    """Build a Matrix from an array-like (rows, cols) float buffer. Requires numpy."""
+    import numpy as np
+
+    arr = np.asarray(array, dtype=np.float32)
+    if arr.ndim != 2:
+        raise ValueError("Matrix.from_numpy expects a 2D array")
+    rows, cols = int(arr.shape[0]), int(arr.shape[1])
+    return cls.from_list(rows, cols, arr.reshape(-1).tolist())
+
+
+Matrix.to_numpy = _matrix_to_numpy  # type: ignore[attr-defined]
+Matrix.from_numpy = classmethod(_matrix_from_numpy)  # type: ignore[attr-defined]
 
 
 def _language_model_from_config(
@@ -93,15 +132,59 @@ def _language_model_from_config(
 
 LanguageModel.from_config = staticmethod(_language_model_from_config)  # type: ignore[attr-defined]
 
+
+def _language_model_train_step(
+    self: LanguageModel,
+    examples: Sequence[LanguageModelExample],
+    *,
+    grad_scale: float | None = None,
+) -> float:
+    """Host microstep: accumulate examples → mean grads → Adam.
+
+    Returns mean loss. Prefer this (or accumulate_example/apply_gradients) over
+    enable_cuda_train when writing custom loops; CUDA packed train stays on train().
+    """
+    if not examples:
+        return 0.0
+    grads = LanguageModelGradients.zeros_from(self)
+    cache = LanguageModelCache()
+    total = 0.0
+    for example in examples:
+        total += self.accumulate_example(example, grads, cache)
+    scale = (1.0 / float(len(examples))) if grad_scale is None else float(grad_scale)
+    grads.scale_in_place(scale)
+    self.apply_gradients(grads)
+    return total / float(len(examples))
+
+
+LanguageModel.train_step = _language_model_train_step  # type: ignore[attr-defined]
+
 __all__ = [
     "ActivationCheckpointMode",
-    "SbaoMode",
-    "SpulseCoverage",
+    "Adam",
+    "AdamState",
     "BPETokenizer",
+    "CrossEntropy",
+    "Embedding",
     "HfTokenizer",
     "LanguageModel",
+    "LanguageModelCache",
     "LanguageModelDataset",
+    "LanguageModelExample",
+    "LanguageModelGradients",
+    "Matrix",
+    "RMSNorm",
+    "RMSNormCache",
+    "SGD",
+    "SbaoMode",
     "SentinelModelConfig",
+    "SiLU",
+    "Softmax",
+    "SpulseCoverage",
+    "SpulseMomentumStorage",
+    "TransformerBlock",
+    "TransformerBlockCache",
+    "TransformerBlockGradients",
     "cuda_available",
     "__version__",
 ]
